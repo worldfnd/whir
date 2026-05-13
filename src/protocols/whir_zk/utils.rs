@@ -472,6 +472,7 @@ pub(super) fn gamma_to_f_hat_indices<F: FftField>(
 }
 
 /// Compute eq_weights from r_bar. Shared helper to avoid redundant computation.
+#[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
 pub(super) fn compute_eq_weights<F: FftField>(r_bar: &[F]) -> Vec<F> {
     let len = 1usize << r_bar.len();
     let mut buf = vec![F::ONE; len];

@@ -6,6 +6,8 @@
 
 use ark_ff::FftField;
 use ark_std::rand::{CryptoRng, RngCore};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 use super::RoundConfig;
 use crate::{
@@ -64,6 +66,7 @@ pub struct ProveRoundResult<F: FftField> {
 ///
 /// Commits the current vector, opens the previous round's witness, accumulates
 /// STIR constraints (OOD + in-domain), and runs the round's sumcheck.
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn prove_round<F, H, R>(
     round_config: &RoundConfig<F>,
     prev_round_config: &RoundConfig<F>,
@@ -123,6 +126,7 @@ where
 ///
 /// Sends the (small) final folded vector directly, runs PoW, opens the last
 /// commitment, and runs the final sumcheck.
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn prove_final_round<F, H, R>(
     final_config: &FinalRoundConfig<'_, F>,
     last_round_config: &RoundConfig<F>,
@@ -270,6 +274,7 @@ pub struct ProveRemainingResult<F> {
 /// After the caller handles round 0 (which may differ between base WHIR and
 /// zkWHIR 2.0), this function executes all subsequent fold-commit-sumcheck
 /// rounds and the final direct-send round.
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 pub fn prove_remaining_rounds<F, H, R>(
     round_configs: &[RoundConfig<F>],
     final_config: &FinalRoundConfig<'_, F>,

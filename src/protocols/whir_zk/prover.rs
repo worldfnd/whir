@@ -37,6 +37,7 @@ use crate::{
 /// Send m̃ and ĝ_i evaluations at a single point z.
 ///
 /// Used at OOD, STIR, and Γ points in Steps 5-6.
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn send_blinding_evals<F, H, R>(
     prover_state: &mut ProverState<H, R>,
     z: F,
@@ -56,6 +57,7 @@ fn send_blinding_evals<F, H, R>(
         prover_state.prover_message(&g_eval);
     }
 }
+
 
 /// Intermediate result from proving the blinded polynomial (Steps 2-6).
 ///
@@ -115,6 +117,7 @@ where
 {
     /// Steps 2-4: Blinding claims, multi-polynomial batching, form f_zk, initial sumcheck.
     #[allow(clippy::too_many_lines)]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     fn prepare_and_sumcheck(
         &mut self,
         vectors: Vec<Cow<'_, [F]>>,
@@ -273,6 +276,7 @@ where
 
     /// Accumulate STIR constraints from OOD and in-domain evaluations into the
     /// sumcheck state and transcript.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     fn accumulate_stir_constraints(
         prover_state: &mut ProverState<H, R>,
         state: &mut whir::rounds::SumcheckState<'_, F>,
@@ -315,6 +319,7 @@ where
     /// Takes ownership of `f_hat_polys` so it can be freed after OOD evaluations,
     /// before the memory-intensive WHIR rounds begin.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     fn ood_stir_and_rounds(
         &mut self,
         state: &mut whir::rounds::SumcheckState<'_, F>,
@@ -434,6 +439,7 @@ where
     /// Step 6: Γ consistency check.
     ///
     /// Opens [[f̂]] at Γ indices and sends blinding evaluations for each γ ∈ Γ.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     fn gamma_check(
         &mut self,
         f_hat_witness: &irs_commit::Witness<F, F>,
@@ -467,6 +473,7 @@ impl<F: FftField> Config<F> {
     /// before the memory-intensive WHIR rounds begin.
     /// Other witness fields are borrowed; the caller frees them before Step 7.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     fn prove_blinded_polynomial<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
@@ -571,6 +578,7 @@ impl<F: FftField> Config<F> {
     /// P sends evaluation matrix E[i][j] = ⟨wᵢ, vⱼ⟩.
     /// V checks diagonal: E[i][i] = Σ_p τ^{p+1} · claim_i_p (from Λ).
     /// Then run second WHIR instance to prove batch opening claims.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     fn prove_blinding_polynomial<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,

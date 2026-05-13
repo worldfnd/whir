@@ -1,8 +1,11 @@
 use ark_ff::Field;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 use crate::algebra::embedding::{Embedding, Identity};
 
 /// Evaluate the multi-linear extension of `evals` in `point`.
+#[cfg_attr(feature = "tracing", instrument(skip_all, fields(n = evals.len())))]
 pub fn multilinear_extend<F: Field>(evals: &[F], point: &[F]) -> F {
     mixed_multilinear_extend(&Identity::<F>::new(), evals, point)
 }
