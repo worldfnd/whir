@@ -1,4 +1,6 @@
 use ark_ff::FftField;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use super::Config;
 use crate::algebra::{geometric_accumulate, geometric_sequence};
@@ -209,7 +211,11 @@ pub(super) fn build_beq_tables<F: FftField>(
     let num_points = lambda_z_points.len();
     let mut tables = vec![vec![F::ZERO; half_size]; num_g_polys];
 
-    for (i, table) in tables.iter_mut().enumerate() {
+    #[cfg(feature = "parallel")]
+    let iter = tables.par_iter_mut().enumerate();
+    #[cfg(not(feature = "parallel"))]
+    let iter = tables.iter_mut().enumerate();
+    iter.for_each(|(i, table)| {
         let start_i = if i == 0 { 0 } else { (i - 1) * ell + rem };
 
         // Bit-window decomposition relative to c|m boundary at position num_folding_vars
@@ -273,7 +279,7 @@ pub(super) fn build_beq_tables<F: FftField>(
         } else {
             *table = m_inner;
         }
-    }
+    });
 
     tables
 }
