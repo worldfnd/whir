@@ -249,6 +249,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
+            buffer::CpuBuffer,
             fields::Field64,
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
@@ -350,7 +351,12 @@ mod tests {
             .session(&tag)
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = params.commit(&mut prover_state, vectors);
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| CpuBuffer::from_slice(v))
+            .collect::<Vec<_>>();
+        let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
+        let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
             &mut prover_state,
             vectors
@@ -442,7 +448,12 @@ mod tests {
             .session(&format!("zk-stage1-negative {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = params.commit(&mut prover_state, &vectors);
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| CpuBuffer::from_slice(v))
+            .collect::<Vec<_>>();
+        let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
+        let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
             &mut prover_state,
             vectors
@@ -496,7 +507,12 @@ mod tests {
             .session(&format!("zk-stage1-tamper {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = params.commit(&mut prover_state, &vectors);
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| CpuBuffer::from_slice(v))
+            .collect::<Vec<_>>();
+        let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
+        let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
             &mut prover_state,
             vectors
@@ -557,7 +573,8 @@ mod tests {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut prover_state = ProverState::new_std(&ds);
-            let witness = params.commit(&mut prover_state, &[&vector]);
+            let vector_buffer = CpuBuffer::from_slice(&vector);
+            let witness = params.commit(&mut prover_state, &[&vector_buffer]);
             let _ = params.prove(
                 &mut prover_state,
                 vec![Cow::Borrowed(&vector)],

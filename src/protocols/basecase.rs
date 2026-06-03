@@ -11,8 +11,8 @@ use spongefish::{Decoding, VerificationResult};
 
 use crate::{
     algebra::{
-        dot, embedding::Identity, multilinear_extend, random_vector, scalar_mul_add_new,
-        univariate_evaluate,
+        buffer::CpuBuffer, dot, embedding::Identity, multilinear_extend, random_vector,
+        scalar_mul_add_new, univariate_evaluate,
     },
     hash::Hash,
     protocols::{irs_commit, sumcheck},
@@ -79,7 +79,7 @@ impl<F: Field> Config<F> {
         // Even more trivial non-zk protocol: send f and r directly.
         if !self.masked {
             prover_state.prover_messages(&vector);
-            prover_state.prover_messages(&witness.masks);
+            prover_state.prover_messages(witness.masks.as_slice());
             let _ = self.commit.open(prover_state, &[witness]);
             let point = self
                 .sumcheck
@@ -94,9 +94,10 @@ impl<F: Field> Config<F> {
 
         // Create masking vector.
         let mask = random_vector(prover_state.rng(), vector.len());
+        let mask_buffer = CpuBuffer::from_slice(&mask);
 
         // Commit to the masking vector.
-        let mask_witness = self.commit.commit(prover_state, &[&mask]);
+        let mask_witness = self.commit.commit(prover_state, &[&mask_buffer]);
 
         // Compute and send linear form of mask (μ' in paper).
         let mask_sum = dot(&mask, &covector);
@@ -109,7 +110,11 @@ impl<F: Field> Config<F> {
         prover_state.prover_messages(&masked_vector);
 
         // Send combined IRS randomness. (r^* in paper)
-        let masked_masks = scalar_mul_add_new(&mask_witness.masks, mask_rlc, &witness.masks);
+        let masked_masks = scalar_mul_add_new(
+            mask_witness.masks.as_slice(),
+            mask_rlc,
+            witness.masks.as_slice(),
+        );
         prover_state.prover_messages(&masked_masks);
 
         // Open the commitment and mask simultaneously.
@@ -284,7 +289,8 @@ mod tests {
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit.commit(&mut prover_state, &[&vector]);
+        let vector_buffer = CpuBuffer::from_slice(&vector);
+        let witness = config.commit.commit(&mut prover_state, &[&vector_buffer]);
         let prover_result = config.prove(
             &mut prover_state,
             vector.clone(),

@@ -45,7 +45,10 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, R
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    algebra::{embedding::Identity, random_vector, scalar_mul_add_new, univariate_evaluate},
+    algebra::{
+        buffer::CpuBuffer, embedding::Identity, random_vector, scalar_mul_add_new,
+        univariate_evaluate,
+    },
     hash::Hash,
     protocols::irs_commit::{
         Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness,
@@ -129,11 +132,19 @@ impl<F: Field> Config<F> {
             .map(|_| random_vector(prover_state.rng(), self.c_zk_commit.vector_size))
             .collect();
 
-        // Tree layout: [originals..., freshes...]
-        let all_vectors: Vec<&[F]> = original_msgs
+        let original_buffers = original_msgs
             .iter()
-            .chain(fresh_msgs.iter())
-            .map(|v| v.as_slice())
+            .map(|msg| CpuBuffer::from_slice(msg))
+            .collect::<Vec<_>>();
+        let fresh_buffers = fresh_msgs
+            .iter()
+            .map(|msg| CpuBuffer::from_slice(msg))
+            .collect::<Vec<_>>();
+
+        // Tree layout: [originals..., freshes...]
+        let all_vectors: Vec<&CpuBuffer<F>> = original_buffers
+            .iter()
+            .chain(fresh_buffers.iter())
             .collect();
 
         let mask_witness = self.c_zk_commit.commit(prover_state, &all_vectors);
@@ -180,10 +191,8 @@ impl<F: Field> Config<F> {
         // Step 2: compute and send combined polynomials + IRS randomness
         let irs_masks_per_vector =
             self.c_zk_commit.mask_length * self.c_zk_commit.interleaving_depth;
-        assert_eq!(
-            witness.mask_witness.masks.len(),
-            2 * self.num_masks * irs_masks_per_vector
-        );
+        let irs_masks = witness.mask_witness.masks.as_slice();
+        assert_eq!(irs_masks.len(), 2 * self.num_masks * irs_masks_per_vector);
         for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()
             .zip(witness.fresh_msgs.iter())
@@ -195,10 +204,8 @@ impl<F: Field> Config<F> {
 
             // r*_i = r'_i + γ · r_i
             if irs_masks_per_vector > 0 {
-                let orig_r = &witness.mask_witness.masks
-                    [i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
-                let fresh_r = &witness.mask_witness.masks[(self.num_masks + i)
-                    * irs_masks_per_vector
+                let orig_r = &irs_masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
+                let fresh_r = &irs_masks[(self.num_masks + i) * irs_masks_per_vector
                     ..(self.num_masks + i + 1) * irs_masks_per_vector];
                 let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
                 prover_state.prover_messages(&combined_r);
@@ -455,6 +462,7 @@ mod tests {
         let gamma: F = prover_state.verifier_message();
         let irs_masks_per_vector =
             config.c_zk_commit.mask_length * config.c_zk_commit.interleaving_depth;
+        let irs_masks = witness.mask_witness.masks.as_slice();
 
         for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()
@@ -468,10 +476,8 @@ mod tests {
             prover_state.prover_messages(&combined_msg);
 
             if irs_masks_per_vector > 0 {
-                let orig_r = &witness.mask_witness.masks
-                    [i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
-                let fresh_r = &witness.mask_witness.masks[(config.num_masks + i)
-                    * irs_masks_per_vector
+                let orig_r = &irs_masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
+                let fresh_r = &irs_masks[(config.num_masks + i) * irs_masks_per_vector
                     ..(config.num_masks + i + 1) * irs_masks_per_vector];
                 let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
                 prover_state.prover_messages(&combined_r);

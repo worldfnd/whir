@@ -6,6 +6,7 @@ use ark_std::rand::distributions::{Distribution, Standard};
 use clap::Parser;
 use whir::{
     algebra::{
+        buffer::CpuBuffer,
         embedding::{Basefield, Embedding, Identity},
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
@@ -148,9 +149,10 @@ where
     }
 
     let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
+    let vector_buffer = CpuBuffer::from_slice(&vector);
 
     let whir_commit_time = Instant::now();
-    let witness = params.commit(&mut prover_state, &[&vector]);
+    let witness = params.commit(&mut prover_state, &[&vector_buffer]);
     let whir_commit_time = whir_commit_time.elapsed();
 
     // Allocate constraints
@@ -314,7 +316,8 @@ where
     }
 
     let whir_commit_time = Instant::now();
-    let witness = params.commit(&mut prover_state, &[vector.as_slice()]);
+    let vector_buffer = CpuBuffer::from_slice(&vector);
+    let witness = params.commit(&mut prover_state, &[&vector_buffer]);
     let whir_commit_time = whir_commit_time.elapsed();
 
     let whir_prove_time = Instant::now();

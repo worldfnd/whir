@@ -20,6 +20,7 @@
 use std::{
     f64::{self, consts::LOG2_10},
     fmt,
+    marker::PhantomData,
     ops::Neg,
 };
 
@@ -32,8 +33,13 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
-        mixed_univariate_evaluate, ntt, random_vector,
+        buffer::{BufferOps, CpuBuffer, CpuMatrix, MatrixBufferOps},
+        dot,
+        embedding::Embedding,
+        fields::FieldWithSize,
+        lift,
+        linear_form::UnivariateEvaluation,
+        ntt,
     },
     engines::EngineId,
     hash::Hash,
@@ -43,7 +49,7 @@ use crate::{
         VerifierMessage, VerifierState,
     },
     type_info::Typed,
-    utils::{chunks_exact_or_empty, zip_strict},
+    utils::zip_strict,
     verify,
 };
 
@@ -92,14 +98,17 @@ pub struct Config<M: Embedding> {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
-pub struct Witness<F: Field, G = F>
+pub struct Witness<F: Field, G = F, Masks = CpuBuffer<F>, Matrix = CpuMatrix<F>>
 where
     G: Field,
+    Masks: BufferOps<F>,
+    Matrix: MatrixBufferOps<F>,
 {
-    pub masks: Vec<F>,
-    pub matrix: Vec<F>,
-    pub matrix_witness: matrix_commit::Witness,
+    pub masks: Masks,
+    pub matrix: Matrix,
+    pub matrix_witness: Matrix::Witness,
     pub out_of_domain: Evaluations<G>,
+    source_field: PhantomData<F>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
@@ -289,12 +298,15 @@ impl<M: Embedding> Config<M> {
 
     /// Commit to one or more vectors.
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
-    pub fn commit<H, R>(
+    pub fn commit<H, R, B>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&[M::Source]],
-    ) -> Witness<M::Source, M::Target>
+        vectors: &[&B],
+    ) -> Witness<M::Source, M::Target, B, B::Matrix>
     where
+        B: BufferOps<M::Source>,
+        <B::Matrix as MatrixBufferOps<M::Source>>::Witness:
+            Clone + PartialEq + Eq + PartialOrd + Ord + fmt::Debug + std::hash::Hash + Default,
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -310,18 +322,17 @@ impl<M: Embedding> Config<M> {
         assert_eq!(vectors.len(), self.num_vectors);
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
-        // Generate random mask
-        let masks = random_vector(prover_state.rng(), self.mask_length * self.num_messages());
-
-        // Interleaved RS Encode the vectors
-        let messages = vectors
-            .iter()
-            .flat_map(|v| chunks_exact_or_empty(v, self.message_length(), self.interleaving_depth))
-            .collect::<Vec<_>>();
-        let matrix = ntt::interleaved_rs_encode(&messages, &masks, self.codeword_length);
+        let masks = B::random(prover_state.rng(), self.mask_length * self.num_messages());
+        let matrix = B::interleaved_rs_encode(
+            vectors,
+            &masks,
+            self.message_length(),
+            self.interleaving_depth,
+            self.codeword_length,
+        );
 
         // Commit to the matrix
-        let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
+        let matrix_witness = matrix.commit_rows(&self.matrix_commit, prover_state);
 
         // Handle out-of-domain points and values
         // TODO : Remove this logic after main whir protocol is updated
@@ -332,7 +343,7 @@ impl<M: Embedding> Config<M> {
         let mut oods_matrix = Vec::with_capacity(self.out_domain_samples * self.num_vectors);
         for &point in &oods_points {
             for &vector in vectors {
-                let value = mixed_univariate_evaluate(&*self.embedding, vector, point);
+                let value = vector.mixed_univariate_evaluate(&*self.embedding, point);
                 prover_state.prover_message(&value);
                 oods_matrix.push(value);
             }
@@ -346,6 +357,7 @@ impl<M: Embedding> Config<M> {
                 points: oods_points,
                 matrix: oods_matrix,
             },
+            source_field: PhantomData,
         }
     }
 
@@ -382,12 +394,14 @@ impl<M: Embedding> Config<M> {
     /// When there are multiple openings, the evaluation matrices will
     /// be horizontally concatenated.
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
-    pub fn open<H, R>(
+    pub fn open<H, R, Masks, Matrix>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        witnesses: &[&Witness<M::Source, M::Target>],
+        witnesses: &[&Witness<M::Source, M::Target, Masks, Matrix>],
     ) -> Evaluations<M::Source>
     where
+        Masks: BufferOps<M::Source>,
+        Matrix: MatrixBufferOps<M::Source>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
         u8: Decoding<[H::U]>,
@@ -409,22 +423,23 @@ impl<M: Embedding> Config<M> {
         // and collect them in the evaluation matrix.
         let stride = witnesses.len() * self.num_cols();
         let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
-        let mut submatrix = Vec::with_capacity(indices.len() * self.num_cols());
         let mut matrix_col_offset = 0;
         for witness in witnesses {
-            submatrix.clear();
-            for (point_index, &code_index) in indices.iter().enumerate() {
-                let row = &witness.matrix
-                    [code_index * self.num_cols()..(code_index + 1) * self.num_cols()];
-                submatrix.extend_from_slice(row);
-
-                let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
-                matrix_row[matrix_col_offset..matrix_col_offset + self.num_cols()]
-                    .copy_from_slice(row);
+            let submatrix = witness.matrix.read_rows(&indices);
+            if self.num_cols() != 0 {
+                for (point_index, row) in submatrix.chunks_exact(self.num_cols()).enumerate() {
+                    let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
+                    matrix_row[matrix_col_offset..matrix_col_offset + self.num_cols()]
+                        .copy_from_slice(row);
+                }
             }
             prover_state.prover_hint_ark(&submatrix);
-            self.matrix_commit
-                .open(prover_state, &witness.matrix_witness, &indices);
+            witness.matrix.open_rows(
+                &self.matrix_commit,
+                prover_state,
+                &witness.matrix_witness,
+                &indices,
+            );
             matrix_col_offset += self.num_cols();
         }
 
@@ -511,7 +526,13 @@ impl<G: Field> Commitment<G> {
     }
 }
 
-impl<F: Field, G: Field> Witness<F, G> {
+impl<F, G, Masks, Matrix> Witness<F, G, Masks, Matrix>
+where
+    F: Field,
+    G: Field,
+    Masks: BufferOps<F>,
+    Matrix: MatrixBufferOps<F>,
+{
     /// Returns the out-of-domain evaluations.
     pub const fn out_of_domain(&self) -> &Evaluations<G> {
         &self.out_of_domain
@@ -642,7 +663,7 @@ pub(crate) mod tests {
     use crate::{
         algebra::{
             embedding::{Basefield, Compose, Frobenius, Identity},
-            fields,
+            fields, mixed_univariate_evaluate,
             ntt::NTT,
             random_vector, univariate_evaluate,
         },
@@ -728,10 +749,12 @@ pub(crate) mod tests {
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit(
-            &mut prover_state,
-            &vectors.iter().map(|p| p.as_slice()).collect::<Vec<_>>(),
-        );
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| CpuBuffer::from_slice(v))
+            .collect::<Vec<_>>();
+        let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
+        let witness = config.commit(&mut prover_state, &vector_refs);
         assert_eq!(
             witness.out_of_domain().points.len(),
             config.out_domain_samples

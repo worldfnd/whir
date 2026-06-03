@@ -8,6 +8,7 @@ use tracing::instrument;
 use super::{Config, Witness};
 use crate::{
     algebra::{
+        buffer::CpuBuffer,
         dot,
         embedding::Embedding,
         eq_weights, lift,
@@ -220,7 +221,10 @@ impl<M: Embedding> Config<M> {
         // Execute standard WHIR rounds on the batched vectors
         for (round_index, round_config) in self.round_configs.iter().enumerate() {
             // Commit to the vector, this generates out-of-domain evaluations.
-            let new_witness = round_config.irs_committer.commit(prover_state, &[&vector]);
+            let vector_buffer = CpuBuffer::from_slice(&vector);
+            let new_witness = round_config
+                .irs_committer
+                .commit(prover_state, &[&vector_buffer]);
 
             // Proof of work before in-domain challenges
             round_config.pow.prove(prover_state);

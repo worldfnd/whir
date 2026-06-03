@@ -1,3 +1,4 @@
+pub mod buffer;
 pub mod embedding;
 pub mod fields;
 pub mod linear_form;

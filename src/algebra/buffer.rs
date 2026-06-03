@@ -57,25 +57,9 @@ pub trait BufferOps<F: Field>: Clone {
     fn dot(&self, other: &Self) -> F;
 }
 
-fn interleaved_rs_encode_slices<F: Field + 'static>(
-    vectors: &[&[F]],
-    masks: &[F],
-    message_length: usize,
-    interleaving_depth: usize,
-    codeword_length: usize,
-) -> CpuMatrix<F> {
-    let messages = vectors
-        .iter()
-        .flat_map(|v| chunks_exact_or_empty(v, message_length, interleaving_depth))
-        .collect::<Vec<_>>();
-    CpuMatrix::from_vec(
-        ntt::interleaved_rs_encode(&messages, masks, codeword_length),
-        codeword_length,
-        vectors.len() * interleaving_depth,
-    )
-}
-
 pub trait MatrixBufferOps<F: Field> {
+    type Witness;
+
     fn len(&self) -> usize;
     fn num_rows(&self) -> usize;
     fn num_cols(&self) -> usize;
@@ -84,8 +68,20 @@ pub trait MatrixBufferOps<F: Field> {
         &self,
         config: &matrix_commit::Config<F>,
         prover_state: &mut ProverState<H, R>,
-    ) -> matrix_commit::Witness
+    ) -> Self::Witness
     where
+        F: TypeInfo + matrix_commit::Encodable + Send + Sync,
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Hash: ProverMessage<[H::U]>;
+
+    fn open_rows<H, R>(
+        &self,
+        config: &matrix_commit::Config<F>,
+        prover_state: &mut ProverState<H, R>,
+        witness: &Self::Witness,
+        indices: &[usize],
+    ) where
         F: TypeInfo + matrix_commit::Encodable + Send + Sync,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -133,6 +129,8 @@ impl<F> MatrixBufferOps<F> for CpuMatrix<F>
 where
     F: Field + TypeInfo + matrix_commit::Encodable + Send + Sync,
 {
+    type Witness = matrix_commit::Witness;
+
     fn len(&self) -> usize {
         self.data.len()
     }
@@ -149,7 +147,7 @@ where
         &self,
         config: &matrix_commit::Config<F>,
         prover_state: &mut ProverState<H, R>,
-    ) -> matrix_commit::Witness
+    ) -> Self::Witness
     where
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -158,6 +156,20 @@ where
         assert_eq!(config.num_rows(), self.num_rows);
         assert_eq!(config.num_cols, self.num_cols);
         config.commit(prover_state, &self.data)
+    }
+
+    fn open_rows<H, R>(
+        &self,
+        config: &matrix_commit::Config<F>,
+        prover_state: &mut ProverState<H, R>,
+        witness: &Self::Witness,
+        indices: &[usize],
+    ) where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Hash: ProverMessage<[H::U]>,
+    {
+        config.open(prover_state, witness, indices);
     }
 
     fn read_rows(&self, indices: &[usize]) -> Vec<F> {
@@ -169,7 +181,18 @@ where
         rows
     }
 }
-#[derive(Clone)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct CpuBuffer<F: Field> {
     data: Vec<F>,
 }
@@ -185,7 +208,7 @@ impl<F: Field> CpuBuffer<F> {
         }
     }
 
-    fn as_slice(&self) -> &[F] {
+    pub(crate) fn as_slice(&self) -> &[F] {
         self.data.as_slice()
     }
 }
@@ -263,73 +286,20 @@ impl<F: Field> BufferOps<F> for CpuBuffer<F> {
     }
 }
 
-impl<F: Field> BufferOps<F> for Vec<F> {
-    type Buffer<T: Field> = Vec<T>;
-    type Matrix = CpuMatrix<F>;
-
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    fn random<R>(rng: &mut R, length: usize) -> Self
-    where
-        R: RngCore + CryptoRng,
-        Standard: Distribution<F>,
-    {
-        (0..length).map(|_| rng.gen()).collect()
-    }
-
-    fn zero_pad(&mut self) {
-        if !self.is_empty() {
-            self.resize(self.len().next_power_of_two(), F::ZERO);
-        }
-    }
-
-    fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
-        &self,
-        embedding: &M,
-        point: &[M::Target],
-    ) -> M::Target {
-        mixed_multilinear_extend(embedding, self, point)
-    }
-
-    fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
-        &self,
-        embedding: &M,
-        other: &Self::Buffer<T>,
-    ) -> M::Target {
-        mixed_dot(embedding, other, self)
-    }
-
-    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
-        &self,
-        embedding: &M,
-        point: M::Target,
-    ) -> M::Target {
-        mixed_univariate_evaluate(embedding, self, point)
-    }
-
-    fn interleaved_rs_encode(
-        vectors: &[&Self],
-        masks: &Self,
-        message_length: usize,
-        interleaving_depth: usize,
-        codeword_length: usize,
-    ) -> Self::Matrix
-    where
-        F: 'static,
-    {
-        let vectors = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
-        interleaved_rs_encode_slices(
-            &vectors,
-            masks,
-            message_length,
-            interleaving_depth,
-            codeword_length,
-        )
-    }
-
-    fn dot(&self, other: &Self) -> F {
-        self.mixed_dot(&Identity::new(), other)
-    }
+fn interleaved_rs_encode_slices<F: Field + 'static>(
+    vectors: &[&[F]],
+    masks: &[F],
+    message_length: usize,
+    interleaving_depth: usize,
+    codeword_length: usize,
+) -> CpuMatrix<F> {
+    let messages = vectors
+        .iter()
+        .flat_map(|v| chunks_exact_or_empty(v, message_length, interleaving_depth))
+        .collect::<Vec<_>>();
+    CpuMatrix::from_vec(
+        ntt::interleaved_rs_encode(&messages, masks, codeword_length),
+        codeword_length,
+        vectors.len() * interleaving_depth,
+    )
 }

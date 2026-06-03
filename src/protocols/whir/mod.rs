@@ -14,6 +14,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
+        buffer::CpuBuffer,
         embedding::{Embedding, Identity},
         linear_form::LinearForm,
     },
@@ -79,7 +80,7 @@ impl<M: Embedding> Config<M> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&[M::Source]],
+        vectors: &[&CpuBuffer<M::Source>],
     ) -> Witness<M::Target, M>
     where
         Standard: Distribution<M::Source>,
@@ -128,6 +129,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
+            buffer::CpuBuffer,
             embedding::Basefield,
             fields::{Field64, Field64_3},
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
@@ -239,7 +241,8 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
 
         // Commit to the polynomial and generate auxiliary witness data
-        let witness = params.commit(&mut prover_state, &[&vector]);
+        let vector_buffer = CpuBuffer::from_slice(&vector);
+        let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let prove_linear_forms = build_prove_forms(&points, num_variables, true);
 
@@ -380,7 +383,7 @@ mod tests {
                 vec![F::from((i + 1) as u64); num_coeffs]
             })
             .collect();
-        let vec_refs = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+        let vec_refs = vectors.iter().collect::<Vec<_>>();
 
         let points: Vec<_> = (0..num_points_per_poly)
             .map(|_| random_vector(thread_rng(), num_variables))
@@ -401,7 +404,7 @@ mod tests {
             .flat_map(|linear_form| {
                 vec_refs
                     .iter()
-                    .map(|vec| linear_form.evaluate(params.embedding(), vec))
+                    .map(|&vec| linear_form.evaluate(params.embedding(), vec))
             })
             .collect::<Vec<_>>();
 
@@ -412,8 +415,12 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
 
         // Commit to each polynomial and generate witnesses
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| CpuBuffer::from_slice(v))
+            .collect::<Vec<_>>();
         let mut witnesses = Vec::new();
-        for &vec in &vec_refs {
+        for vec in &vector_buffers {
             let witness = params.commit(&mut prover_state, &[vec]);
             witnesses.push(witness);
         }
@@ -569,8 +576,10 @@ mod tests {
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
 
-        let witness1 = params.commit(&mut prover_state, &[&vec1]);
-        let witness2 = params.commit(&mut prover_state, &[&vec2]);
+        let vec1_buffer = CpuBuffer::from_slice(&vec1);
+        let vec2_buffer = CpuBuffer::from_slice(&vec2);
+        let witness1 = params.commit(&mut prover_state, &[&vec1_buffer]);
+        let witness2 = params.commit(&mut prover_state, &[&vec2_buffer]);
 
         let prove_linear_forms = build_prove_forms(&constraint_points, num_variables, false);
 
@@ -651,7 +660,7 @@ mod tests {
         let all_vectors: Vec<Vec<F>> = (0..num_witnesses * batch_size)
             .map(|i| vec![F::from((i + 1) as u64); num_coeffs])
             .collect::<Vec<_>>();
-        let vec_refs = all_vectors.iter().map(|p| p.as_slice()).collect::<Vec<_>>();
+        let vec_refs = all_vectors.iter().collect::<Vec<_>>();
 
         let points: Vec<_> = (0..num_points_per_poly)
             .map(|_| random_vector(thread_rng(), num_variables))
@@ -672,7 +681,7 @@ mod tests {
             .flat_map(|linear_form| {
                 vec_refs
                     .iter()
-                    .map(|vec| linear_form.evaluate(params.embedding(), vec))
+                    .map(|&vec| linear_form.evaluate(params.embedding(), vec))
             })
             .collect::<Vec<_>>();
 
@@ -683,8 +692,13 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
 
         // Commit using commit_batch (stacks batch_size polynomials per witness)
+        let vector_buffers = all_vectors
+            .iter()
+            .map(|v| CpuBuffer::from_slice(v))
+            .collect::<Vec<_>>();
+        let buffer_refs = vector_buffers.iter().collect::<Vec<_>>();
         let mut witnesses = Vec::new();
-        for witness_polys in vec_refs.chunks(batch_size) {
+        for witness_polys in buffer_refs.chunks(batch_size) {
             let witness = params.commit(&mut prover_state, witness_polys);
             witnesses.push(witness);
         }
@@ -793,7 +807,7 @@ mod tests {
         let vectors: Vec<Vec<F>> = (0..batch_size)
             .map(|_| random_vector(thread_rng(), num_coeffs))
             .collect();
-        let vec_refs = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+        let vec_refs = vectors.iter().collect::<Vec<_>>();
 
         // Generate `num_points` random points in the multilinear domain
         let points: Vec<_> = (0..num_points)
@@ -809,7 +823,12 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
 
         // Create a commitment to the polynomial and generate auxiliary witness data
-        let batched_witness = params.commit(&mut prover_state, &vec_refs);
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| CpuBuffer::from_slice(v))
+            .collect::<Vec<_>>();
+        let buffer_refs = vector_buffers.iter().collect::<Vec<_>>();
+        let batched_witness = params.commit(&mut prover_state, &buffer_refs);
 
         // Create a weights matrix and evaluations for each polynomial
         let mut linear_forms: Vec<Box<dyn Evaluate<Basefield<F>>>> = Vec::new();
