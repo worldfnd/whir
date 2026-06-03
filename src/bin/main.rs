@@ -185,8 +185,8 @@ where
     let whir_prove_time = Instant::now();
     let _ = params.prove(
         &mut prover_state,
-        vec![Cow::Borrowed(vector.as_slice())],
-        vec![Cow::Owned(witness)],
+        &[&vector_buffer],
+        vec![&witness],
         prove_linear_forms,
         Cow::Borrowed(evaluations.as_slice()),
     );
@@ -323,8 +323,8 @@ where
     let whir_prove_time = Instant::now();
     let _ = params.prove(
         &mut prover_state,
-        vec![Cow::Borrowed(&vector)],
-        witness,
+        &[&vector_buffer],
+        vec![&witness],
         prove_linear_forms,
         Cow::Borrowed(&evaluations),
     );

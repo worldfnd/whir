@@ -14,7 +14,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::CpuBuffer,
+        buffer::{BufferOps, CpuBuffer},
         embedding::{Embedding, Identity},
         linear_form::LinearForm,
     },
@@ -46,7 +46,13 @@ pub struct RoundConfig<F: Field> {
     pub pow: proof_of_work::Config,
 }
 
-pub type Witness<F: Field, M: Embedding<Target = F>> = irs_commit::Witness<M::Source, F>;
+pub type Witness<F: Field, M: Embedding<Target = F>, B = CpuBuffer<<M as Embedding>::Source>> =
+    irs_commit::Witness<
+        <M as Embedding>::Source,
+        F,
+        B,
+        <B as BufferOps<<M as Embedding>::Source>>::Matrix,
+    >;
 pub type Commitment<F: Field> = irs_commit::Commitment<F>;
 
 #[must_use = "The final claim must be checked if there where any linear forms."]
@@ -76,13 +82,19 @@ impl<F: Field> FinalClaim<F> {
 
 impl<M: Embedding> Config<M> {
     /// Commit to one or more vectors.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(size = vectors.first().unwrap().len())))]
-    pub fn commit<H, R>(
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(skip_all, fields(size = vectors.first().unwrap().len()))
+    )]
+    pub fn commit<H, R, B>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&CpuBuffer<M::Source>],
-    ) -> Witness<M::Target, M>
+        vectors: &[&B],
+    ) -> Witness<M::Target, M, B>
     where
+        B: BufferOps<M::Source>,
+        <B::Matrix as crate::algebra::buffer::MatrixBufferOps<M::Source>>::Witness:
+            Clone + PartialEq + Eq + PartialOrd + Ord + Debug + std::hash::Hash + Default,
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -249,8 +261,8 @@ mod tests {
         // Generate a proof for the given statement and witness
         let _ = params.prove(
             &mut prover_state,
-            vec![Cow::from(vector)],
-            vec![Cow::Owned(witness)],
+            &[&vector_buffer],
+            vec![&witness],
             prove_linear_forms,
             Cow::Borrowed(evaluations.as_slice()),
         );
@@ -430,11 +442,8 @@ mod tests {
         // Batch prove all polynomials together
         let _ = params.prove(
             &mut prover_state,
-            vectors
-                .iter()
-                .map(|v| Cow::Borrowed(v.as_slice()))
-                .collect(),
-            witnesses.into_iter().map(Cow::Owned).collect(),
+            &vector_buffers.iter().collect::<Vec<_>>(),
+            witnesses.iter().collect(),
             prove_linear_forms,
             Cow::Borrowed(evaluations.as_slice()),
         );
@@ -584,10 +593,11 @@ mod tests {
         let prove_linear_forms = build_prove_forms(&constraint_points, num_variables, false);
 
         // Generate proof with mismatched polynomials
+        let vec_wrong_buffer = CpuBuffer::from_vec(vec_wrong);
         let _ = params.prove(
             &mut prover_state,
-            vec![Cow::Borrowed(vec1.as_slice()), Cow::from(vec_wrong)],
-            vec![Cow::Owned(witness1), Cow::Owned(witness2)],
+            &[&vec1_buffer, &vec_wrong_buffer],
+            vec![&witness1, &witness2],
             prove_linear_forms,
             Cow::Borrowed(evaluations.as_slice()),
         );
@@ -708,11 +718,8 @@ mod tests {
         // Batch prove all witnesses together
         let _ = params.prove(
             &mut prover_state,
-            all_vectors
-                .iter()
-                .map(|v| Cow::Borrowed(v.as_slice()))
-                .collect(),
-            witnesses.into_iter().map(Cow::Owned).collect(),
+            &vector_buffers.iter().collect::<Vec<_>>(),
+            witnesses.iter().collect(),
             prove_linear_forms,
             Cow::Borrowed(evaluations.as_slice()),
         );
@@ -858,11 +865,8 @@ mod tests {
             .collect::<Vec<_>>();
         let _ = params.prove(
             &mut prover_state,
-            vectors
-                .iter()
-                .map(|v| Cow::Borrowed(v.as_slice()))
-                .collect(),
-            vec![Cow::Owned(batched_witness)],
+            &buffer_refs,
+            vec![&batched_witness],
             prove_linear_forms,
             Cow::Borrowed(values.as_slice()),
         );

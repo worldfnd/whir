@@ -1,3 +1,5 @@
+use std::{any::Any, mem};
+
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
 use spongefish::DuplexSpongeInterface;
@@ -5,7 +7,9 @@ use spongefish::DuplexSpongeInterface;
 use crate::{
     algebra::{
         embedding::{Embedding, Identity},
-        mixed_dot, mixed_multilinear_extend, mixed_univariate_evaluate, ntt,
+        linear_form::{Covector, LinearForm, UnivariateEvaluation},
+        mixed_dot, mixed_multilinear_extend, mixed_scalar_mul_add, mixed_univariate_evaluate, ntt,
+        sumcheck::{compute_sumcheck_polynomial, fold, fold_and_compute_polynomial},
     },
     hash::Hash,
     protocols::matrix_commit,
@@ -18,6 +22,8 @@ pub trait BufferOps<F: Field>: Clone {
     type Buffer<T: Field>: BufferOps<T>;
     type Matrix: MatrixBufferOps<F>;
 
+    fn from_vec(source: Vec<F>) -> Self;
+    fn zeros(length: usize) -> Self;
     fn len(&self) -> usize;
 
     fn is_empty(&self) -> bool {
@@ -29,7 +35,26 @@ pub trait BufferOps<F: Field>: Clone {
         R: RngCore + CryptoRng,
         Standard: Distribution<F>;
 
+    fn linear_forms_rlc(
+        size: usize,
+        linear_forms: &mut [Box<dyn LinearForm<F>>],
+        rlc_coeffs: &[F],
+    ) -> Self;
+
     fn zero_pad(&mut self);
+    fn fold(&mut self, weight: F);
+    fn sumcheck_polynomial(&self, other: &Self) -> (F, F);
+    fn fold_and_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F);
+    fn accumulate_univariate_evaluations(
+        &mut self,
+        evaluators: &[UnivariateEvaluation<F>],
+        scalars: &[F],
+    );
+    fn write_to_prover<H, R>(&self, prover_state: &mut ProverState<H, R>)
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        F: ProverMessage<[H::U]>;
     fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
         &self,
         embedding: &M,
@@ -44,6 +69,22 @@ pub trait BufferOps<F: Field>: Clone {
         &self,
         embedding: &M,
         point: M::Target,
+    ) -> M::Target;
+    fn mixed_linear_combination<M: Embedding<Source = F>>(
+        embedding: &M,
+        vectors: &[&Self],
+        coeffs: &[M::Target],
+    ) -> Self::Buffer<M::Target>;
+    fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        accumulator: &mut Self::Buffer<M::Target>,
+        weight: M::Target,
+    );
+    fn mixed_dot_slice<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        other: &[M::Target],
     ) -> M::Target;
     fn interleaved_rs_encode(
         vectors: &[&Self],
@@ -217,6 +258,16 @@ impl<F: Field> BufferOps<F> for CpuBuffer<F> {
     type Buffer<T: Field> = CpuBuffer<T>;
     type Matrix = CpuMatrix<F>;
 
+    fn from_vec(source: Vec<F>) -> Self {
+        Self::from_vec(source)
+    }
+
+    fn zeros(length: usize) -> Self {
+        Self {
+            data: vec![F::ZERO; length],
+        }
+    }
+
     fn len(&self) -> usize {
         self.data.len()
     }
@@ -231,10 +282,62 @@ impl<F: Field> BufferOps<F> for CpuBuffer<F> {
         }
     }
 
+    fn linear_forms_rlc(
+        size: usize,
+        linear_forms: &mut [Box<dyn LinearForm<F>>],
+        rlc_coeffs: &[F],
+    ) -> Self {
+        assert_eq!(linear_forms.len(), rlc_coeffs.len());
+        let mut covector = vec![F::ZERO; size];
+        if let Some((first, linear_forms)) = linear_forms.split_first_mut() {
+            debug_assert_eq!(rlc_coeffs[0], F::ONE);
+            if let Some(covector_form) =
+                (first.as_mut() as &mut dyn Any).downcast_mut::<Covector<F>>()
+            {
+                mem::swap(&mut covector, &mut covector_form.vector);
+            } else {
+                first.accumulate(&mut covector, F::ONE);
+            }
+            for (rlc_coeff, linear_form) in rlc_coeffs[1..].iter().zip(linear_forms) {
+                linear_form.accumulate(&mut covector, *rlc_coeff);
+            }
+        }
+        Self { data: covector }
+    }
+
     fn zero_pad(&mut self) {
         if !self.is_empty() {
             self.data.resize(self.len().next_power_of_two(), F::ZERO);
         }
+    }
+
+    fn fold(&mut self, weight: F) {
+        fold(&mut self.data, weight);
+    }
+
+    fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
+        compute_sumcheck_polynomial(&self.data, other.as_slice())
+    }
+
+    fn fold_and_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F) {
+        fold_and_compute_polynomial(&mut self.data, &mut other.data, weight)
+    }
+
+    fn accumulate_univariate_evaluations(
+        &mut self,
+        evaluators: &[UnivariateEvaluation<F>],
+        scalars: &[F],
+    ) {
+        UnivariateEvaluation::accumulate_many(evaluators, &mut self.data, scalars);
+    }
+
+    fn write_to_prover<H, R>(&self, prover_state: &mut ProverState<H, R>)
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        F: ProverMessage<[H::U]>,
+    {
+        prover_state.prover_messages(&self.data);
     }
 
     fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
@@ -263,6 +366,40 @@ impl<F: Field> BufferOps<F> for CpuBuffer<F> {
         point: M::Target,
     ) -> M::Target {
         mixed_univariate_evaluate(embedding, &self.data, point)
+    }
+
+    fn mixed_linear_combination<M: Embedding<Source = F>>(
+        embedding: &M,
+        vectors: &[&Self],
+        coeffs: &[M::Target],
+    ) -> Self::Buffer<M::Target> {
+        assert_eq!(vectors.len(), coeffs.len());
+        let Some((first, vectors)) = vectors.split_first() else {
+            return CpuBuffer::from_vec(Vec::new());
+        };
+        debug_assert_eq!(coeffs[0], M::Target::ONE);
+        let mut accumulator = crate::algebra::lift(embedding, first.as_slice());
+        for (coeff, vector) in coeffs[1..].iter().zip(vectors) {
+            mixed_scalar_mul_add(embedding, &mut accumulator, *coeff, vector.as_slice());
+        }
+        CpuBuffer::from_vec(accumulator)
+    }
+
+    fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        accumulator: &mut Self::Buffer<M::Target>,
+        weight: M::Target,
+    ) {
+        mixed_scalar_mul_add(embedding, &mut accumulator.data, weight, self.as_slice());
+    }
+
+    fn mixed_dot_slice<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        other: &[M::Target],
+    ) -> M::Target {
+        mixed_dot(embedding, other, self.as_slice())
     }
 
     fn interleaved_rs_encode(

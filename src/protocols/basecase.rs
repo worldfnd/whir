@@ -49,9 +49,9 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        mut vector: Vec<F>,
+        vector: Vec<F>,
         witness: &irs_commit::Witness<F>,
-        mut covector: Vec<F>,
+        covector: Vec<F>,
         mut sum: F,
     ) -> Opening<F>
     where
@@ -81,14 +81,22 @@ impl<F: Field> Config<F> {
             prover_state.prover_messages(&vector);
             prover_state.prover_messages(witness.masks.as_slice());
             let _ = self.commit.open(prover_state, &[witness]);
+            let mut vector_buffer = CpuBuffer::from_vec(vector);
+            let mut covector_buffer = CpuBuffer::from_vec(covector);
             let point = self
                 .sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
+                .prove(
+                    prover_state,
+                    &mut vector_buffer,
+                    &mut covector_buffer,
+                    &mut sum,
+                    &[],
+                )
                 .round_challenges;
-            assert!(!vector[0].is_zero(), "Proof failed");
+            assert!(!vector_buffer.as_slice()[0].is_zero(), "Proof failed");
             return Opening {
                 evaluation_points: point,
-                linear_form_evaluation: covector[0],
+                linear_form_evaluation: covector_buffer.as_slice()[0],
             };
         }
 
@@ -106,7 +114,7 @@ impl<F: Field> Config<F> {
         // RLC the mask with the vector
         let mask_rlc = prover_state.verifier_message::<F>();
         assert!(!mask_rlc.is_zero(), "Proof failed");
-        let mut masked_vector = scalar_mul_add_new(&mask, mask_rlc, &vector);
+        let masked_vector = scalar_mul_add_new(&mask, mask_rlc, &vector);
         prover_state.prover_messages(&masked_vector);
 
         // Send combined IRS randomness. (r^* in paper)
@@ -122,12 +130,14 @@ impl<F: Field> Config<F> {
 
         // Run sumcheck to reduce linear form claim
         let mut masked_sum = mask_sum + mask_rlc * sum;
+        let mut masked_vector_buffer = CpuBuffer::from_vec(masked_vector);
+        let mut covector_buffer = CpuBuffer::from_vec(covector);
         let point = self
             .sumcheck
             .prove(
                 prover_state,
-                &mut masked_vector,
-                &mut covector,
+                &mut masked_vector_buffer,
+                &mut covector_buffer,
                 &mut masked_sum,
                 &[],
             )
@@ -137,11 +147,14 @@ impl<F: Field> Config<F> {
         // Basically the sumcheck equation has degenerated to 0 * l(r) = 0, which provides
         // no constraints on l(r) that the verifier can return.
         // This event is cryptographically unlikely as `F` is challenge sized.
-        assert!(!masked_vector[0].is_zero(), "Proof failed");
+        assert!(
+            !masked_vector_buffer.as_slice()[0].is_zero(),
+            "Proof failed"
+        );
 
         Opening {
             evaluation_points: point,
-            linear_form_evaluation: covector[0],
+            linear_form_evaluation: covector_buffer.as_slice()[0],
         }
     }
 
