@@ -1,18 +1,35 @@
-use std::cmp::max;
+use ark_ff::Field;
+use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
+use spongefish::DuplexSpongeInterface;
 
-use ark_ff::{AdditiveGroup, Field};
-
-use crate::algebra::embedding::{Embedding, Identity};
-#[cfg(feature = "parallel")]
-use crate::utils::workload_size;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use crate::{
+    algebra::{
+        embedding::{Embedding, Identity},
+        mixed_dot, mixed_multilinear_extend, mixed_univariate_evaluate, ntt,
+    },
+    hash::Hash,
+    protocols::matrix_commit,
+    transcript::{ProverMessage, ProverState},
+    type_info::TypeInfo,
+    utils::chunks_exact_or_empty,
+};
 
 pub trait BufferOps<F: Field>: Clone {
+    type Buffer<T: Field>: BufferOps<T>;
+    type Matrix: MatrixBufferOps<F>;
+
     fn len(&self) -> usize;
-    fn is_empty(&self) -> bool;
-    // zero pad to 2**log_m
-    fn zero_pad(&mut self, log_m: usize);
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn random<R>(rng: &mut R, length: usize) -> Self
+    where
+        R: RngCore + CryptoRng,
+        Standard: Distribution<F>;
+
+    fn zero_pad(&mut self);
     fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
         &self,
         embedding: &M,
@@ -21,266 +38,180 @@ pub trait BufferOps<F: Field>: Clone {
     fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
         &self,
         embedding: &M,
-        other: &impl BufferOps<M::Target>,
+        other: &Self::Buffer<T>,
     ) -> M::Target;
+    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        point: M::Target,
+    ) -> M::Target;
+    fn interleaved_rs_encode(
+        vectors: &[&Self],
+        masks: &Self,
+        message_length: usize,
+        interleaving_depth: usize,
+        codeword_length: usize,
+    ) -> Self::Matrix
+    where
+        F: 'static;
     fn dot(&self, other: &Self) -> F;
-    fn as_slice(&self) -> &[F];
-    fn as_ro_buffer(&self, size: usize) -> impl BufferOps<F>;
 }
 
-// read-only buffer ops
-pub trait ROBufferOps<F: Field> {
-    fn split_at(&self, mid: usize) -> (&impl BufferOps<F>, &impl BufferOps<F>);
+fn interleaved_rs_encode_slices<F: Field + 'static>(
+    vectors: &[&[F]],
+    masks: &[F],
+    message_length: usize,
+    interleaving_depth: usize,
+    codeword_length: usize,
+) -> CpuMatrix<F> {
+    let messages = vectors
+        .iter()
+        .flat_map(|v| chunks_exact_or_empty(v, message_length, interleaving_depth))
+        .collect::<Vec<_>>();
+    CpuMatrix::from_vec(
+        ntt::interleaved_rs_encode(&messages, masks, codeword_length),
+        codeword_length,
+        vectors.len() * interleaving_depth,
+    )
 }
 
-#[derive(Clone)]
-pub struct SliceCpuBuffer<'a, F: Field> {
-    data: &'a [F],
+pub trait MatrixBufferOps<F: Field> {
+    fn len(&self) -> usize;
+    fn num_rows(&self) -> usize;
+    fn num_cols(&self) -> usize;
+
+    fn commit_rows<H, R>(
+        &self,
+        config: &matrix_commit::Config<F>,
+        prover_state: &mut ProverState<H, R>,
+    ) -> matrix_commit::Witness
+    where
+        F: TypeInfo + matrix_commit::Encodable + Send + Sync,
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Hash: ProverMessage<[H::U]>;
+
+    fn read_rows(&self, indices: &[usize]) -> Vec<F>;
 }
 
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct CpuMatrix<F: Field> {
+    data: Vec<F>,
+    num_rows: usize,
+    num_cols: usize,
+}
+
+impl<F: Field> CpuMatrix<F> {
+    pub fn from_vec(data: Vec<F>, num_rows: usize, num_cols: usize) -> Self {
+        assert_eq!(data.len(), num_rows * num_cols);
+        Self {
+            data,
+            num_rows,
+            num_cols,
+        }
+    }
+
+    fn row(&self, row: usize) -> &[F] {
+        let start = row * self.num_cols;
+        let end = start + self.num_cols;
+        &self.data[start..end]
+    }
+}
+
+impl<F> MatrixBufferOps<F> for CpuMatrix<F>
+where
+    F: Field + TypeInfo + matrix_commit::Encodable + Send + Sync,
+{
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    fn num_cols(&self) -> usize {
+        self.num_cols
+    }
+
+    fn commit_rows<H, R>(
+        &self,
+        config: &matrix_commit::Config<F>,
+        prover_state: &mut ProverState<H, R>,
+    ) -> matrix_commit::Witness
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Hash: ProverMessage<[H::U]>,
+    {
+        assert_eq!(config.num_rows(), self.num_rows);
+        assert_eq!(config.num_cols, self.num_cols);
+        config.commit(prover_state, &self.data)
+    }
+
+    fn read_rows(&self, indices: &[usize]) -> Vec<F> {
+        let mut rows = Vec::with_capacity(indices.len() * self.num_cols);
+        for &index in indices {
+            assert!(index < self.num_rows);
+            rows.extend_from_slice(self.row(index));
+        }
+        rows
+    }
+}
 #[derive(Clone)]
 pub struct CpuBuffer<F: Field> {
     data: Vec<F>,
-    len: usize,
 }
 
 impl<F: Field> CpuBuffer<F> {
     pub fn from_vec(source: Vec<F>) -> Self {
-        let len = source.len();
-        Self { data: source, len }
+        Self { data: source }
     }
 
     pub fn from_slice(source: &[F]) -> Self {
         Self {
             data: Vec::from(source),
-            len: source.len(),
         }
+    }
+
+    fn as_slice(&self) -> &[F] {
+        self.data.as_slice()
     }
 }
 
 impl<F: Field> BufferOps<F> for CpuBuffer<F> {
-    fn len(&self) -> usize {
-        self.len
-    }
+    type Buffer<T: Field> = CpuBuffer<T>;
+    type Matrix = CpuMatrix<F>;
 
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn zero_pad(&mut self, log_m: usize) {
-        if !self.is_empty() {
-            self.data.resize(1 << log_m, F::ZERO);
-        }
-    }
-
-    fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
-        &self,
-        embedding: &M,
-        point: &[M::Target],
-    ) -> M::Target {
-        #[inline]
-        fn eval_exact<M: Embedding>(
-            embedding: &M,
-            evals: &[M::Source],
-            point: &[M::Target],
-        ) -> M::Target {
-            debug_assert_eq!(evals.len(), 1 << point.len());
-
-            // Helper to compute (a + (b - a) * c) efficiently with a, b in source field.
-            let mixed = |a, b, c| embedding.mixed_add(embedding.mixed_mul(c, b - a), a);
-
-            match point {
-                [] => embedding.map(evals[0]),
-                [x] => mixed(evals[0], evals[1], *x),
-                [x0, x1] => {
-                    let a0 = mixed(evals[0], evals[1], *x1);
-                    let a1 = mixed(evals[2], evals[3], *x1);
-                    a0 + (a1 - a0) * *x0
-                }
-                [x0, x1, x2] => {
-                    let a00 = mixed(evals[0], evals[1], *x2);
-                    let a01 = mixed(evals[2], evals[3], *x2);
-                    let a10 = mixed(evals[4], evals[5], *x2);
-                    let a11 = mixed(evals[6], evals[7], *x2);
-                    let a0 = a00 + (a01 - a00) * *x1;
-                    let a1 = a10 + (a11 - a10) * *x1;
-                    a0 + (a1 - a0) * *x0
-                }
-                [x0, x1, x2, x3] => {
-                    let a000 = mixed(evals[0], evals[1], *x3);
-                    let a001 = mixed(evals[2], evals[3], *x3);
-                    let a010 = mixed(evals[4], evals[5], *x3);
-                    let a011 = mixed(evals[6], evals[7], *x3);
-                    let a100 = mixed(evals[8], evals[9], *x3);
-                    let a101 = mixed(evals[10], evals[11], *x3);
-                    let a110 = mixed(evals[12], evals[13], *x3);
-                    let a111 = mixed(evals[14], evals[15], *x3);
-                    let a00 = a000 + (a001 - a000) * *x2;
-                    let a01 = a010 + (a011 - a010) * *x2;
-                    let a10 = a100 + (a101 - a100) * *x2;
-                    let a11 = a110 + (a111 - a110) * *x2;
-                    let a0 = a00 + (a01 - a00) * *x1;
-                    let a1 = a10 + (a11 - a10) * *x1;
-                    a0 + (a1 - a0) * *x0
-                }
-                [x, tail @ ..] => {
-                    let (f0, f1) = evals.split_at(evals.len() / 2);
-                    #[cfg(not(feature = "parallel"))]
-                    let (f0, f1) = (
-                        eval_exact(embedding, f0, tail),
-                        eval_exact(embedding, f1, tail),
-                    );
-
-                    #[cfg(feature = "parallel")]
-                    let (f0, f1) = {
-                        use crate::utils::workload_size;
-                        if evals.len() > workload_size::<M::Source>() {
-                            rayon::join(
-                                || eval_exact(embedding, f0, tail),
-                                || eval_exact(embedding, f1, tail),
-                            )
-                        } else {
-                            (
-                                eval_exact(embedding, f0, tail),
-                                eval_exact(embedding, f1, tail),
-                            )
-                        }
-                    };
-
-                    f0 + (f1 - f0) * *x
-                }
-            }
-        }
-
-        #[inline]
-        fn eval_partial<M: Embedding>(
-            embedding: &M,
-            evals: &[M::Source],
-            point: &[M::Target],
-        ) -> M::Target {
-            let size = 1 << point.len();
-            debug_assert!(evals.len() <= size);
-            if evals.is_empty() {
-                return M::Target::ZERO;
-            }
-            if evals.len() == size {
-                return eval_exact(embedding, evals, point);
-            }
-
-            match point {
-                [] => embedding.map(evals[0]),
-                [x, tail @ ..] => {
-                    let half = size / 2;
-
-                    // Only low half has data; high half is all implicit zeros.
-                    if evals.len() <= half {
-                        let f0 = eval_partial(embedding, evals, tail);
-                        return f0 * (M::Target::ONE - *x);
-                    }
-
-                    // Low subtree is exact/full, high subtree is partial.
-                    let (low, high) = evals.split_at(half);
-
-                    #[cfg(not(feature = "parallel"))]
-                    let (f0, f1) = (
-                        eval_exact(embedding, low, tail),
-                        eval_partial(embedding, high, tail),
-                    );
-
-                    #[cfg(feature = "parallel")]
-                    let (f0, f1) = {
-                        use crate::utils::workload_size;
-                        if evals.len() > workload_size::<M::Source>() {
-                            rayon::join(
-                                || eval_exact(embedding, low, tail),
-                                || eval_partial(embedding, high, tail),
-                            )
-                        } else {
-                            (
-                                eval_exact(embedding, low, tail),
-                                eval_partial(embedding, high, tail),
-                            )
-                        }
-                    };
-
-                    f0 + (f1 - f0) * *x
-                }
-            }
-        }
-
-        eval_partial(embedding, &self.data, point)
-    }
-
-    fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
-        &self,
-        embedding: &M,
-        other: &impl BufferOps<M::Target>,
-    ) -> M::Target {
-        assert_eq!(self.len(), other.len());
-
-        let a = other.as_slice();
-        let b = self.as_slice();
-
-        #[cfg(feature = "parallel")]
-        if a.len() > workload_size::<M::Target>() {
-            return a
-                .par_iter()
-                .zip(b)
-                .map(|(a, b)| embedding.mixed_mul(*a, *b))
-                .sum();
-        }
-
-        a.iter()
-            .zip(b)
-            .map(|(a, b)| embedding.mixed_mul(*a, *b))
-            .sum()
-    }
-
-    fn dot(&self, other: &Self) -> F {
-        self.mixed_dot(&Identity::new(), other)
-    }
-
-    fn as_slice(&self) -> &[F] {
-        &self.data[..self.len]
-    }
-
-    fn as_ro_buffer(&self, size: usize) -> impl BufferOps<F> {
-        SliceCpuBuffer::from_buffer_with_size(self, size)
-    }
-}
-
-impl<'a, F: Field> SliceCpuBuffer<'a, F> {
-    pub fn from_buffer(buffer: &'a CpuBuffer<F>) -> Self {
-        Self {
-            data: buffer.as_slice(),
-        }
-    }
-
-    pub fn from_buffer_with_size(buffer: &'a CpuBuffer<F>, size: usize) -> Self {
-        Self {
-            data: &buffer.data[..max(buffer.len, size)],
-        }
-    }
-
-    pub fn from_slice_with_size(slice: &'a &[F], size: usize) -> Self {
-        assert!(size <= slice.len());
-        Self {
-            data: &slice[..size],
-        }
-    }
-}
-
-impl<'a, F: Field> BufferOps<F> for SliceCpuBuffer<'a, F> {
     fn len(&self) -> usize {
         self.data.len()
     }
 
-    fn is_empty(&self) -> bool {
-        self.data.is_empty()
+    fn random<R>(rng: &mut R, length: usize) -> Self
+    where
+        R: RngCore + CryptoRng,
+        Standard: Distribution<F>,
+    {
+        Self {
+            data: (0..length).map(|_| rng.gen()).collect(),
+        }
     }
 
-    fn zero_pad(&mut self, log_m: usize) {
-        panic!("read only")
+    fn zero_pad(&mut self) {
+        if !self.is_empty() {
+            self.data.resize(self.len().next_power_of_two(), F::ZERO);
+        }
     }
 
     fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
@@ -288,173 +219,117 @@ impl<'a, F: Field> BufferOps<F> for SliceCpuBuffer<'a, F> {
         embedding: &M,
         point: &[M::Target],
     ) -> M::Target {
-        #[inline]
-        fn eval_exact<M: Embedding>(
-            embedding: &M,
-            evals: &[M::Source],
-            point: &[M::Target],
-        ) -> M::Target {
-            debug_assert_eq!(evals.len(), 1 << point.len());
-
-            // Helper to compute (a + (b - a) * c) efficiently with a, b in source field.
-            let mixed = |a, b, c| embedding.mixed_add(embedding.mixed_mul(c, b - a), a);
-
-            match point {
-                [] => embedding.map(evals[0]),
-                [x] => mixed(evals[0], evals[1], *x),
-                [x0, x1] => {
-                    let a0 = mixed(evals[0], evals[1], *x1);
-                    let a1 = mixed(evals[2], evals[3], *x1);
-                    a0 + (a1 - a0) * *x0
-                }
-                [x0, x1, x2] => {
-                    let a00 = mixed(evals[0], evals[1], *x2);
-                    let a01 = mixed(evals[2], evals[3], *x2);
-                    let a10 = mixed(evals[4], evals[5], *x2);
-                    let a11 = mixed(evals[6], evals[7], *x2);
-                    let a0 = a00 + (a01 - a00) * *x1;
-                    let a1 = a10 + (a11 - a10) * *x1;
-                    a0 + (a1 - a0) * *x0
-                }
-                [x0, x1, x2, x3] => {
-                    let a000 = mixed(evals[0], evals[1], *x3);
-                    let a001 = mixed(evals[2], evals[3], *x3);
-                    let a010 = mixed(evals[4], evals[5], *x3);
-                    let a011 = mixed(evals[6], evals[7], *x3);
-                    let a100 = mixed(evals[8], evals[9], *x3);
-                    let a101 = mixed(evals[10], evals[11], *x3);
-                    let a110 = mixed(evals[12], evals[13], *x3);
-                    let a111 = mixed(evals[14], evals[15], *x3);
-                    let a00 = a000 + (a001 - a000) * *x2;
-                    let a01 = a010 + (a011 - a010) * *x2;
-                    let a10 = a100 + (a101 - a100) * *x2;
-                    let a11 = a110 + (a111 - a110) * *x2;
-                    let a0 = a00 + (a01 - a00) * *x1;
-                    let a1 = a10 + (a11 - a10) * *x1;
-                    a0 + (a1 - a0) * *x0
-                }
-                [x, tail @ ..] => {
-                    let (f0, f1) = evals.split_at(evals.len() / 2);
-                    #[cfg(not(feature = "parallel"))]
-                    let (f0, f1) = (
-                        eval_exact(embedding, f0, tail),
-                        eval_exact(embedding, f1, tail),
-                    );
-
-                    #[cfg(feature = "parallel")]
-                    let (f0, f1) = {
-                        use crate::utils::workload_size;
-                        if evals.len() > workload_size::<M::Source>() {
-                            rayon::join(
-                                || eval_exact(embedding, f0, tail),
-                                || eval_exact(embedding, f1, tail),
-                            )
-                        } else {
-                            (
-                                eval_exact(embedding, f0, tail),
-                                eval_exact(embedding, f1, tail),
-                            )
-                        }
-                    };
-
-                    f0 + (f1 - f0) * *x
-                }
-            }
-        }
-
-        #[inline]
-        fn eval_partial<M: Embedding>(
-            embedding: &M,
-            evals: &[M::Source],
-            point: &[M::Target],
-        ) -> M::Target {
-            let size = 1 << point.len();
-            debug_assert!(evals.len() <= size);
-            if evals.is_empty() {
-                return M::Target::ZERO;
-            }
-            if evals.len() == size {
-                return eval_exact(embedding, evals, point);
-            }
-
-            match point {
-                [] => embedding.map(evals[0]),
-                [x, tail @ ..] => {
-                    let half = size / 2;
-
-                    // Only low half has data; high half is all implicit zeros.
-                    if evals.len() <= half {
-                        let f0 = eval_partial(embedding, evals, tail);
-                        return f0 * (M::Target::ONE - *x);
-                    }
-
-                    // Low subtree is exact/full, high subtree is partial.
-                    let (low, high) = evals.split_at(half);
-
-                    #[cfg(not(feature = "parallel"))]
-                    let (f0, f1) = (
-                        eval_exact(embedding, low, tail),
-                        eval_partial(embedding, high, tail),
-                    );
-
-                    #[cfg(feature = "parallel")]
-                    let (f0, f1) = {
-                        use crate::utils::workload_size;
-                        if evals.len() > workload_size::<M::Source>() {
-                            rayon::join(
-                                || eval_exact(embedding, low, tail),
-                                || eval_partial(embedding, high, tail),
-                            )
-                        } else {
-                            (
-                                eval_exact(embedding, low, tail),
-                                eval_partial(embedding, high, tail),
-                            )
-                        }
-                    };
-
-                    f0 + (f1 - f0) * *x
-                }
-            }
-        }
-
-        eval_partial(embedding, &self.data, point)
+        mixed_multilinear_extend(embedding, &self.data, point)
     }
 
     fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
         &self,
         embedding: &M,
-        other: &impl BufferOps<M::Target>,
+        other: &Self::Buffer<T>,
     ) -> M::Target {
-        assert_eq!(self.len(), other.len());
-
-        let a = other.as_slice();
-        let b = self.as_slice();
-
-        #[cfg(feature = "parallel")]
-        if a.len() > workload_size::<M::Target>() {
-            return a
-                .par_iter()
-                .zip(b)
-                .map(|(a, b)| embedding.mixed_mul(*a, *b))
-                .sum();
-        }
-
-        a.iter()
-            .zip(b)
-            .map(|(a, b)| embedding.mixed_mul(*a, *b))
-            .sum()
+        mixed_dot(embedding, other.as_slice(), self.as_slice())
     }
 
     fn dot(&self, other: &Self) -> F {
         self.mixed_dot(&Identity::new(), other)
     }
 
-    fn as_slice(&self) -> &[F] {
-        &self.data
+    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        point: M::Target,
+    ) -> M::Target {
+        mixed_univariate_evaluate(embedding, &self.data, point)
     }
 
-    fn as_ro_buffer(&self, size: usize) -> impl BufferOps<F> {
-        SliceCpuBuffer::from_slice_with_size(&self.data, size)
+    fn interleaved_rs_encode(
+        vectors: &[&Self],
+        masks: &Self,
+        message_length: usize,
+        interleaving_depth: usize,
+        codeword_length: usize,
+    ) -> Self::Matrix
+    where
+        F: 'static,
+    {
+        let vectors = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+        interleaved_rs_encode_slices(
+            &vectors,
+            masks.as_slice(),
+            message_length,
+            interleaving_depth,
+            codeword_length,
+        )
+    }
+}
+
+impl<F: Field> BufferOps<F> for Vec<F> {
+    type Buffer<T: Field> = Vec<T>;
+    type Matrix = CpuMatrix<F>;
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn random<R>(rng: &mut R, length: usize) -> Self
+    where
+        R: RngCore + CryptoRng,
+        Standard: Distribution<F>,
+    {
+        (0..length).map(|_| rng.gen()).collect()
+    }
+
+    fn zero_pad(&mut self) {
+        if !self.is_empty() {
+            self.resize(self.len().next_power_of_two(), F::ZERO);
+        }
+    }
+
+    fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        embedding: &M,
+        point: &[M::Target],
+    ) -> M::Target {
+        mixed_multilinear_extend(embedding, self, point)
+    }
+
+    fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        embedding: &M,
+        other: &Self::Buffer<T>,
+    ) -> M::Target {
+        mixed_dot(embedding, other, self)
+    }
+
+    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        point: M::Target,
+    ) -> M::Target {
+        mixed_univariate_evaluate(embedding, self, point)
+    }
+
+    fn interleaved_rs_encode(
+        vectors: &[&Self],
+        masks: &Self,
+        message_length: usize,
+        interleaving_depth: usize,
+        codeword_length: usize,
+    ) -> Self::Matrix
+    where
+        F: 'static,
+    {
+        let vectors = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+        interleaved_rs_encode_slices(
+            &vectors,
+            masks,
+            message_length,
+            interleaving_depth,
+            codeword_length,
+        )
+    }
+
+    fn dot(&self, other: &Self) -> F {
+        self.mixed_dot(&Identity::new(), other)
     }
 }
