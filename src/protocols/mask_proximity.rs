@@ -1,3 +1,5 @@
+// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
+
 //! Mask proximity verification via γ-combination.
 //!
 //! Implements Construction 7.2 (p.43-44) specialized for zero-constraint mask

@@ -1,3 +1,5 @@
+// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
+
 #![cfg(feature = "rs_in_order")] // TODO: Support permuted.
 mod committer;
 mod prover;

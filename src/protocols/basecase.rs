@@ -1,3 +1,5 @@
+// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
+
 //! Base Case Linear Opening Protocol
 //!
 //! It support honest verifier zero-knowledge (HVZK), but is not succinct.

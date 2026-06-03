@@ -1,3 +1,5 @@
+// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
+
 //! Code-switching IOR: R_{C, C_zk, sl} → R_{C', C_zk, sl'}
 //!
 //! Reduces a proximity claim about oracle f (source code C) to a proximity
