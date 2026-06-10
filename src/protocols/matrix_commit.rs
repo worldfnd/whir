@@ -232,10 +232,38 @@ impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
         #[cfg(feature = "tracing")]
         tracing::Span::current().record("engine", engine.name().as_ref());
 
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if self.leaf_hash_id == hash::SHA2
+            && self
+                .merkle_tree
+                .layers
+                .iter()
+                .all(|layer| layer.hash_id == hash::SHA2)
+        {
+            if let Some(nodes) = matrix.commit_bn254_rows_sha2_merkle(
+                self.num_cols,
+                self.num_rows(),
+                self.merkle_tree.layers.len(),
+            ) {
+                let root = nodes
+                    .read_hash_at(self.merkle_tree.num_nodes() - 1)
+                    .expect("missing Metal Merkle root");
+                prover_state.prover_message(&root);
+                return BufferWitness { nodes };
+            }
+        }
+
         // Compute leaf hashes
         let mut leaves = Vec::with_capacity(self.merkle_tree.num_nodes());
         leaves.resize(self.merkle_tree.num_leaves, Hash::default());
-        hash_rows(&*engine, matrix.as_slice(), &mut leaves[..self.num_rows()]);
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let hashed_on_metal = self.leaf_hash_id == hash::SHA2
+            && matrix.hash_bn254_rows_sha2(self.num_cols, &mut leaves[..self.num_rows()]);
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        let hashed_on_metal = false;
+        if !hashed_on_metal {
+            hash_rows(&*engine, matrix.as_slice(), &mut leaves[..self.num_rows()]);
+        }
 
         // Commit the leaf hashes
         BufferWitness {
@@ -272,6 +300,19 @@ impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
     {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Some(hints) = metal_merkle_opening_hints(
+            &witness.nodes,
+            self.merkle_tree.num_leaves,
+            self.merkle_tree.layers.len(),
+            indices,
+        ) {
+            for hint in hints {
+                prover_state.prover_hint(&hint);
+            }
+            return;
+        }
+
         self.merkle_tree.open(
             prover_state,
             &merkle_tree::Witness {
@@ -310,6 +351,49 @@ impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
         self.merkle_tree
             .verify(verifier_state, commitment, indices, &leaf_hashes)
     }
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn metal_merkle_opening_hints(
+    nodes: &ActiveBuffer<Hash>,
+    num_leaves: usize,
+    layers: usize,
+    indices: &[usize],
+) -> Option<Vec<Hash>> {
+    if num_leaves != (1usize << layers) {
+        return None;
+    }
+    assert!(indices.iter().all(|&i| i < num_leaves));
+
+    let mut indices = indices.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+
+    let mut node_indices = Vec::new();
+    let mut layer_offset = 0usize;
+    let mut layer_len = 1usize << layers;
+    while layer_len > 1 {
+        let mut next_indices = Vec::with_capacity(indices.len());
+        let mut iter = indices.iter().copied().peekable();
+        loop {
+            match (iter.next(), iter.peek()) {
+                (Some(a), Some(&b)) if b == a ^ 1 => {
+                    next_indices.push(a >> 1);
+                    iter.next();
+                }
+                (Some(a), _) => {
+                    node_indices.push(layer_offset + (a ^ 1));
+                    next_indices.push(a >> 1);
+                }
+                (None, _) => break,
+            }
+        }
+        indices = next_indices;
+        layer_offset += layer_len;
+        layer_len /= 2;
+    }
+
+    nodes.read_hash_indices(&node_indices)
 }
 
 impl<T: TypeInfo + Encodable + Send + Sync + Clone> fmt::Display for Config<T> {
@@ -521,5 +605,19 @@ pub(crate) mod tests {
     #[ignore = "Somewhat expensive and redundant"]
     fn test_field256() {
         proptest::<fields::Field256>();
+    }
+
+    #[test]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn test_field256_sha2_metal_commit_open() {
+        test::<fields::Field256>(
+            StdRng::seed_from_u64(7),
+            hash::SHA2,
+            hash::SHA2,
+            4,
+            16,
+            2,
+            &[0, 1, 3, 8, 8, 15],
+        );
     }
 }

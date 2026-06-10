@@ -20,6 +20,9 @@ use crate::{
     verify,
 };
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use crate::hash::{MetalSha2, SHA2};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Config {
     pub hash_id: EngineId,
@@ -86,6 +89,13 @@ impl Config {
         let batch_size = engine.preferred_batch_size();
 
         let challenge: [u8; 32] = prover_state.verifier_message();
+
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if self.hash_id == SHA2 {
+            let nonce = MetalSha2::prove_pow_64(&challenge, self.threshold);
+            prover_state.prover_message(&U64(nonce));
+            return;
+        }
 
         #[cfg(not(feature = "parallel"))]
         let nonce = (0_u64..)
