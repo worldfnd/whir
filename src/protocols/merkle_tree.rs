@@ -58,7 +58,7 @@ pub struct Commitment {
 #[must_use]
 pub struct Witness {
     /// The nodes in the Merkle tree, starting with the leaf hash layer.
-    nodes: Vec<Hash>,
+    pub nodes: Vec<Hash>,
 }
 
 impl Config {

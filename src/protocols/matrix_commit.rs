@@ -12,6 +12,7 @@ use tracing::instrument;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
+    algebra::buffer::{BufferOps, CpuBuffer},
     engines::EngineId,
     hash::{self, Hash},
     protocols::merkle_tree,
@@ -111,7 +112,12 @@ where
     pub merkle_tree: merkle_tree::Config,
 }
 
-pub type Witness = merkle_tree::Witness;
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
+pub struct BufferWitness {
+    pub nodes: CpuBuffer<Hash>,
+}
+
+pub type Witness = BufferWitness;
 
 pub type Commitment = merkle_tree::Commitment;
 
@@ -168,7 +174,7 @@ impl<T: Immutable + IntoBytes> Encoder<T> for ZeroCopyEncoder {
     }
 }
 
-impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
+impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
     /// Create a new matrix commit configuration with the recommended hash function.
     pub fn new(num_rows: usize, num_cols: usize) -> Self {
         // Select a leaf hash function.
@@ -208,7 +214,11 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
 
     /// Commit the matrix (in row-major order).
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self, size = matrix.len(), engine)))]
-    pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, matrix: &[T]) -> Witness
+    pub fn commit<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        matrix: &CpuBuffer<T>,
+    ) -> Witness
     where
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -225,10 +235,12 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
         // Compute leaf hashes
         let mut leaves = Vec::with_capacity(self.merkle_tree.num_nodes());
         leaves.resize(self.merkle_tree.num_leaves, Hash::default());
-        hash_rows(&*engine, matrix, &mut leaves[..self.num_rows()]);
+        hash_rows(&*engine, matrix.as_slice(), &mut leaves[..self.num_rows()]);
 
         // Commit the leaf hashes
-        self.merkle_tree.commit(prover_state, leaves)
+        BufferWitness {
+            nodes: CpuBuffer::<Hash>::from_vec(self.merkle_tree.commit(prover_state, leaves).nodes),
+        }
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
@@ -258,7 +270,13 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
     {
-        self.merkle_tree.open(prover_state, witness, indices);
+        self.merkle_tree.open(
+            prover_state,
+            &merkle_tree::Witness {
+                nodes: Vec::from(witness.nodes.as_slice()),
+            },
+            indices,
+        );
     }
 
     /// Verifies the commitment at the provided row indices.
@@ -292,7 +310,7 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
     }
 }
 
-impl<T: TypeInfo + Encodable + Send + Sync> fmt::Display for Config<T> {
+impl<T: TypeInfo + Encodable + Send + Sync + Clone> fmt::Display for Config<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MatrixCommit({} x {})", self.num_rows(), self.num_cols)
     }
@@ -428,22 +446,9 @@ pub(crate) mod tests {
             .instance(&Empty);
 
         // Instance
-        let matrix: Vec<T> = (0..config.size()).map(|_| rng.gen()).collect();
-        let submatrix: Vec<T> = if num_cols > 0 {
-            indices
-                .iter()
-                .flat_map(|&index| {
-                    matrix
-                        .chunks_exact(num_cols)
-                        .nth(index)
-                        .unwrap()
-                        .iter()
-                        .cloned()
-                })
-                .collect::<Vec<T>>()
-        } else {
-            Vec::new()
-        };
+        let matrix: CpuBuffer<T> =
+            CpuBuffer::from_vec((0..config.size()).map(|_| rng.gen()).collect());
+        let submatrix: Vec<T> = matrix.read_rows(num_cols, indices);
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);

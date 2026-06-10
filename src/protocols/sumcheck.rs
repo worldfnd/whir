@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::algebra::buffer::FieldOps;
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    algebra::{buffer::BufferOps, univariate_evaluate},
+    algebra::{
+        buffer::{BufferOps, CpuBuffer},
+        univariate_evaluate,
+    },
     protocols::proof_of_work,
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult,
@@ -62,16 +66,15 @@ impl<F: Field> Config<F> {
     /// - Applies proof-of-work grinding if required.
     /// - Returns the sampled folding randomness values used in each reduction step.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn prove<H, R, B>(
+    pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        a: &mut B,
-        b: &mut B,
+        a: &mut CpuBuffer<F>,
+        b: &mut CpuBuffer<F>,
         sum: &mut F,
         masks: &[F],
     ) -> SumcheckOpening<F>
     where
-        B: BufferOps<F>,
         H: DuplexSpongeInterface,
         R: CryptoRng + RngCore,
         F: Codec<[H::U]>,
@@ -107,7 +110,9 @@ impl<F: Field> Config<F> {
         {
             // Fold and compute sumcheck polynomial in one pass.
             let (c0, c2) = if let Some(w) = prev_round_challenge {
-                a.fold_and_sumcheck_polynomial(b, w)
+                a.fold(w);
+                b.fold(w);
+                a.sumcheck_polynomial(b)
             } else {
                 a.sumcheck_polynomial(b)
             };

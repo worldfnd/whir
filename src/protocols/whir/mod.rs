@@ -46,13 +46,8 @@ pub struct RoundConfig<F: Field> {
     pub pow: proof_of_work::Config,
 }
 
-pub type Witness<F: Field, M: Embedding<Target = F>, B = CpuBuffer<<M as Embedding>::Source>> =
-    irs_commit::Witness<
-        <M as Embedding>::Source,
-        F,
-        B,
-        <B as BufferOps<<M as Embedding>::Source>>::Matrix,
-    >;
+pub type Witness<F: Field, M: Embedding<Target = F>> =
+    irs_commit::Witness<<M as Embedding>::Source, F>;
 pub type Commitment<F: Field> = irs_commit::Commitment<F>;
 
 #[must_use = "The final claim must be checked if there where any linear forms."]
@@ -86,15 +81,12 @@ impl<M: Embedding> Config<M> {
         feature = "tracing",
         instrument(skip_all, fields(size = vectors.first().unwrap().len()))
     )]
-    pub fn commit<H, R, B>(
+    pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&B],
-    ) -> Witness<M::Target, M, B>
+        vectors: &[&CpuBuffer<M::Source>],
+    ) -> Witness<M::Target, M>
     where
-        B: BufferOps<M::Source>,
-        <B::Matrix as crate::algebra::buffer::MatrixBufferOps<M::Source>>::Witness:
-            Clone + PartialEq + Eq + PartialOrd + Ord + Debug + std::hash::Hash + Default,
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,

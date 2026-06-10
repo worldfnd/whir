@@ -24,16 +24,18 @@ use std::{
     ops::Neg,
 };
 
+use crate::{algebra::buffer::FieldOps, protocols::merkle_tree};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::{BufferOps, CpuBuffer, CpuMatrix, MatrixBufferOps},
+        buffer::{BufferOps, CpuBuffer},
         dot,
         embedding::Embedding,
         fields::FieldWithSize,
@@ -98,15 +100,13 @@ pub struct Config<M: Embedding> {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
-pub struct Witness<F: Field, G = F, Masks = CpuBuffer<F>, Matrix = CpuMatrix<F>>
+pub struct Witness<F: Field, G = F>
 where
     G: Field,
-    Masks: BufferOps<F>,
-    Matrix: MatrixBufferOps<F>,
 {
-    pub masks: Masks,
-    pub matrix: Matrix,
-    pub matrix_witness: Matrix::Witness,
+    pub masks: CpuBuffer<F>,
+    pub matrix: CpuBuffer<F>,
+    pub matrix_witness: matrix_commit::Witness,
     pub out_of_domain: Evaluations<G>,
     source_field: PhantomData<F>,
 }
@@ -298,15 +298,12 @@ impl<M: Embedding> Config<M> {
 
     /// Commit to one or more vectors.
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
-    pub fn commit<H, R, B>(
+    pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&B],
-    ) -> Witness<M::Source, M::Target, B, B::Matrix>
+        vectors: &[&CpuBuffer<M::Source>],
+    ) -> Witness<M::Source, M::Target>
     where
-        B: BufferOps<M::Source>,
-        <B::Matrix as MatrixBufferOps<M::Source>>::Witness:
-            Clone + PartialEq + Eq + PartialOrd + Ord + fmt::Debug + std::hash::Hash + Default,
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -322,8 +319,11 @@ impl<M: Embedding> Config<M> {
         assert_eq!(vectors.len(), self.num_vectors);
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
-        let masks = B::random(prover_state.rng(), self.mask_length * self.num_messages());
-        let matrix = B::interleaved_rs_encode(
+        let masks = CpuBuffer::<M::Source>::random(
+            prover_state.rng(),
+            self.mask_length * self.num_messages(),
+        );
+        let matrix = CpuBuffer::interleaved_rs_encode(
             vectors,
             &masks,
             self.message_length(),
@@ -332,7 +332,7 @@ impl<M: Embedding> Config<M> {
         );
 
         // Commit to the matrix
-        let matrix_witness = matrix.commit_rows(&self.matrix_commit, prover_state);
+        let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
 
         // Handle out-of-domain points and values
         // TODO : Remove this logic after main whir protocol is updated
@@ -394,14 +394,12 @@ impl<M: Embedding> Config<M> {
     /// When there are multiple openings, the evaluation matrices will
     /// be horizontally concatenated.
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
-    pub fn open<H, R, Masks, Matrix>(
+    pub fn open<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        witnesses: &[&Witness<M::Source, M::Target, Masks, Matrix>],
+        witnesses: &[&Witness<M::Source, M::Target>],
     ) -> Evaluations<M::Source>
     where
-        Masks: BufferOps<M::Source>,
-        Matrix: MatrixBufferOps<M::Source>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
         u8: Decoding<[H::U]>,
@@ -425,7 +423,7 @@ impl<M: Embedding> Config<M> {
         let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
         let mut matrix_col_offset = 0;
         for witness in witnesses {
-            let submatrix = witness.matrix.read_rows(&indices);
+            let submatrix = witness.matrix.read_rows(self.num_cols(), &indices);
             if self.num_cols() != 0 {
                 for (point_index, row) in submatrix.chunks_exact(self.num_cols()).enumerate() {
                     let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
@@ -434,12 +432,8 @@ impl<M: Embedding> Config<M> {
                 }
             }
             prover_state.prover_hint_ark(&submatrix);
-            witness.matrix.open_rows(
-                &self.matrix_commit,
-                prover_state,
-                &witness.matrix_witness,
-                &indices,
-            );
+            self.matrix_commit
+                .open(prover_state, &witness.matrix_witness, &indices);
             matrix_col_offset += self.num_cols();
         }
 
@@ -526,12 +520,10 @@ impl<G: Field> Commitment<G> {
     }
 }
 
-impl<F, G, Masks, Matrix> Witness<F, G, Masks, Matrix>
+impl<F, G> Witness<F, G>
 where
     F: Field,
     G: Field,
-    Masks: BufferOps<F>,
-    Matrix: MatrixBufferOps<F>,
 {
     /// Returns the out-of-domain evaluations.
     pub const fn out_of_domain(&self) -> &Evaluations<G> {

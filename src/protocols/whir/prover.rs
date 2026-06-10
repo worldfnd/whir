@@ -1,5 +1,6 @@
 use std::{borrow::Cow, fmt::Debug};
 
+use crate::algebra::buffer::FieldOps;
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
@@ -8,7 +9,7 @@ use tracing::instrument;
 use super::{Config, Witness};
 use crate::{
     algebra::{
-        buffer::{BufferOps, MatrixBufferOps},
+        buffer::{BufferOps, CpuBuffer},
         dot,
         embedding::Embedding,
         eq_weights,
@@ -24,15 +25,13 @@ use crate::{
     utils::zip_strict,
 };
 
-enum RoundWitness<'a, F, M, B>
+enum RoundWitness<'a, F, M>
 where
     F: Field,
     M: Embedding<Target = F>,
-    B: BufferOps<M::Source>,
-    B::Buffer<F>: BufferOps<F>,
 {
-    Initial(Vec<&'a irs_commit::Witness<M::Source, F, B, B::Matrix>>),
-    Round(irs_commit::Witness<F, F, B::Buffer<F>, <B::Buffer<F> as BufferOps<F>>::Matrix>),
+    Initial(Vec<&'a irs_commit::Witness<M::Source, F>>),
+    Round(irs_commit::Witness<F, F>),
 }
 
 impl<M: Embedding> Config<M> {
@@ -52,29 +51,15 @@ impl<M: Embedding> Config<M> {
     ///
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-    pub fn prove<'a, H, R, B>(
+    pub fn prove<'a, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&B],
-        witnesses: Vec<&'a Witness<M::Target, M, B>>,
+        vectors: &[&CpuBuffer<M::Source>],
+        witnesses: Vec<&'a Witness<M::Target, M>>,
         linear_forms: Vec<Box<dyn LinearForm<M::Target>>>,
         evaluations: Cow<'a, [M::Target]>,
     ) -> FinalClaim<M::Target>
     where
-        B: BufferOps<M::Source>,
-        B::Buffer<M::Target>: BufferOps<M::Target>,
-        <B::Matrix as MatrixBufferOps<M::Source>>::Witness:
-            Clone + PartialEq + Eq + PartialOrd + Ord + Debug + std::hash::Hash + Default,
-        <<B::Buffer<M::Target> as BufferOps<M::Target>>::Matrix as MatrixBufferOps<
-            M::Target,
-        >>::Witness: Clone
-            + PartialEq
-            + Eq
-            + PartialOrd
-            + Ord
-            + Debug
-            + std::hash::Hash
-            + Default,
         Standard: Distribution<M::Source> + Distribution<M::Target>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -106,7 +91,10 @@ impl<M: Embedding> Config<M> {
             let covector = Covector::from(&**linear_form);
             for (vector, evaluation) in zip_strict(vectors, evaluations) {
                 debug_assert_eq!(
-                    vector.mixed_dot_slice(self.embedding(), &covector.vector),
+                    vector.mixed_dot(
+                        self.embedding(),
+                        &CpuBuffer::from_slice(covector.vector.as_slice())
+                    ),
                     *evaluation
                 );
             }
@@ -153,9 +141,10 @@ impl<M: Embedding> Config<M> {
         // Random linear combination of the vectors.
         let mut vector_rlc_coeffs: Vec<M::Target> = geometric_challenge(prover_state, num_vectors);
         assert_eq!(vector_rlc_coeffs[0], M::Target::ONE);
-        let mut vector = B::mixed_linear_combination(self.embedding(), vectors, &vector_rlc_coeffs);
+        let mut vector =
+            FieldOps::mixed_linear_combination(self.embedding(), vectors, &vector_rlc_coeffs);
 
-        let mut prev_witness: RoundWitness<'a, M::Target, M, B> = RoundWitness::Initial(witnesses);
+        let mut prev_witness: RoundWitness<'a, M::Target, M> = RoundWitness::Initial(witnesses);
 
         // Random linear combination of the constraints.
         let constraint_rlc_coeffs: Vec<M::Target> =
@@ -165,13 +154,13 @@ impl<M: Embedding> Config<M> {
             constraint_rlc_coeffs.split_at(linear_forms.len());
         let mut linear_forms = linear_forms;
         let mut covector = if has_constraints {
-            <B::Buffer<M::Target> as BufferOps<M::Target>>::linear_forms_rlc(
+            FieldOps::linear_forms_rlc(
                 self.initial_size(),
                 &mut linear_forms,
                 initial_forms_rlc_coeffs,
             )
         } else {
-            <B::Buffer<M::Target> as BufferOps<M::Target>>::zeros(0)
+            FieldOps::zeros(0)
         };
         drop(linear_forms);
 
@@ -214,9 +203,7 @@ impl<M: Embedding> Config<M> {
                 vector.fold(f);
             }
             // Covector must be all zeros.
-            covector = <B::Buffer<M::Target> as BufferOps<M::Target>>::zeros(
-                self.initial_sumcheck.final_size(),
-            );
+            covector = FieldOps::zeros(self.initial_sumcheck.final_size());
             folding_randomness
         };
         let mut evaluation_point = folding_randomness.clone();
@@ -279,7 +266,9 @@ impl<M: Embedding> Config<M> {
 
         // Directly send the vector to the verifier.
         assert_eq!(vector.len(), self.final_sumcheck.initial_size);
-        vector.write_to_prover(prover_state);
+        for coeff in vector.as_slice() {
+            prover_state.prover_message(coeff);
+        }
 
         // PoW
         self.final_pow.prove(prover_state);
