@@ -182,7 +182,7 @@ mod tests {
 /// generic Montgomery implementation of the same field on every operation.
 #[cfg(test)]
 mod goldilocks_tests {
-    use ark_ff::{AdditiveGroup, FftField, Field as _, Fp64, MontBackend, PrimeField};
+    use ark_ff::{AdditiveGroup, FftField, Fp64, MontBackend, PrimeField};
     use proptest::prelude::*;
 
     use super::*;

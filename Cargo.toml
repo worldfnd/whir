@@ -36,10 +36,7 @@ redundant_closure_for_method_calls = "allow"
 ark-std = { version = "0.6", features = ["std"] }
 ark-ff = { version = "0.6", features = ["asm", "std"] }
 ark-serialize = "0.6"
-# blake3 1.8.4+ moves `traits-preview` onto digest 0.11, which is incompatible
-# with the digest 0.10 ecosystem used here (digest/sha2/sha3). Lift the upper
-# bound when the whole digest stack moves to 0.11.
-blake3 = { version = ">=1.5, <1.8.4", features = ["digest", "traits-preview"] }
+blake3 = { version = "1.5", features = ["digest", "traits-preview"] }
 sha3 = { version = "0.10.7", features = ["asm", "oid"] }
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
