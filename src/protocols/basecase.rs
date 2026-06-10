@@ -13,7 +13,7 @@ use spongefish::{Decoding, VerificationResult};
 
 use crate::{
     algebra::{
-        buffer::CpuBuffer, dot, embedding::Identity, multilinear_extend, random_vector,
+        buffer::ActiveBuffer, dot, embedding::Identity, multilinear_extend, random_vector,
         scalar_mul_add_new, univariate_evaluate,
     },
     hash::Hash,
@@ -83,8 +83,8 @@ impl<F: Field> Config<F> {
             prover_state.prover_messages(&vector);
             prover_state.prover_messages(witness.masks.as_slice());
             let _ = self.commit.open(prover_state, &[witness]);
-            let mut vector_buffer = CpuBuffer::from_vec(vector);
-            let mut covector_buffer = CpuBuffer::from_vec(covector);
+            let mut vector_buffer = ActiveBuffer::from_vec(vector);
+            let mut covector_buffer = ActiveBuffer::from_vec(covector);
             let point = self
                 .sumcheck
                 .prove(
@@ -104,7 +104,7 @@ impl<F: Field> Config<F> {
 
         // Create masking vector.
         let mask = random_vector(prover_state.rng(), vector.len());
-        let mask_buffer = CpuBuffer::from_slice(&mask);
+        let mask_buffer = ActiveBuffer::from_slice(&mask);
 
         // Commit to the masking vector.
         let mask_witness = self.commit.commit(prover_state, &[&mask_buffer]);
@@ -132,8 +132,8 @@ impl<F: Field> Config<F> {
 
         // Run sumcheck to reduce linear form claim
         let mut masked_sum = mask_sum + mask_rlc * sum;
-        let mut masked_vector_buffer = CpuBuffer::from_vec(masked_vector);
-        let mut covector_buffer = CpuBuffer::from_vec(covector);
+        let mut masked_vector_buffer = ActiveBuffer::from_vec(masked_vector);
+        let mut covector_buffer = ActiveBuffer::from_vec(covector);
         let point = self
             .sumcheck
             .prove(
@@ -304,7 +304,7 @@ mod tests {
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffer = CpuBuffer::from_slice(&vector);
+        let vector_buffer = ActiveBuffer::from_slice(&vector);
         let witness = config.commit.commit(&mut prover_state, &[&vector_buffer]);
         let prover_result = config.prove(
             &mut prover_state,

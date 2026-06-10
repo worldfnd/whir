@@ -11,7 +11,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::{BufferOps, CpuBuffer},
+        buffer::{ActiveBuffer, BufferOps},
         univariate_evaluate,
     },
     protocols::proof_of_work,
@@ -69,8 +69,8 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        a: &mut CpuBuffer<F>,
-        b: &mut CpuBuffer<F>,
+        a: &mut ActiveBuffer<F>,
+        b: &mut ActiveBuffer<F>,
         sum: &mut F,
         masks: &[F],
     ) -> SumcheckOpening<F>
@@ -243,7 +243,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
-            buffer::CpuBuffer,
+            buffer::ActiveBuffer,
             dot,
             fields::{self, Field64},
             multilinear_extend, random_vector,
@@ -302,8 +302,8 @@ mod tests {
         let masks = random_vector(&mut rng, config.mask_length * config.num_rounds);
 
         // Prover
-        let mut vector = CpuBuffer::from_slice(&initial_vector);
-        let mut covector = CpuBuffer::from_slice(&initial_covector);
+        let mut vector = ActiveBuffer::from_slice(&initial_vector);
+        let mut covector = ActiveBuffer::from_slice(&initial_covector);
         let mut sum = initial_sum;
         let mut prover_state = ProverState::new_std(&ds);
         let SumcheckOpening {

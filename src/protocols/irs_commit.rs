@@ -24,7 +24,7 @@ use std::{
     ops::Neg,
 };
 
-use crate::{algebra::buffer::FieldOps, protocols::merkle_tree};
+use crate::algebra::buffer::FieldOps;
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use ordered_float::OrderedFloat;
@@ -35,7 +35,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::{BufferOps, CpuBuffer},
+        buffer::{ActiveBuffer, BufferOps},
         dot,
         embedding::Embedding,
         fields::FieldWithSize,
@@ -104,8 +104,8 @@ pub struct Witness<F: Field, G = F>
 where
     G: Field,
 {
-    pub masks: CpuBuffer<F>,
-    pub matrix: CpuBuffer<F>,
+    pub masks: ActiveBuffer<F>,
+    pub matrix: ActiveBuffer<F>,
     pub matrix_witness: matrix_commit::Witness,
     pub out_of_domain: Evaluations<G>,
     source_field: PhantomData<F>,
@@ -301,7 +301,7 @@ impl<M: Embedding> Config<M> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&CpuBuffer<M::Source>],
+        vectors: &[&ActiveBuffer<M::Source>],
     ) -> Witness<M::Source, M::Target>
     where
         Standard: Distribution<M::Source>,
@@ -319,11 +319,11 @@ impl<M: Embedding> Config<M> {
         assert_eq!(vectors.len(), self.num_vectors);
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
-        let masks = CpuBuffer::<M::Source>::random(
+        let masks = ActiveBuffer::<M::Source>::random(
             prover_state.rng(),
             self.mask_length * self.num_messages(),
         );
-        let matrix = CpuBuffer::interleaved_rs_encode(
+        let matrix = ActiveBuffer::interleaved_rs_encode(
             vectors,
             &masks,
             self.message_length(),
@@ -743,7 +743,7 @@ pub(crate) mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = config.commit(&mut prover_state, &vector_refs);

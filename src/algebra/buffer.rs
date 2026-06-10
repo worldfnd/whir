@@ -1,4 +1,3 @@
-use core::num;
 use std::{any::Any, mem};
 
 use ark_ff::Field;
@@ -13,6 +12,15 @@ use crate::{
     },
     utils::chunks_exact_or_empty,
 };
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use super::metal_buffer::MetalBuffer;
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub type ActiveBuffer<T> = MetalBuffer<T>;
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub type ActiveBuffer<T> = CpuBuffer<T>;
 
 pub trait BufferOps<T> {
     fn from_vec(source: Vec<T>) -> Self;

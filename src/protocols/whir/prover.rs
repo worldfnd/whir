@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Debug};
+use std::borrow::Cow;
 
 use crate::algebra::buffer::FieldOps;
 use ark_ff::{AdditiveGroup, Field};
@@ -9,7 +9,7 @@ use tracing::instrument;
 use super::{Config, Witness};
 use crate::{
     algebra::{
-        buffer::{BufferOps, CpuBuffer},
+        buffer::{ActiveBuffer, BufferOps},
         dot,
         embedding::Embedding,
         eq_weights,
@@ -54,7 +54,7 @@ impl<M: Embedding> Config<M> {
     pub fn prove<'a, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&CpuBuffer<M::Source>],
+        vectors: &[&ActiveBuffer<M::Source>],
         witnesses: Vec<&'a Witness<M::Target, M>>,
         linear_forms: Vec<Box<dyn LinearForm<M::Target>>>,
         evaluations: Cow<'a, [M::Target]>,
@@ -93,7 +93,7 @@ impl<M: Embedding> Config<M> {
                 debug_assert_eq!(
                     vector.mixed_dot(
                         self.embedding(),
-                        &CpuBuffer::from_slice(covector.vector.as_slice())
+                        &ActiveBuffer::from_slice(covector.vector.as_slice())
                     ),
                     *evaluation
                 );

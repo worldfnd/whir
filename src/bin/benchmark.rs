@@ -10,7 +10,7 @@ use clap::Parser;
 use serde::Serialize;
 use whir::{
     algebra::{
-        buffer::CpuBuffer,
+        buffer::ActiveBuffer,
         embedding::{Basefield, Embedding, Identity},
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
@@ -162,7 +162,7 @@ where
 
         HASH_COUNTER.reset();
 
-        let vector_buffer = CpuBuffer::from_slice(&vector);
+        let vector_buffer = ActiveBuffer::from_slice(&vector);
         let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let _ = params.prove(
@@ -240,7 +240,7 @@ where
         HASH_COUNTER.reset();
         let whir_prover_time = Instant::now();
 
-        let vector_buffer = CpuBuffer::from_slice(&vector);
+        let vector_buffer = ActiveBuffer::from_slice(&vector);
         let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let prove_linear_forms: Vec<Box<dyn LinearForm<M::Target>>> = points

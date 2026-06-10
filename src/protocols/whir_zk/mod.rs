@@ -251,7 +251,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
-            buffer::CpuBuffer,
+            buffer::ActiveBuffer,
             fields::Field64,
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
@@ -355,7 +355,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -452,7 +452,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -511,7 +511,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -575,7 +575,7 @@ mod tests {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut prover_state = ProverState::new_std(&ds);
-            let vector_buffer = CpuBuffer::from_slice(&vector);
+            let vector_buffer = ActiveBuffer::from_slice(&vector);
             let witness = params.commit(&mut prover_state, &[&vector_buffer]);
             let _ = params.prove(
                 &mut prover_state,

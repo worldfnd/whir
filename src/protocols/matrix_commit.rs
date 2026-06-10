@@ -12,7 +12,7 @@ use tracing::instrument;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
-    algebra::buffer::{BufferOps, CpuBuffer},
+    algebra::buffer::{ActiveBuffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::merkle_tree,
@@ -114,7 +114,7 @@ where
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 pub struct BufferWitness {
-    pub nodes: CpuBuffer<Hash>,
+    pub nodes: ActiveBuffer<Hash>,
 }
 
 pub type Witness = BufferWitness;
@@ -217,7 +217,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        matrix: &CpuBuffer<T>,
+        matrix: &ActiveBuffer<T>,
     ) -> Witness
     where
         H: DuplexSpongeInterface,
@@ -239,7 +239,9 @@ impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
 
         // Commit the leaf hashes
         BufferWitness {
-            nodes: CpuBuffer::<Hash>::from_vec(self.merkle_tree.commit(prover_state, leaves).nodes),
+            nodes: ActiveBuffer::<Hash>::from_vec(
+                self.merkle_tree.commit(prover_state, leaves).nodes,
+            ),
         }
     }
 
@@ -446,8 +448,8 @@ pub(crate) mod tests {
             .instance(&Empty);
 
         // Instance
-        let matrix: CpuBuffer<T> =
-            CpuBuffer::from_vec((0..config.size()).map(|_| rng.gen()).collect());
+        let matrix: ActiveBuffer<T> =
+            ActiveBuffer::from_vec((0..config.size()).map(|_| rng.gen()).collect());
         let submatrix: Vec<T> = matrix.read_rows(num_cols, indices);
 
         // Prover

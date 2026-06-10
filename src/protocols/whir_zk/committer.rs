@@ -7,7 +7,7 @@ use tracing::instrument;
 
 use super::{utils::BlindingPolynomials, Config};
 use crate::{
-    algebra::buffer::CpuBuffer,
+    algebra::buffer::ActiveBuffer,
     hash::Hash,
     protocols::{irs_commit, whir},
     transcript::{
@@ -46,7 +46,7 @@ impl<F: Field> Config<F> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        polynomials: &[&CpuBuffer<F>],
+        polynomials: &[&ActiveBuffer<F>],
     ) -> Witness<F>
     where
         Standard: Distribution<F>,
@@ -90,7 +90,7 @@ impl<F: Field> Config<F> {
                 .zip(mask.iter().cycle())
                 .map(|(&coeff, &m)| coeff + m)
                 .collect::<Vec<_>>();
-            let f_hat_buffer = CpuBuffer::from_slice(&f_hat_vec);
+            let f_hat_buffer = ActiveBuffer::from_slice(&f_hat_vec);
             let witness = self
                 .blinded_commitment
                 .commit(prover_state, &[&f_hat_buffer]);
@@ -117,7 +117,7 @@ impl<F: Field> Config<F> {
         }
         let blinding_buffers = blinding_vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let blinding_vector_refs = blinding_buffers.iter().collect::<Vec<_>>();
         let blinding_witness = self

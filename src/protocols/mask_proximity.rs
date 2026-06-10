@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     algebra::{
-        buffer::CpuBuffer, embedding::Identity, random_vector, scalar_mul_add_new,
+        buffer::ActiveBuffer, embedding::Identity, random_vector, scalar_mul_add_new,
         univariate_evaluate,
     },
     hash::Hash,
@@ -136,15 +136,15 @@ impl<F: Field> Config<F> {
 
         let original_buffers = original_msgs
             .iter()
-            .map(|msg| CpuBuffer::from_slice(msg))
+            .map(|msg| ActiveBuffer::from_slice(msg))
             .collect::<Vec<_>>();
         let fresh_buffers = fresh_msgs
             .iter()
-            .map(|msg| CpuBuffer::from_slice(msg))
+            .map(|msg| ActiveBuffer::from_slice(msg))
             .collect::<Vec<_>>();
 
         // Tree layout: [originals..., freshes...]
-        let all_vectors: Vec<&CpuBuffer<F>> = original_buffers
+        let all_vectors: Vec<&ActiveBuffer<F>> = original_buffers
             .iter()
             .chain(fresh_buffers.iter())
             .collect();

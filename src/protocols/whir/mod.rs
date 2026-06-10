@@ -14,7 +14,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::{BufferOps, CpuBuffer},
+        buffer::ActiveBuffer,
         embedding::{Embedding, Identity},
         linear_form::LinearForm,
     },
@@ -84,7 +84,7 @@ impl<M: Embedding> Config<M> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&CpuBuffer<M::Source>],
+        vectors: &[&ActiveBuffer<M::Source>],
     ) -> Witness<M::Target, M>
     where
         Standard: Distribution<M::Source>,
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
-            buffer::CpuBuffer,
+            buffer::ActiveBuffer,
             embedding::Basefield,
             fields::{Field64, Field64_3},
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
@@ -245,7 +245,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
 
         // Commit to the polynomial and generate auxiliary witness data
-        let vector_buffer = CpuBuffer::from_slice(&vector);
+        let vector_buffer = ActiveBuffer::from_slice(&vector);
         let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let prove_linear_forms = build_prove_forms(&points, num_variables, true);
@@ -421,7 +421,7 @@ mod tests {
         // Commit to each polynomial and generate witnesses
         let vector_buffers = vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let mut witnesses = Vec::new();
         for vec in &vector_buffers {
@@ -577,15 +577,15 @@ mod tests {
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
 
-        let vec1_buffer = CpuBuffer::from_slice(&vec1);
-        let vec2_buffer = CpuBuffer::from_slice(&vec2);
+        let vec1_buffer = ActiveBuffer::from_slice(&vec1);
+        let vec2_buffer = ActiveBuffer::from_slice(&vec2);
         let witness1 = params.commit(&mut prover_state, &[&vec1_buffer]);
         let witness2 = params.commit(&mut prover_state, &[&vec2_buffer]);
 
         let prove_linear_forms = build_prove_forms(&constraint_points, num_variables, false);
 
         // Generate proof with mismatched polynomials
-        let vec_wrong_buffer = CpuBuffer::from_vec(vec_wrong);
+        let vec_wrong_buffer = ActiveBuffer::from_vec(vec_wrong);
         let _ = params.prove(
             &mut prover_state,
             &[&vec1_buffer, &vec_wrong_buffer],
@@ -696,7 +696,7 @@ mod tests {
         // Commit using commit_batch (stacks batch_size polynomials per witness)
         let vector_buffers = all_vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let buffer_refs = vector_buffers.iter().collect::<Vec<_>>();
         let mut witnesses = Vec::new();
@@ -824,7 +824,7 @@ mod tests {
         // Create a commitment to the polynomial and generate auxiliary witness data
         let vector_buffers = vectors
             .iter()
-            .map(|v| CpuBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from_slice(v))
             .collect::<Vec<_>>();
         let buffer_refs = vector_buffers.iter().collect::<Vec<_>>();
         let batched_witness = params.commit(&mut prover_state, &buffer_refs);
