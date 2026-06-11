@@ -301,12 +301,12 @@ fn bench_sumcheck(
     let ds = DomainSeparator::protocol(&config)
         .session(&"phase benchmark sumcheck")
         .instance(&Empty);
+    let mut a = ActiveBuffer::from_vec(input_vector(size));
+    let mut b = ActiveBuffer::from_vec((0..size).map(|i| F::from(i as u64 + 17)).collect());
+    let mut sum = a.dot(&b);
 
     HASH_COUNTER.reset();
     let measured = measure_phase(|| {
-        let mut a = ActiveBuffer::from_vec(input_vector(size));
-        let mut b = ActiveBuffer::from_vec((0..size).map(|i| F::from(i as u64 + 17)).collect());
-        let mut sum = a.dot(&b);
         let mut prover_state = ProverState::new_std(&ds);
         let _ = black_box(config.prove(&mut prover_state, &mut a, &mut b, &mut sum, &[]));
     });

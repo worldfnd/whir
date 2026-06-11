@@ -110,9 +110,7 @@ impl<F: Field> Config<F> {
         {
             // Fold and compute sumcheck polynomial in one pass.
             let (c0, c2) = if let Some(w) = prev_round_challenge {
-                a.fold(w);
-                b.fold(w);
-                a.sumcheck_polynomial(b)
+                a.fold_pair_sumcheck_polynomial(b, w)
             } else {
                 a.sumcheck_polynomial(b)
             };
@@ -152,8 +150,7 @@ impl<F: Field> Config<F> {
         }
         if let Some(w) = prev_round_challenge {
             // Final fold of the inputs (no polynomial computation)
-            a.fold(w);
-            b.fold(w);
+            a.fold_pair(b, w);
         }
 
         *sum = mask_sum + mask_rlc * *sum;

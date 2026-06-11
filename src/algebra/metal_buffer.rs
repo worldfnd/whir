@@ -316,6 +316,26 @@ kernel void bn254_fold(
     store_f(values, gid, add_f(low, mul_f(sub_f(high, low), weight)));
 }
 
+inline F fold_value_at(device const ulong *values, uint len, uint fold_half, uint idx, F weight) {
+    F low = idx < len ? load_f(values, idx) : zero_f();
+    F high = idx + fold_half < len ? load_f(values, idx + fold_half) : zero_f();
+    return add_f(low, mul_f(sub_f(high, low), weight));
+}
+
+kernel void bn254_fold_pair(
+    device ulong *a [[buffer(0)]],
+    device ulong *b [[buffer(1)]],
+    device const ulong *weight_buf [[buffer(2)]],
+    constant uint &len [[buffer(3)]],
+    constant uint &fold_half [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= fold_half) return;
+    F weight = load_f(weight_buf, 0);
+    store_f(a, gid, fold_value_at(a, len, fold_half, gid, weight));
+    store_f(b, gid, fold_value_at(b, len, fold_half, gid, weight));
+}
+
 kernel void bn254_scalar_mul_add(
     device ulong *acc [[buffer(0)]],
     device const ulong *vector [[buffer(1)]],
@@ -402,6 +422,27 @@ kernel void bn254_sum_chunks(
     store_f(out, gid, acc);
 }
 
+kernel void bn254_sumcheck_reduce_chunks(
+    device const ulong *input [[buffer(0)]],
+    device ulong *out [[buffer(1)]],
+    constant uint &len [[buffer(2)]],
+    constant uint &chunk_size [[buffer(3)]],
+    constant uint &out_len [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= out_len) return;
+    uint start = gid * chunk_size;
+    uint end = min(start + chunk_size, len);
+    F c0 = zero_f();
+    F c2 = zero_f();
+    for (uint i = start; i < end; i++) {
+        c0 = add_f(c0, load_f(input, i));
+        c2 = add_f(c2, load_f(input, len + i));
+    }
+    store_f(out, gid, c0);
+    store_f(out, out_len + gid, c2);
+}
+
 kernel void bn254_sumcheck_chunks(
     device const ulong *a [[buffer(0)]],
     device const ulong *b [[buffer(1)]],
@@ -422,6 +463,43 @@ kernel void bn254_sumcheck_chunks(
         F b0 = i < len ? load_f(b, i) : zero_f();
         F a1 = i + fold_half < len ? load_f(a, i + fold_half) : zero_f();
         F b1 = i + fold_half < len ? load_f(b, i + fold_half) : zero_f();
+        c0 = add_f(c0, mul_f(a0, b0));
+        c2 = add_f(c2, mul_f(sub_f(a1, a0), sub_f(b1, b0)));
+    }
+    store_f(out, gid, c0);
+    store_f(out, partial_count + gid, c2);
+}
+
+kernel void bn254_fold_pair_sumcheck_chunks(
+    device ulong *a [[buffer(0)]],
+    device ulong *b [[buffer(1)]],
+    device const ulong *weight_buf [[buffer(2)]],
+    device ulong *out [[buffer(3)]],
+    constant uint &len [[buffer(4)]],
+    constant uint &fold_half [[buffer(5)]],
+    constant uint &sum_half [[buffer(6)]],
+    constant uint &chunk_size [[buffer(7)]],
+    constant uint &partial_count [[buffer(8)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint start = gid * chunk_size;
+    if (start >= sum_half) return;
+    uint end = min(start + chunk_size, sum_half);
+    F weight = load_f(weight_buf, 0);
+    F c0 = zero_f();
+    F c2 = zero_f();
+    for (uint i = start; i < end; i++) {
+        uint right = i + sum_half;
+        F a0 = fold_value_at(a, len, fold_half, i, weight);
+        F b0 = fold_value_at(b, len, fold_half, i, weight);
+        F a1 = right < fold_half ? fold_value_at(a, len, fold_half, right, weight) : zero_f();
+        F b1 = right < fold_half ? fold_value_at(b, len, fold_half, right, weight) : zero_f();
+        store_f(a, i, a0);
+        store_f(b, i, b0);
+        if (right < fold_half) {
+            store_f(a, right, a1);
+            store_f(b, right, b1);
+        }
         c0 = add_f(c0, mul_f(a0, b0));
         c2 = add_f(c2, mul_f(sub_f(a1, a0), sub_f(b1, b0)));
     }
@@ -483,16 +561,26 @@ kernel void bn254_geometric_accumulate_chunks_strided(
     uint start = gid * chunk_size;
     if (start >= len) return;
     uint end = min(start + chunk_size, len);
+    uint count = end - start;
+
+    // Accumulate all points into registers so `acc` is read and written
+    // once per element instead of once per (element, point).
+    F sums[32];
+    for (uint k = 0; k < count; k++) {
+        sums[k] = zero_f();
+    }
     for (uint j = 0; j < num_points; j++) {
         F point = load_f(points, j);
-        F scalar = load_f(scalars, j);
-        F power = pow_f(load_f(point_steps, j), gid);
-        for (uint i = start; i < end; i++) {
-            F value = load_f(acc, i);
-            value = add_f(value, mul_f(scalar, power));
-            store_f(acc, i, value);
+        // Fold the scalar into the running power so the inner loop needs a
+        // single multiplication per element.
+        F power = mul_f(load_f(scalars, j), pow_f(load_f(point_steps, j), gid));
+        for (uint k = 0; k < count; k++) {
+            sums[k] = add_f(sums[k], power);
             power = mul_f(power, point);
         }
+    }
+    for (uint i = start, k = 0; i < end; i++, k++) {
+        store_f(acc, i, add_f(load_f(acc, i), sums[k]));
     }
 }
 
@@ -517,22 +605,64 @@ kernel void bn254_geometric_accumulate_point_blocks(
     if (point_start >= num_points) return;
     uint point_end = min(point_start + point_block_size, num_points);
 
-    F sums[16];
+    F sums[32];
     for (uint k = 0; k < chunk_size; k++) {
         sums[k] = zero_f();
     }
 
     for (uint j = point_start; j < point_end; j++) {
         F point = load_f(points, j);
-        F scalar = load_f(scalars, j);
-        F power = pow_f(load_f(point_steps, j), chunk);
+        F power = mul_f(load_f(scalars, j), pow_f(load_f(point_steps, j), chunk));
         for (uint i = start, k = 0; i < end; i++, k++) {
-            sums[k] = add_f(sums[k], mul_f(scalar, power));
+            sums[k] = add_f(sums[k], power);
             power = mul_f(power, point);
         }
     }
 
     uint partial_offset = point_block * len;
+    for (uint i = start, k = 0; i < end; i++, k++) {
+        store_f(partials, partial_offset + i, sums[k]);
+    }
+}
+
+kernel void bn254_geometric_accumulate_point_blocks_range(
+    device ulong *partials [[buffer(0)]],
+    device const ulong *points [[buffer(1)]],
+    device const ulong *point_steps [[buffer(2)]],
+    device const ulong *scalars [[buffer(3)]],
+    constant uint &len [[buffer(4)]],
+    constant uint &num_points [[buffer(5)]],
+    constant uint &chunk_size [[buffer(6)]],
+    constant uint &point_block_size [[buffer(7)]],
+    constant uint &point_block_offset [[buffer(8)]],
+    constant uint &batch_point_blocks [[buffer(9)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint chunk = gid / batch_point_blocks;
+    uint local_point_block = gid - chunk * batch_point_blocks;
+    uint global_point_block = point_block_offset + local_point_block;
+    uint start = chunk * chunk_size;
+    if (start >= len) return;
+    uint end = min(start + chunk_size, len);
+    uint point_start = global_point_block * point_block_size;
+    if (point_start >= num_points) return;
+    uint point_end = min(point_start + point_block_size, num_points);
+
+    F sums[32];
+    for (uint k = 0; k < chunk_size; k++) {
+        sums[k] = zero_f();
+    }
+
+    for (uint j = point_start; j < point_end; j++) {
+        F point = load_f(points, j);
+        F power = mul_f(load_f(scalars, j), pow_f(load_f(point_steps, j), chunk));
+        for (uint i = start, k = 0; i < end; i++, k++) {
+            sums[k] = add_f(sums[k], power);
+            power = mul_f(power, point);
+        }
+    }
+
+    uint partial_offset = local_point_block * len;
     for (uint i = start, k = 0; i < end; i++, k++) {
         store_f(partials, partial_offset + i, sums[k]);
     }
@@ -820,11 +950,14 @@ kernel void bn254_multilinear_extend(
 
 const REDUCTION_CHUNK_SIZE: usize = 64;
 const SMALL_GEOMETRIC_ACCUMULATE_CHUNK_SIZE: usize = 8;
-const LARGE_GEOMETRIC_ACCUMULATE_CHUNK_SIZE: usize = 16;
+const LARGE_GEOMETRIC_ACCUMULATE_CHUNK_SIZE: usize = 32;
+/// Must match the `sums` register array size in the strided kernel.
+const MAX_GEOMETRIC_ACCUMULATE_CHUNK_SIZE: usize = 32;
 const LARGE_GEOMETRIC_ACCUMULATE_THRESHOLD: usize = 1 << 18;
 const GEOMETRIC_ACCUMULATE_POINT_BLOCK_SIZE: usize = 16;
 const GEOMETRIC_ACCUMULATE_POINT_BLOCK_THRESHOLD: usize = 1 << 17;
 const GEOMETRIC_ACCUMULATE_POINT_BLOCK_MIN_POINTS: usize = 64;
+const GEOMETRIC_ACCUMULATE_POINT_BLOCK_BATCH_BYTES: usize = 256 << 20;
 
 #[derive(Clone, Debug)]
 struct MetalFieldBuffer {
@@ -1060,7 +1193,14 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
 
     fn zeros(length: usize) -> Self {
         assert_bn254::<F>();
-        Self::from_vec(vec![F::ZERO; length])
+        // Montgomery zero is all-zero bytes, so a device-side fill suffices.
+        Self {
+            len: length,
+            host_cache: OnceCell::new(),
+            field: Some(zeroed_field_buffer(length)),
+            hash: None,
+            _marker: PhantomData,
+        }
     }
 
     fn random<R>(rng: &mut R, length: usize) -> Self
@@ -1108,16 +1248,65 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
         self.invalidate_host_cache();
     }
 
+    fn fold_pair(&mut self, other: &mut Self, weight: F) {
+        assert_bn254::<F>();
+        assert_eq!(self.len(), other.len());
+        if self.len() <= 1 {
+            return;
+        }
+        let len = self.len();
+        let fold_half = len.next_power_of_two() >> 1;
+        let weight = upload_field(&[f_to_field256(weight)]);
+        let this = self.bn254_buffer();
+        let other_buffer = other.bn254_buffer();
+        run_in_place(
+            "bn254_fold_pair",
+            &[&this.limbs, &other_buffer.limbs, &weight.limbs],
+            &[len as u32, fold_half as u32],
+            fold_half,
+        );
+        self.len = fold_half;
+        other.len = fold_half;
+        self.invalidate_host_cache();
+        other.invalidate_host_cache();
+    }
+
     fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
         assert_bn254::<F>();
         let len = self.len().min(other.len());
         if len == 0 {
             return (F::ZERO, F::ZERO);
         }
+        if len == 1 {
+            return (self.as_slice()[0] * other.as_slice()[0], F::ZERO);
+        }
         let fold_half = len.next_power_of_two() >> 1;
         let this = self.bn254_buffer();
         let other = other.bn254_buffer();
         let (c0, c2) = parallel_sumcheck(&this, &other, len, fold_half);
+        (field256_to_f::<F>(c0), field256_to_f::<F>(c2))
+    }
+
+    fn fold_pair_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F) {
+        assert_bn254::<F>();
+        assert_eq!(self.len(), other.len());
+        if self.len() <= 1 {
+            return self.sumcheck_polynomial(other);
+        }
+        let len = self.len();
+        let fold_half = len.next_power_of_two() >> 1;
+        if fold_half == 1 {
+            self.fold_pair(other, weight);
+            return self.sumcheck_polynomial(other);
+        }
+        let weight = upload_field(&[f_to_field256(weight)]);
+        let this = self.bn254_buffer();
+        let other_buffer = other.bn254_buffer();
+        let (c0, c2) = parallel_fold_pair_sumcheck(&this, &other_buffer, &weight, len, fold_half);
+        self.len = fold_half;
+        other.len = fold_half;
+        self.invalidate_host_cache();
+        other.invalidate_host_cache();
         (field256_to_f::<F>(c0), field256_to_f::<F>(c2))
     }
 
@@ -1172,6 +1361,20 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
             let point_steps = upload_field(&point_steps);
             if should_use_geometric_point_blocks(self.len(), evaluators.len(), chunk_size) {
                 parallel_geometric_accumulate_point_blocks(
+                    &field,
+                    &points,
+                    &point_steps,
+                    &scalars,
+                    self.len(),
+                    evaluators.len(),
+                    chunk_size,
+                );
+            } else if should_use_geometric_point_blocks_batched(
+                self.len(),
+                evaluators.len(),
+                chunk_size,
+            ) {
+                parallel_geometric_accumulate_point_blocks_batched(
                     &field,
                     &points,
                     &point_steps,
@@ -1347,7 +1550,7 @@ impl<T: Clone> MetalBuffer<T> {
     fn bn254_buffer(&self) -> MetalFieldBuffer {
         self.field
             .clone()
-            .unwrap_or_else(|| upload_field(&to_field256_slice(self.as_slice())))
+            .unwrap_or_else(|| upload_field(as_field256_slice(self.as_slice())))
     }
 
     fn invalidate_host_cache(&mut self) {
@@ -1389,7 +1592,7 @@ impl<T: Clone + Field> MetalBuffer<T> {
     fn bn254_buffer_target(&self) -> MetalFieldBuffer {
         self.field
             .clone()
-            .unwrap_or_else(|| upload_field(&to_field256_slice(self.as_slice())))
+            .unwrap_or_else(|| upload_field(as_field256_slice(self.as_slice())))
     }
 }
 
@@ -1397,16 +1600,20 @@ struct MetalRuntime {
     device: Device,
     queue: CommandQueue,
     fold: ComputePipelineState,
+    fold_pair: ComputePipelineState,
     scalar_mul_add: ComputePipelineState,
     dot: ComputePipelineState,
     sumcheck: ComputePipelineState,
     dot_chunks: ComputePipelineState,
     sum_chunks: ComputePipelineState,
+    sumcheck_reduce_chunks: ComputePipelineState,
     sumcheck_chunks: ComputePipelineState,
+    fold_pair_sumcheck_chunks: ComputePipelineState,
     geometric_accumulate: ComputePipelineState,
     geometric_accumulate_chunks: ComputePipelineState,
     geometric_accumulate_chunks_strided: ComputePipelineState,
     geometric_accumulate_point_blocks: ComputePipelineState,
+    geometric_accumulate_point_blocks_range: ComputePipelineState,
     geometric_accumulate_reduce_point_blocks: ComputePipelineState,
     univariate_evaluate: ComputePipelineState,
     univariate_eval_chunks: ComputePipelineState,
@@ -1444,18 +1651,24 @@ fn runtime() -> &'static MetalRuntime {
         MetalRuntime {
             queue: device.new_command_queue(),
             fold: pipeline("bn254_fold"),
+            fold_pair: pipeline("bn254_fold_pair"),
             scalar_mul_add: pipeline("bn254_scalar_mul_add"),
             dot: pipeline("bn254_dot"),
             sumcheck: pipeline("bn254_sumcheck"),
             dot_chunks: pipeline("bn254_dot_chunks"),
             sum_chunks: pipeline("bn254_sum_chunks"),
+            sumcheck_reduce_chunks: pipeline("bn254_sumcheck_reduce_chunks"),
             sumcheck_chunks: pipeline("bn254_sumcheck_chunks"),
+            fold_pair_sumcheck_chunks: pipeline("bn254_fold_pair_sumcheck_chunks"),
             geometric_accumulate: pipeline("bn254_geometric_accumulate"),
             geometric_accumulate_chunks: pipeline("bn254_geometric_accumulate_chunks"),
             geometric_accumulate_chunks_strided: pipeline(
                 "bn254_geometric_accumulate_chunks_strided",
             ),
             geometric_accumulate_point_blocks: pipeline("bn254_geometric_accumulate_point_blocks"),
+            geometric_accumulate_point_blocks_range: pipeline(
+                "bn254_geometric_accumulate_point_blocks_range",
+            ),
             geometric_accumulate_reduce_point_blocks: pipeline(
                 "bn254_geometric_accumulate_reduce_point_blocks",
             ),
@@ -1485,16 +1698,22 @@ fn runtime() -> &'static MetalRuntime {
 fn pipeline<'a>(rt: &'a MetalRuntime, name: &str) -> &'a ComputePipelineState {
     match name {
         "bn254_fold" => &rt.fold,
+        "bn254_fold_pair" => &rt.fold_pair,
         "bn254_scalar_mul_add" => &rt.scalar_mul_add,
         "bn254_dot" => &rt.dot,
         "bn254_sumcheck" => &rt.sumcheck,
         "bn254_dot_chunks" => &rt.dot_chunks,
         "bn254_sum_chunks" => &rt.sum_chunks,
+        "bn254_sumcheck_reduce_chunks" => &rt.sumcheck_reduce_chunks,
         "bn254_sumcheck_chunks" => &rt.sumcheck_chunks,
+        "bn254_fold_pair_sumcheck_chunks" => &rt.fold_pair_sumcheck_chunks,
         "bn254_geometric_accumulate" => &rt.geometric_accumulate,
         "bn254_geometric_accumulate_chunks" => &rt.geometric_accumulate_chunks,
         "bn254_geometric_accumulate_chunks_strided" => &rt.geometric_accumulate_chunks_strided,
         "bn254_geometric_accumulate_point_blocks" => &rt.geometric_accumulate_point_blocks,
+        "bn254_geometric_accumulate_point_blocks_range" => {
+            &rt.geometric_accumulate_point_blocks_range
+        }
         "bn254_geometric_accumulate_reduce_point_blocks" => {
             &rt.geometric_accumulate_reduce_point_blocks
         }
@@ -1623,13 +1842,17 @@ fn parallel_dot(a: &MetalFieldBuffer, b: &MetalFieldBuffer, len: usize) -> Field
     let partials = MetalFieldBuffer {
         limbs: new_shared_buffer(rt, (partial_count * size_of::<Field256>()) as u64),
     };
-    run_in_place(
-        "bn254_dot_chunks",
+    let command = rt.queue.new_command_buffer();
+    encode_u32_kernel(
+        command,
+        pipeline(rt, "bn254_dot_chunks"),
         &[&a.limbs, &b.limbs, &partials.limbs],
         &[len as u32, REDUCTION_CHUNK_SIZE as u32],
         partial_count,
     );
-    reduce_field_buffer(&partials, partial_count, 0)
+    let (result, offset) = encode_field_reduction(command, partials, partial_count, 0);
+    wait_for_command_named(command, "bn254_dot_chunks");
+    download_field_at(&result.limbs, offset)
 }
 
 fn parallel_sumcheck(
@@ -1643,8 +1866,10 @@ fn parallel_sumcheck(
     let partials = MetalFieldBuffer {
         limbs: new_shared_buffer(rt, (partial_count * 2 * size_of::<Field256>()) as u64),
     };
-    run_in_place(
-        "bn254_sumcheck_chunks",
+    let command = rt.queue.new_command_buffer();
+    encode_u32_kernel(
+        command,
+        pipeline(rt, "bn254_sumcheck_chunks"),
         &[&a.limbs, &b.limbs, &partials.limbs],
         &[
             len as u32,
@@ -1654,10 +1879,42 @@ fn parallel_sumcheck(
         ],
         partial_count,
     );
-    (
-        reduce_field_buffer(&partials, partial_count, 0),
-        reduce_field_buffer(&partials, partial_count, partial_count),
-    )
+    let result = encode_sumcheck_reduction(command, partials, partial_count);
+    wait_for_command_named(command, "bn254_sumcheck_chunks");
+    download_sumcheck_pair(&result)
+}
+
+fn parallel_fold_pair_sumcheck(
+    a: &MetalFieldBuffer,
+    b: &MetalFieldBuffer,
+    weight: &MetalFieldBuffer,
+    len: usize,
+    fold_half: usize,
+) -> (Field256, Field256) {
+    let sum_half = fold_half.next_power_of_two() >> 1;
+    debug_assert!(sum_half > 0);
+    let partial_count = sum_half.div_ceil(REDUCTION_CHUNK_SIZE);
+    let rt = runtime();
+    let partials = MetalFieldBuffer {
+        limbs: new_shared_buffer(rt, (partial_count * 2 * size_of::<Field256>()) as u64),
+    };
+    let command = rt.queue.new_command_buffer();
+    encode_u32_kernel(
+        command,
+        pipeline(rt, "bn254_fold_pair_sumcheck_chunks"),
+        &[&a.limbs, &b.limbs, &weight.limbs, &partials.limbs],
+        &[
+            len as u32,
+            fold_half as u32,
+            sum_half as u32,
+            REDUCTION_CHUNK_SIZE as u32,
+            partial_count as u32,
+        ],
+        partial_count,
+    );
+    let result = encode_sumcheck_reduction(command, partials, partial_count);
+    wait_for_command_named(command, "bn254_fold_pair_sumcheck_chunks");
+    download_sumcheck_pair(&result)
 }
 
 fn parallel_univariate_evaluate(
@@ -1673,13 +1930,17 @@ fn parallel_univariate_evaluate(
     let partials = MetalFieldBuffer {
         limbs: new_shared_buffer(rt, (partial_count * size_of::<Field256>()) as u64),
     };
-    run_in_place(
-        "bn254_univariate_eval_chunks",
+    let command = rt.queue.new_command_buffer();
+    encode_u32_kernel(
+        command,
+        pipeline(rt, "bn254_univariate_eval_chunks"),
         &[&coeffs.limbs, &point.limbs, &partials.limbs],
         &[len as u32, REDUCTION_CHUNK_SIZE as u32],
         partial_count,
     );
-    reduce_field_buffer(&partials, partial_count, 0)
+    let (result, offset) = encode_field_reduction(command, partials, partial_count, 0);
+    wait_for_command_named(command, "bn254_univariate_eval_chunks");
+    download_field_at(&result.limbs, offset)
 }
 
 fn parallel_geometric_accumulate_point_blocks(
@@ -1691,7 +1952,7 @@ fn parallel_geometric_accumulate_point_blocks(
     num_points: usize,
     chunk_size: usize,
 ) {
-    assert!(chunk_size <= 16);
+    assert!(chunk_size <= MAX_GEOMETRIC_ACCUMULATE_CHUNK_SIZE);
     let point_blocks = num_points.div_ceil(GEOMETRIC_ACCUMULATE_POINT_BLOCK_SIZE);
     let chunks = len.div_ceil(chunk_size);
     let partial_len = point_blocks
@@ -1726,6 +1987,65 @@ fn parallel_geometric_accumulate_point_blocks(
     );
 }
 
+fn parallel_geometric_accumulate_point_blocks_batched(
+    acc: &MetalFieldBuffer,
+    points: &MetalFieldBuffer,
+    point_steps: &MetalFieldBuffer,
+    scalars: &MetalFieldBuffer,
+    len: usize,
+    num_points: usize,
+    chunk_size: usize,
+) {
+    assert!(chunk_size <= MAX_GEOMETRIC_ACCUMULATE_CHUNK_SIZE);
+    let point_blocks = num_points.div_ceil(GEOMETRIC_ACCUMULATE_POINT_BLOCK_SIZE);
+    let chunks = len.div_ceil(chunk_size);
+    let bytes_per_point_block = len
+        .checked_mul(size_of::<Field256>())
+        .expect("Metal geometric partial size overflow");
+    let default_batch_blocks =
+        (GEOMETRIC_ACCUMULATE_POINT_BLOCK_BATCH_BYTES / bytes_per_point_block).max(1);
+    let batch_blocks = std::env::var("WHIR_METAL_GEOM_POINT_BLOCK_BATCH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(default_batch_blocks)
+        .min(point_blocks);
+    let rt = runtime();
+    for point_block_offset in (0..point_blocks).step_by(batch_blocks) {
+        let current_batch = batch_blocks.min(point_blocks - point_block_offset);
+        let partial_len = current_batch
+            .checked_mul(len)
+            .expect("Metal geometric partial size overflow");
+        let partials = MetalFieldBuffer {
+            limbs: new_shared_buffer(rt, (partial_len * size_of::<Field256>()) as u64),
+        };
+        run_in_place(
+            "bn254_geometric_accumulate_point_blocks_range",
+            &[
+                &partials.limbs,
+                &points.limbs,
+                &point_steps.limbs,
+                &scalars.limbs,
+            ],
+            &[
+                len as u32,
+                num_points as u32,
+                chunk_size as u32,
+                GEOMETRIC_ACCUMULATE_POINT_BLOCK_SIZE as u32,
+                point_block_offset as u32,
+                current_batch as u32,
+            ],
+            chunks * current_batch,
+        );
+        run_in_place(
+            "bn254_geometric_accumulate_reduce_point_blocks",
+            &[&acc.limbs, &partials.limbs],
+            &[len as u32, current_batch as u32],
+            len,
+        );
+    }
+}
+
 fn geometric_accumulate_chunk_size(len: usize) -> usize {
     std::env::var("WHIR_METAL_GEOM_CHUNK")
         .ok()
@@ -1736,29 +2056,45 @@ fn geometric_accumulate_chunk_size(len: usize) -> usize {
         } else {
             SMALL_GEOMETRIC_ACCUMULATE_CHUNK_SIZE
         })
+        .min(MAX_GEOMETRIC_ACCUMULATE_CHUNK_SIZE)
 }
 
 fn should_use_geometric_point_blocks(len: usize, num_points: usize, chunk_size: usize) -> bool {
-    chunk_size <= 16
+    chunk_size <= MAX_GEOMETRIC_ACCUMULATE_CHUNK_SIZE
         && num_points >= GEOMETRIC_ACCUMULATE_POINT_BLOCK_MIN_POINTS
         && len <= GEOMETRIC_ACCUMULATE_POINT_BLOCK_THRESHOLD
 }
 
-fn reduce_field_buffer(input: &MetalFieldBuffer, len: usize, offset: usize) -> Field256 {
-    if len == 0 {
-        return Field256::ZERO;
-    }
-    let mut current = input.clone();
+fn should_use_geometric_point_blocks_batched(
+    len: usize,
+    num_points: usize,
+    chunk_size: usize,
+) -> bool {
+    chunk_size <= MAX_GEOMETRIC_ACCUMULATE_CHUNK_SIZE
+        && num_points >= GEOMETRIC_ACCUMULATE_POINT_BLOCK_MIN_POINTS
+        && len > GEOMETRIC_ACCUMULATE_POINT_BLOCK_THRESHOLD
+}
+
+/// Encodes all tree-reduction levels into `command` and returns the buffer
+/// and offset holding the final scalar. Runs with a single command wait.
+fn encode_field_reduction(
+    command: &metal::CommandBufferRef,
+    input: MetalFieldBuffer,
+    len: usize,
+    offset: usize,
+) -> (MetalFieldBuffer, usize) {
+    let rt = runtime();
+    let mut current = input;
     let mut current_len = len;
     let mut current_offset = offset;
     while current_len > 1 {
         let next_len = current_len.div_ceil(REDUCTION_CHUNK_SIZE);
-        let rt = runtime();
         let next = MetalFieldBuffer {
             limbs: new_shared_buffer(rt, (next_len * size_of::<Field256>()) as u64),
         };
-        run_in_place(
-            "bn254_sum_chunks",
+        encode_u32_kernel(
+            command,
+            pipeline(rt, "bn254_sum_chunks"),
             &[&current.limbs, &next.limbs],
             &[
                 current_len as u32,
@@ -1771,7 +2107,44 @@ fn reduce_field_buffer(input: &MetalFieldBuffer, len: usize, offset: usize) -> F
         current_len = next_len;
         current_offset = 0;
     }
-    download_field_at(&current.limbs, current_offset)
+    (current, current_offset)
+}
+
+/// Encodes all (c0, c2) tree-reduction levels into `command` and returns the
+/// buffer holding the final pair. Runs with a single command wait.
+fn encode_sumcheck_reduction(
+    command: &metal::CommandBufferRef,
+    input: MetalFieldBuffer,
+    len: usize,
+) -> MetalFieldBuffer {
+    let rt = runtime();
+    let mut current = input;
+    let mut current_len = len;
+    while current_len > 1 {
+        let next_len = current_len.div_ceil(REDUCTION_CHUNK_SIZE);
+        let next = MetalFieldBuffer {
+            limbs: new_shared_buffer(rt, (next_len * 2 * size_of::<Field256>()) as u64),
+        };
+        encode_u32_kernel(
+            command,
+            pipeline(rt, "bn254_sumcheck_reduce_chunks"),
+            &[&current.limbs, &next.limbs],
+            &[
+                current_len as u32,
+                REDUCTION_CHUNK_SIZE as u32,
+                next_len as u32,
+            ],
+            next_len,
+        );
+        current = next;
+        current_len = next_len;
+    }
+    current
+}
+
+fn download_sumcheck_pair(buffer: &MetalFieldBuffer) -> (Field256, Field256) {
+    let values = download_field(&buffer.limbs, 2);
+    (values[0], values[1])
 }
 
 fn encode_single_vector_coset_ntt<F: Field>(
@@ -2029,25 +2402,37 @@ fn read_bn254_rows(source: &MetalFieldBuffer, num_cols: usize, indices: &[usize]
 }
 
 fn upload_field(values: &[Field256]) -> MetalFieldBuffer {
-    let limbs = values
-        .iter()
-        .flat_map(|value| value.0 .0)
-        .collect::<Vec<_>>();
     let rt = runtime();
-    let buffer = if limbs.is_empty() {
+    let buffer = if values.is_empty() {
         new_shared_buffer(rt, 0)
     } else {
+        // Field256 is 4 contiguous u64 limbs; upload directly without
+        // flattening into an intermediate Vec.
         new_shared_buffer_with_data(
             rt,
-            limbs.as_ptr().cast(),
-            (limbs.len() * size_of::<u64>()) as u64,
+            values.as_ptr().cast(),
+            std::mem::size_of_val(values) as u64,
         )
     };
     MetalFieldBuffer { limbs: buffer }
 }
 
+fn zeroed_field_buffer(len: usize) -> MetalFieldBuffer {
+    let rt = runtime();
+    let bytes = (len * size_of::<Field256>()) as u64;
+    let buffer = new_shared_buffer(rt, bytes);
+    if bytes > 0 {
+        let command = rt.queue.new_command_buffer();
+        let blit = command.new_blit_command_encoder();
+        blit.fill_buffer(&buffer, metal::NSRange::new(0, bytes), 0);
+        blit.end_encoding();
+        wait_for_blit(command, bytes);
+    }
+    MetalFieldBuffer { limbs: buffer }
+}
+
 fn maybe_upload_bn254<T: Clone>(values: &[T]) -> Option<MetalFieldBuffer> {
-    (type_name::<T>() == type_name::<Field256>()).then(|| upload_field(&to_field256_slice(values)))
+    (type_name::<T>() == type_name::<Field256>()).then(|| upload_field(as_field256_slice(values)))
 }
 
 fn copy_field_buffer(source: &MetalFieldBuffer, len: usize) -> MetalFieldBuffer {
@@ -2062,34 +2447,39 @@ fn copy_field_buffer(source: &MetalFieldBuffer, len: usize) -> MetalFieldBuffer 
     MetalFieldBuffer { limbs: target }
 }
 
-fn upload_u32(value: u32) -> Buffer {
-    let rt = runtime();
-    new_shared_buffer_with_data(rt, (&value as *const u32).cast(), size_of::<u32>() as u64)
-}
-
-fn run_in_place(name: &str, buffers: &[&Buffer], constants: &[u32], threads: usize) {
-    let rt = runtime();
-    let command = rt.queue.new_command_buffer();
+/// Encodes a kernel dispatch with `u32` constants bound as inline bytes
+/// (no per-constant buffer allocations).
+fn encode_u32_kernel(
+    command: &metal::CommandBufferRef,
+    pipeline: &ComputePipelineState,
+    buffers: &[&Buffer],
+    constants: &[u32],
+    threads: usize,
+) {
     let encoder = command.new_compute_command_encoder();
-    let pipeline = pipeline(rt, name);
     encoder.set_compute_pipeline_state(pipeline);
     let mut index = 0;
     for buffer in buffers {
         encoder.set_buffer(index, Some(buffer), 0);
         index += 1;
     }
-    let constant_buffers = constants
-        .iter()
-        .copied()
-        .map(upload_u32)
-        .collect::<Vec<_>>();
-    for buffer in &constant_buffers {
-        encoder.set_buffer(index, Some(buffer), 0);
+    for constant in constants {
+        encoder.set_bytes(
+            index,
+            size_of::<u32>() as u64,
+            (constant as *const u32).cast(),
+        );
         index += 1;
     }
     dispatch(&encoder, pipeline, threads.max(1));
     encoder.end_encoding();
-    wait_for_command_named(&command, name);
+}
+
+fn run_in_place(name: &str, buffers: &[&Buffer], constants: &[u32], threads: usize) {
+    let rt = runtime();
+    let command = rt.queue.new_command_buffer();
+    encode_u32_kernel(command, pipeline(rt, name), buffers, constants, threads);
+    wait_for_command_named(command, name);
 }
 
 fn run_reduce(name: &str, buffers: &[&Buffer], constants: &[u32], out_len: usize) -> Vec<Field256> {
@@ -2106,7 +2496,9 @@ fn dispatch(
     pipeline: &ComputePipelineState,
     threads: usize,
 ) {
-    let width = pipeline.thread_execution_width().max(1);
+    // Use full threadgroups (capped at 256) instead of a single execution
+    // width; the pipeline limit already accounts for register pressure.
+    let width = pipeline.max_total_threads_per_threadgroup().clamp(1, 256);
     let group_width = width.min(threads as u64).max(1);
     encoder.dispatch_threads(
         MTLSize {
@@ -2199,16 +2591,13 @@ fn field256_to_target<T: Field>(value: Field256) -> T {
     unsafe { std::mem::transmute_copy(&value) }
 }
 
-fn to_field256_slice<T: Clone>(values: &[T]) -> Vec<Field256> {
+fn as_field256_slice<T: Clone>(values: &[T]) -> &[Field256] {
     assert_eq!(
         type_name::<T>(),
         type_name::<Field256>(),
         "MetalBuffer only supports BN254 Field256 buffers"
     );
-    values
-        .iter()
-        .map(|value| unsafe { std::mem::transmute_copy(value) })
-        .collect()
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), values.len()) }
 }
 
 #[cfg(test)]
@@ -2245,16 +2634,34 @@ mod tests {
 
     #[test]
     fn metal_bn254_sumcheck_matches_cpu() {
-        let a = values(27, 3);
-        let b = values(27, 11);
-        let cpu_a = CpuBuffer::from_slice(&a);
-        let cpu_b = CpuBuffer::from_slice(&b);
-        let gpu_a = MetalBuffer::from_slice(&a);
-        let gpu_b = MetalBuffer::from_slice(&b);
-        assert_eq!(
-            gpu_a.sumcheck_polynomial(&gpu_b),
-            cpu_a.sumcheck_polynomial(&cpu_b)
-        );
+        for len in [1, 2, 27, 64, 65] {
+            let a = values(len, 3);
+            let b = values(len, 11);
+            let cpu_a = CpuBuffer::from_slice(&a);
+            let cpu_b = CpuBuffer::from_slice(&b);
+            let gpu_a = MetalBuffer::from_slice(&a);
+            let gpu_b = MetalBuffer::from_slice(&b);
+            assert_eq!(
+                gpu_a.sumcheck_polynomial(&gpu_b),
+                cpu_a.sumcheck_polynomial(&cpu_b)
+            );
+        }
+    }
+
+    #[test]
+    fn metal_bn254_fold_pair_sumcheck_matches_cpu() {
+        for len in [2, 3, 27, 64, 65] {
+            let mut cpu_a = CpuBuffer::from_vec(values(len, 3));
+            let mut cpu_b = CpuBuffer::from_vec(values(len, 11));
+            let mut gpu_a = MetalBuffer::from_vec(values(len, 3));
+            let mut gpu_b = MetalBuffer::from_vec(values(len, 11));
+            let weight = Field256::from(42);
+            let cpu_result = cpu_a.fold_pair_sumcheck_polynomial(&mut cpu_b, weight);
+            let gpu_result = gpu_a.fold_pair_sumcheck_polynomial(&mut gpu_b, weight);
+            assert_eq!(gpu_result, cpu_result);
+            assert_eq!(gpu_a.as_slice(), cpu_a.as_slice());
+            assert_eq!(gpu_b.as_slice(), cpu_b.as_slice());
+        }
     }
 
     #[test]

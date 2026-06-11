@@ -49,7 +49,15 @@ pub trait FieldOps<F: Field>: Clone {
     fn zero_pad(&mut self);
     fn dot(&self, other: &Self) -> F;
     fn fold(&mut self, weight: F);
+    fn fold_pair(&mut self, other: &mut Self, weight: F) {
+        self.fold(weight);
+        other.fold(weight);
+    }
     fn sumcheck_polynomial(&self, other: &Self) -> (F, F);
+    fn fold_pair_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F) {
+        self.fold_pair(other, weight);
+        self.sumcheck_polynomial(other)
+    }
     fn accumulate_univariate_evaluations(
         &mut self,
         evaluators: &[UnivariateEvaluation<F>],
