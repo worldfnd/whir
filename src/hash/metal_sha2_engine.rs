@@ -302,8 +302,11 @@ struct MetalSha2Runtime {
 
 fn new_shared_buffer(rt: &MetalSha2Runtime, bytes: u64) -> Buffer {
     metal_profile::record_alloc(bytes);
-    rt.device
-        .new_buffer(bytes, MTLResourceOptions::StorageModeShared)
+    let buffer = rt
+        .device
+        .new_buffer(bytes, MTLResourceOptions::StorageModeShared);
+    metal_profile::record_device_allocated(rt.device.current_allocated_size());
+    buffer
 }
 
 fn new_shared_buffer_with_data(
@@ -317,6 +320,7 @@ fn new_shared_buffer_with_data(
         .new_buffer_with_data(data, bytes, MTLResourceOptions::StorageModeShared);
     metal_profile::record_alloc(bytes);
     metal_profile::record_upload(bytes, start.elapsed());
+    metal_profile::record_device_allocated(rt.device.current_allocated_size());
     buffer
 }
 

@@ -19,7 +19,10 @@ use static_assertions::{assert_impl_all, assert_obj_safe};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-pub use self::metal_profile::{snapshot as metal_profile_snapshot, MetalProfileSnapshot};
+pub use self::metal_profile::{
+    reset_device_peak as metal_reset_device_peak, snapshot as metal_profile_snapshot,
+    MetalProfileSnapshot,
+};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use self::metal_sha2_engine::MetalSha2;
 pub use self::{

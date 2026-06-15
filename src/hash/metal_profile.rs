@@ -18,6 +18,10 @@ pub struct MetalProfileSnapshot {
     pub blit_count: u64,
     pub blit_bytes: u64,
     pub blit_wait_nanos: u64,
+    /// Device-wide allocated GPU memory at snapshot time.
+    pub device_current_bytes: u64,
+    /// Peak device-wide allocated GPU memory since the last `reset_device_peak`.
+    pub device_peak_bytes: u64,
 }
 
 impl MetalProfileSnapshot {
@@ -38,6 +42,9 @@ impl MetalProfileSnapshot {
             blit_count: self.blit_count.saturating_sub(before.blit_count),
             blit_bytes: self.blit_bytes.saturating_sub(before.blit_bytes),
             blit_wait_nanos: self.blit_wait_nanos.saturating_sub(before.blit_wait_nanos),
+            // Gauges, not counters: keep the latest values.
+            device_current_bytes: self.device_current_bytes,
+            device_peak_bytes: self.device_peak_bytes,
         }
     }
 
@@ -71,6 +78,8 @@ static COMMAND_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
 static BLIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static BLIT_BYTES: AtomicU64 = AtomicU64::new(0);
 static BLIT_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static DEVICE_CURRENT_BYTES: AtomicU64 = AtomicU64::new(0);
+static DEVICE_PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn snapshot() -> MetalProfileSnapshot {
     MetalProfileSnapshot {
@@ -87,7 +96,23 @@ pub fn snapshot() -> MetalProfileSnapshot {
         blit_count: BLIT_COUNT.load(Ordering::Relaxed),
         blit_bytes: BLIT_BYTES.load(Ordering::Relaxed),
         blit_wait_nanos: BLIT_WAIT_NANOS.load(Ordering::Relaxed),
+        device_current_bytes: DEVICE_CURRENT_BYTES.load(Ordering::Relaxed),
+        device_peak_bytes: DEVICE_PEAK_BYTES.load(Ordering::Relaxed),
     }
+}
+
+/// Record the device-wide allocated size (`MTLDevice.currentAllocatedSize`),
+/// sampled after each buffer allocation. Peak live memory always coincides
+/// with an allocation, so per-alloc sampling captures the true peak.
+pub fn record_device_allocated(bytes: u64) {
+    DEVICE_CURRENT_BYTES.store(bytes, Ordering::Relaxed);
+    DEVICE_PEAK_BYTES.fetch_max(bytes, Ordering::Relaxed);
+}
+
+/// Reset the peak gauge to the current value (e.g. at the start of a
+/// measured phase).
+pub fn reset_device_peak() {
+    DEVICE_PEAK_BYTES.store(DEVICE_CURRENT_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
 pub fn record_upload(bytes: u64, duration: Duration) {

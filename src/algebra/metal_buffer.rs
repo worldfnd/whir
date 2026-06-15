@@ -1737,8 +1737,11 @@ fn pipeline<'a>(rt: &'a MetalRuntime, name: &str) -> &'a ComputePipelineState {
 
 fn new_shared_buffer(rt: &MetalRuntime, bytes: u64) -> Buffer {
     metal_profile::record_alloc(bytes);
-    rt.device
-        .new_buffer(bytes, MTLResourceOptions::StorageModeShared)
+    let buffer = rt
+        .device
+        .new_buffer(bytes, MTLResourceOptions::StorageModeShared);
+    metal_profile::record_device_allocated(rt.device.current_allocated_size());
+    buffer
 }
 
 fn new_shared_buffer_with_data(rt: &MetalRuntime, data: *const c_void, bytes: u64) -> Buffer {
@@ -1748,6 +1751,7 @@ fn new_shared_buffer_with_data(rt: &MetalRuntime, data: *const c_void, bytes: u6
         .new_buffer_with_data(data, bytes, MTLResourceOptions::StorageModeShared);
     metal_profile::record_alloc(bytes);
     metal_profile::record_upload(bytes, start.elapsed());
+    metal_profile::record_device_allocated(rt.device.current_allocated_size());
     buffer
 }
 
