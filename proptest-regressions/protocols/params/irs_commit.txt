@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0b6dd03179c9a4e38b29b34b241b88fba69348a2c8938af7253314b7035bea82 # shrinks to spec = SecuritySpec { mode: ZeroKnowledge, target_security_bits: 80, vector_size: 256, starting_log_inv_rate: 1, initial_folding_factor: 4, folding_factor: 4, max_pow_bits: None, hash_id: 03e01749ebcc0477924254eb482066b864a8dd4d77252464ca6f5b6f5cc05b4c, _embedding: PhantomData<whir::algebra::embedding::Identity<ark_ff::fields::models::fp::Fp<ark_ff::fields::models::fp::montgomery_backend::MontBackend<whir::algebra::fields::FConfig64, 1>, 1>>> }, ctx = RoundContext { round_index: 0, vector_size: 16, log_inv_rate: 1, folding_factor: 1, prev_round_in_domain_samples: 0, prev_round_query_error: 0.0 }, out_domain = 0, seed = 0
+cc 7e49f7a2d53f55cfa2f09114d17ab4123678b45ddf69e0cfbc646b246de2f042 # shrinks to spec = SecuritySpec { mode: ZeroKnowledge, target_security_bits: 80, max_pow_bits: None, hash_id: 03e01749ebcc0477924254eb482066b864a8dd4d77252464ca6f5b6f5cc05b4c }, ctx = RoundContext { vector_size: 128, log_inv_rate: 2, folding_factor: 2 }, out_domain = 11

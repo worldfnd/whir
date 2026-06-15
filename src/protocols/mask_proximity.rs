@@ -47,12 +47,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     algebra::{embedding::Identity, random_vector, scalar_mul_add_new, univariate_evaluate},
     hash::Hash,
-    protocols::irs_commit::{
-        Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness,
+    protocols::{
+        irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
+        proof_of_work,
     },
     transcript::{
-        Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -61,11 +62,13 @@ use crate::{
 /// Mask proximity configuration.
 ///
 /// Wraps an IRS config for the shared mask tree and the number of mask pairs.
+#[must_use]
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<F: Field> {
-    pub c_zk_commit: IrsConfig<Identity<F>>,
-    pub num_masks: usize,
+    c_zk_commit: IrsConfig<Identity<F>>,
+    num_masks: usize,
+    pow: proof_of_work::Config,
 }
 
 /// Prover output from the commit phase.
@@ -76,31 +79,47 @@ pub struct Witness<F: Field> {
 }
 
 /// Verifier output from the commit phase.
-pub type Commitment<F> = IrsCommitment<F>;
+pub type Commitment = IrsCommitment;
 
 impl<F: Field> Config<F> {
-    pub fn new(c_zk_commit: IrsConfig<Identity<F>>, num_masks: usize) -> Self {
+    /// Required `c_zk.num_vectors` for `num_masks` originals: one fresh
+    /// mask-of-mask per original (Construction 7.2 originals + fresh pairs).
+    pub const fn num_vectors_for(num_masks: usize) -> usize {
+        2 * num_masks
+    }
+
+    pub fn new(
+        c_zk_commit: IrsConfig<Identity<F>>,
+        num_masks: usize,
+        pow: proof_of_work::Config,
+    ) -> Self {
         assert_eq!(
-            c_zk_commit.num_vectors,
-            2 * num_masks,
+            c_zk_commit.num_vectors(),
+            Self::num_vectors_for(num_masks),
             "c_zk.num_vectors must be 2 * num_masks"
         );
         assert_eq!(
-            c_zk_commit.interleaving_depth, 1,
+            c_zk_commit.interleaving_depth(),
+            1,
             "mask proximity requires interleaving_depth = 1"
-        );
-        // OOD evaluations are sent in the clear during IRS commit/receive,
-        // which would leak raw mask values before the γ-combination and
-        // break the ZK contract. The OOD path in irs_commit is slated for
-        // removal in the new construction; until then, enforce zero here.
-        assert_eq!(
-            c_zk_commit.out_domain_samples, 0,
-            "mask proximity requires out_domain_samples = 0 (OOD openings would leak raw mask evaluations)"
         );
         Self {
             c_zk_commit,
             num_masks,
+            pow,
         }
+    }
+
+    pub const fn c_zk_commit(&self) -> &IrsConfig<Identity<F>> {
+        &self.c_zk_commit
+    }
+
+    pub const fn num_masks(&self) -> usize {
+        self.num_masks
+    }
+
+    pub const fn pow(&self) -> proof_of_work::Config {
+        self.pow
     }
 
     /// Commit all masks and their mask-of-masks in a single shared tree.
@@ -121,12 +140,12 @@ impl<F: Field> Config<F> {
     {
         assert_eq!(original_msgs.len(), self.num_masks);
         for msg in original_msgs {
-            assert_eq!(msg.len(), self.c_zk_commit.vector_size);
+            assert_eq!(msg.len(), self.c_zk_commit.vector_size());
         }
 
         // Sample fresh mask-of-masks
         let fresh_msgs: Vec<Vec<F>> = (0..self.num_masks)
-            .map(|_| random_vector(prover_state.rng(), self.c_zk_commit.vector_size))
+            .map(|_| random_vector(prover_state.rng(), self.c_zk_commit.vector_size()))
             .collect();
 
         // Tree layout: [originals..., freshes...]
@@ -148,7 +167,7 @@ impl<F: Field> Config<F> {
     pub fn receive_commitment<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-    ) -> VerificationResult<Commitment<F>>
+    ) -> VerificationResult<Commitment>
     where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
@@ -169,17 +188,22 @@ impl<F: Field> Config<F> {
         R: RngCore + CryptoRng,
         Standard: Distribution<F>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(original_msgs.len(), self.num_masks);
         assert_eq!(witness.fresh_msgs.len(), self.num_masks);
+
+        // Grind the Lemma 7.4 γ-combination gap before γ is sampled.
+        self.pow.prove(prover_state);
 
         // Step 1: receive combination randomness γ
         let gamma: F = prover_state.verifier_message();
 
         // Step 2: compute and send combined polynomials + IRS randomness
         let irs_masks_per_vector =
-            self.c_zk_commit.mask_length * self.c_zk_commit.interleaving_depth;
+            self.c_zk_commit.mask_length() * self.c_zk_commit.interleaving_depth();
         assert_eq!(
             witness.mask_witness.masks.len(),
             2 * self.num_masks * irs_masks_per_vector
@@ -214,21 +238,26 @@ impl<F: Field> Config<F> {
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-        commitment: &Commitment<F>,
+        commitment: &Commitment,
     ) -> VerificationResult<()>
     where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
+        // Grind the Lemma 7.4 γ-combination gap before γ is sampled.
+        self.pow.verify(verifier_state)?;
+
         // Step 1: send combination randomness γ
         let gamma: F = verifier_state.verifier_message();
 
         // Step 2: read combined polynomials + IRS randomness
         let msg_len = self.c_zk_commit.message_length();
         let irs_masks_per_vector =
-            self.c_zk_commit.mask_length * self.c_zk_commit.interleaving_depth;
+            self.c_zk_commit.mask_length() * self.c_zk_commit.interleaving_depth();
         let has_irs_masks = irs_masks_per_vector > 0;
         let mut combined_msgs = Vec::with_capacity(self.num_masks);
         let mut combined_rs: Option<Vec<Vec<F>>> =
@@ -313,18 +342,16 @@ mod tests {
                 .prop_flat_map(|(num_masks, vector_size, mask_length)| {
                     let c_zk = IrsConfig::<Identity<F>>::arbitrary(
                         Identity::new(),
-                        2 * num_masks,
+                        Self::num_vectors_for(num_masks),
                         vector_size,
                         mask_length,
                         1,
                     );
                     (Just(num_masks), c_zk)
                 })
-                .prop_filter(
-                    "mask proximity requires out_domain_samples = 0",
-                    |(_, c_zk)| c_zk.out_domain_samples == 0,
-                )
-                .prop_map(|(num_masks, c_zk)| Self::new(c_zk, num_masks))
+                .prop_map(|(num_masks, c_zk)| {
+                    Self::new(c_zk, num_masks, proof_of_work::Config::none())
+                })
         }
     }
 
@@ -341,7 +368,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
 
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
-            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size))
+            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
             .collect();
 
         let mut prover_state = ProverState::new_std(&ds);
@@ -415,7 +442,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
 
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
-            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size))
+            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
             .collect();
 
         let mut prover_state = ProverState::new_std(&ds);
@@ -446,7 +473,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
 
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
-            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size))
+            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
             .collect();
 
         let mut prover_state = ProverState::new_std(&ds);
@@ -454,7 +481,7 @@ mod tests {
 
         let gamma: F = prover_state.verifier_message();
         let irs_masks_per_vector =
-            config.c_zk_commit.mask_length * config.c_zk_commit.interleaving_depth;
+            config.c_zk_commit.mask_length() * config.c_zk_commit.interleaving_depth();
 
         for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()
@@ -509,7 +536,7 @@ mod tests {
     fn test_tampered_mask_rejected() {
         crate::tests::init();
         proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
-            prop_assume!(config.c_zk_commit.in_domain_samples > 0);
+            prop_assume!(config.c_zk_commit.in_domain_samples() > 0);
             test_tampered_mask_config(seed, &config);
         });
     }
@@ -518,7 +545,7 @@ mod tests {
     fn test_tampered_combined_msg_rejected() {
         crate::tests::init();
         proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
-            prop_assume!(config.c_zk_commit.in_domain_samples > 0);
+            prop_assume!(config.c_zk_commit.in_domain_samples() > 0);
             test_tampered_combined_msg_config(seed, &config);
         });
     }

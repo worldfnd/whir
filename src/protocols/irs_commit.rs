@@ -7,26 +7,16 @@
 //! using an NTT friendly Reed-Solomon code to produce a `num_vectors * interleaving_depth`
 //! by `codeword_size` matrix. This matrix is committed using the [`matrix_commit`] protocol.
 //!
-//! After committing the encoded matrix, the protocol generates a random Reed-Solomon code of
-//! length `out_domain_samples` over an extension field `G` of `F` and encodes the original
-//! matrix using this code to produce a `num_vectors` by `out_domain_samples` matrix over `G`.
-//! Together, these two encoded matrices form a commitment to the original matrix.
-//!
 //! On opening the commitment, the protocol randomly selects `in_domain_samples` rows and opens
-//! it using the [`matrix_commit`] protocol. Sampling is done with replacement, so may produce
-//! fewer than `in_domain_samples` distinct rows. This produces `in_domain_samples` evaluation
-//! points in `F` and `in_domain_samples` by `num_vectors * interleaving_depth`.
+//! them using the [`matrix_commit`] protocol. Sampling is done with replacement, so may produce
+//! fewer than `in_domain_samples` distinct rows.
 //!
-use std::{
-    f64::{self, consts::LOG2_10},
-    fmt,
-    ops::Neg,
-};
+use std::{f64, fmt, num::NonZeroUsize};
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
-use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -37,76 +27,87 @@ use crate::{
     },
     engines::EngineId,
     hash::Hash,
-    protocols::{challenge_indices::challenge_indices, matrix_commit},
+    protocols::{
+        challenge_indices::challenge_indices,
+        matrix_commit,
+        params::{bounds::ood_per_sample_log2, regime::DecodingRegimeParams, spec::DecodingRegime},
+    },
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
         VerifierMessage, VerifierState,
     },
     type_info::Typed,
     utils::{chunks_exact_or_empty, zip_strict},
-    verify,
 };
 
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+pub enum IrsMode {
+    Standard,
+    ZeroKnowledge { mask_length: NonZeroUsize },
+}
+
+impl IrsMode {
+    /// Per-polynomial IRS randomness length. Returns 0 in Standard mode.
+    pub const fn mask_length(&self) -> usize {
+        match self {
+            Self::Standard => 0,
+            Self::ZeroKnowledge { mask_length } => mask_length.get(),
+        }
+    }
+}
+
 /// Commit to vectors over an fft-friendly field F
+#[must_use]
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {
     /// Embedding into a (larger) field used for weights and drawing challenges.
-    pub embedding: Typed<M>,
+    embedding: Typed<M>,
 
     /// The number of vectors to commit to in one operation.
-    pub num_vectors: usize,
+    num_vectors: usize,
 
     /// The number of coefficients in each vector.
-    pub vector_size: usize,
-
-    /// The number of masking values to add per codeword.
-    pub mask_length: usize,
+    vector_size: usize,
 
     /// The number of Reed-Solomon evaluation points.
-    pub codeword_length: usize,
+    codeword_length: usize,
 
     /// The number of independent codewords that are interleaved together.
-    pub interleaving_depth: usize,
+    interleaving_depth: usize,
 
     /// The matrix commitment configuration.
-    pub matrix_commit: matrix_commit::Config<M::Source>,
+    matrix_commit: matrix_commit::Config<M::Source>,
 
-    /// Slack to the Jonhnson bound in list decoding.
-    /// Zero indicates unique decoding.
-    pub johnson_slack: OrderedFloat<f64>,
+    /// Materialized Reed–Solomon decoding regime (Unique / Johnson w/ slack).
+    regime: DecodingRegimeParams,
 
     /// The number of in-domain samples.
-    pub in_domain_samples: usize,
-
-    /// The number of out-of-domain samples.
-    pub out_domain_samples: usize,
+    in_domain_samples: usize,
 
     /// Whether to sort and deduplicate the in-domain samples.
     ///
     /// Deduplication can slightly reduce proof size and prover/verifier
     /// complexity, but it makes transcript pattern and control flow
     /// non-deterministic.
-    pub deduplicate_in_domain: bool,
+    deduplicate_in_domain: bool,
+
+    /// Standard / ZeroKnowledge.
+    mode: IrsMode,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
-pub struct Witness<F: Field, G = F>
-where
-    G: Field,
-{
+pub struct Witness<F: Field> {
     pub masks: Vec<F>,
     pub matrix: Vec<F>,
     pub matrix_witness: matrix_commit::Witness,
-    pub out_of_domain: Evaluations<G>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
-pub struct Commitment<G: Field> {
-    matrix_commitment: matrix_commit::Commitment,
-    out_of_domain: Evaluations<G>,
+pub struct Commitment {
+    pub matrix_commitment: matrix_commit::Commitment,
 }
 
 /// Interleaved Reed-Solomon code.
@@ -121,66 +122,82 @@ pub struct Evaluations<F> {
     pub matrix: Vec<F>,
 }
 
+/// Named-field inputs to [`Config::new`] / [`Config::try_new`].
+///
+/// `num_vectors`, `vector_size`, and `interleaving_depth` share a primitive
+/// type; named construction keeps call sites swap-proof.
+#[derive(Debug, Clone)]
+pub struct IrsParams {
+    pub security_target: f64,
+    pub decoding_regime: DecodingRegime,
+    pub hash_id: EngineId,
+    pub num_vectors: usize,
+    pub vector_size: usize,
+    pub interleaving_depth: usize,
+    pub rate: f64,
+    pub mode: IrsMode,
+}
+
+/// The computed codeword length exceeds the NTT engine's supported order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("codeword length {length} exceeds the NTT engine's supported order")]
+pub struct CodewordLengthError {
+    pub length: usize,
+}
+
 impl<M: Embedding> Config<M> {
-    pub fn new(
-        security_target: f64,
-        unique_decoding: bool,
-        hash_id: EngineId,
-        num_vectors: usize,
-        vector_size: usize,
-        interleaving_depth: usize,
-        rate: f64,
-    ) -> Self
+    /// Panicking version of [`Config::try_new`] for call sites that construct
+    /// from already-vetted parameters.
+    ///
+    /// # Panics
+    ///
+    /// If the codeword length exceeds the NTT engine's supported order.
+    pub fn new(params: IrsParams) -> Self
     where
         M: Default,
     {
+        Self::try_new(params).expect("IRS config construction failed")
+    }
+
+    /// # Errors
+    ///
+    /// [`CodewordLengthError`] when `masked_message_length / rate` exceeds the
+    /// NTT engine's supported order.
+    pub fn try_new(params: IrsParams) -> Result<Self, CodewordLengthError>
+    where
+        M: Default,
+    {
+        let IrsParams {
+            security_target,
+            decoding_regime,
+            hash_id,
+            num_vectors,
+            vector_size,
+            interleaving_depth,
+            rate,
+            mode,
+        } = params;
         assert!(vector_size.is_multiple_of(interleaving_depth));
         assert!(rate > 0. && rate <= 1.);
-        let message_length = vector_size / interleaving_depth;
+        let masked_message_length = vector_size / interleaving_depth + mode.mask_length();
+        // `interleaved_encode` requires `codeword_length` to divide the NTT root
+        // order. `masked_message_length` is allowed to be arbitrary (the coset
+        // NTT zero-extends internally), so we only round the codeword side here.
         #[allow(clippy::cast_sign_loss)]
-        let codeword_length = (message_length as f64 / rate).ceil() as usize;
-        let rate = message_length as f64 / codeword_length as f64;
+        let raw_codeword_length = (masked_message_length as f64 / rate).ceil() as usize;
+        let codeword_length =
+            ntt::next_order::<M::Source>(raw_codeword_length).ok_or(CodewordLengthError {
+                length: raw_codeword_length,
+            })?;
+        let rate = masked_message_length as f64 / codeword_length as f64;
 
-        // Pick in- and out-of-domain samples.
-        // η = slack to Johnson bound. We pick η = √ρ / 20.
-        // TODO: Optimize picking η.
-        let johnson_slack = if unique_decoding {
-            0.0
-        } else {
-            rate.sqrt() / 20.
-        };
-        let out_domain_samples = {
-            let list_size = 1. / (2. * johnson_slack * rate.sqrt());
-            num_ood_samples(
-                unique_decoding,
-                security_target,
-                M::Target::field_size_bits(),
-                list_size,
-                vector_size,
-            )
-        };
-        #[allow(clippy::cast_sign_loss)]
-        let in_domain_samples = {
-            // Query error is (1 - δ)^q, so we compute 1 - δ
-            let per_sample = if unique_decoding {
-                // Unique decoding bound: δ = (1 - ρ) / 2
-                f64::midpoint(1., rate)
-            } else {
-                // Johnson bound: δ = 1 - √ρ - η
-                rate.sqrt() + johnson_slack
-            };
-            (security_target / (-per_sample.log2())).ceil() as usize
-        };
-        debug_assert_eq!(
-            in_domain_samples,
-            num_in_domain_queries(unique_decoding, security_target, rate)
-        );
+        let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
+        let in_domain_samples = num_in_domain_queries(decoding_regime, security_target, rate).get();
 
-        Self {
+        Ok(Self {
             embedding: Typed::<M>::default(),
             num_vectors,
             vector_size,
-            mask_length: 0,
             codeword_length,
             interleaving_depth,
             matrix_commit: matrix_commit::Config::with_hash(
@@ -188,11 +205,57 @@ impl<M: Embedding> Config<M> {
                 codeword_length,
                 interleaving_depth * num_vectors,
             ),
-            johnson_slack: OrderedFloat(johnson_slack),
+            regime,
             in_domain_samples,
-            out_domain_samples,
             deduplicate_in_domain: false,
-        }
+            mode,
+        })
+    }
+
+    pub const fn num_vectors(&self) -> usize {
+        self.num_vectors
+    }
+
+    pub const fn vector_size(&self) -> usize {
+        self.vector_size
+    }
+
+    pub const fn codeword_length(&self) -> usize {
+        self.codeword_length
+    }
+
+    pub const fn interleaving_depth(&self) -> usize {
+        self.interleaving_depth
+    }
+
+    pub const fn matrix_commit(&self) -> &matrix_commit::Config<M::Source> {
+        &self.matrix_commit
+    }
+
+    pub const fn regime(&self) -> DecodingRegimeParams {
+        self.regime
+    }
+
+    pub const fn in_domain_samples(&self) -> usize {
+        self.in_domain_samples
+    }
+
+    pub const fn deduplicate_in_domain(&self) -> bool {
+        self.deduplicate_in_domain
+    }
+
+    pub const fn mode(&self) -> &IrsMode {
+        &self.mode
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn set_vector_size_for_test(&mut self, vector_size: usize) {
+        self.vector_size = vector_size;
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn set_in_domain_samples_for_test(&mut self, in_domain_samples: usize) {
+        self.in_domain_samples = in_domain_samples;
     }
 
     pub const fn num_cols(&self) -> usize {
@@ -216,9 +279,14 @@ impl<M: Embedding> Config<M> {
         self.vector_size / self.interleaving_depth
     }
 
+    /// Per-polynomial IRS randomness length. Returns 0 in Standard mode.
+    pub const fn mask_length(&self) -> usize {
+        self.mode.mask_length()
+    }
+
     /// Message length including mask coefficients.
     pub fn masked_message_length(&self) -> usize {
-        self.message_length() + self.mask_length
+        self.message_length() + self.mask_length()
     }
 
     pub fn evaluation_points(&self, indices: &[usize]) -> Vec<M::Source> {
@@ -233,58 +301,34 @@ impl<M: Embedding> Config<M> {
         self.masked_message_length() as f64 / self.codeword_length as f64
     }
 
-    pub fn unique_decoding(&self) -> bool {
-        self.out_domain_samples == 0 && self.johnson_slack == 0.0
+    pub const fn unique_decoding(&self) -> bool {
+        self.regime.is_unique()
+    }
+
+    fn log_inv_rate(&self) -> f64 {
+        -self.rate().log2()
     }
 
     /// Compute a list size bound.
     pub fn list_size(&self) -> f64 {
-        if self.unique_decoding() {
-            1.
-        } else {
-            // This is the Johnson bound $1 / (2 η √ρ)$.
-            1. / (2. * self.johnson_slack.into_inner() * self.rate().sqrt())
-        }
-    }
-
-    /// Round-by-round soundness of the out-of-domain samples in bits.
-    pub fn rbr_ood_sample(&self) -> f64 {
-        let list_size = self.list_size();
-        let log_field_size = M::Target::field_size_bits();
-        // See [STIR] lemma 4.5.
-        let l_choose_2 = list_size * (list_size - 1.) / 2.;
-        let log_per_sample = ((self.vector_size - 1) as f64).log2() - log_field_size;
-        -l_choose_2.log2() - self.out_domain_samples as f64 * log_per_sample
+        let log_degree = (self.masked_message_length() as f64).log2();
+        self.regime.list_size(log_degree, self.log_inv_rate())
     }
 
     /// Round-by-round soundness of the in-domain queries in bits.
     pub fn rbr_queries(&self) -> f64 {
-        let per_sample = if self.unique_decoding() {
-            // 1 - δ = 1 - (1 + ρ) / 2
-            f64::midpoint(1., self.rate())
-        } else {
-            // 1 - δ = sqrt(ρ) + η
-            self.rate().sqrt() + self.johnson_slack.into_inner()
-        };
-        self.in_domain_samples as f64 * per_sample.log2().neg()
+        // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
+        -(self.in_domain_samples as f64) * self.regime.one_minus_distance_log2(self.log_inv_rate())
     }
 
-    // Compute the proximity gaps term of the fold
+    /// Round-by-round soundness of the proximity-gaps fold in bits.
+    /// See WHIR Theorem 4.8.
     pub fn rbr_soundness_fold_prox_gaps(&self) -> f64 {
-        let log_field_size = M::Target::field_size_bits();
-        let log_inv_rate = self.rate().log2().neg();
-        let log_k = (self.masked_message_length() as f64).log2();
-        // See WHIR Theorem 4.8
-        // Recall, at each round we are only folding by two at a time
-        let error = if self.unique_decoding() {
-            log_k + log_inv_rate
-        } else {
-            let log_eta = self.johnson_slack.into_inner().log2();
-            // Make sure η hits the min bound.
-            assert!(log_eta >= -(0.5 * log_inv_rate + LOG2_10 + 1.0) - 1e-6);
-            7. * LOG2_10 + 3.5 * log_inv_rate + 2. * log_k
-        };
-        log_field_size - error
+        -self.regime.eps_mca_log2(
+            self.log_inv_rate(),
+            self.masked_message_length(),
+            M::Target::field_size_bits(),
+        )
     }
 
     /// Commit to one or more vectors.
@@ -293,7 +337,7 @@ impl<M: Embedding> Config<M> {
         &self,
         prover_state: &mut ProverState<H, R>,
         vectors: &[&[M::Source]],
-    ) -> Witness<M::Source, M::Target>
+    ) -> Witness<M::Source>
     where
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
@@ -311,7 +355,7 @@ impl<M: Embedding> Config<M> {
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
         // Generate random mask
-        let masks = random_vector(prover_state.rng(), self.mask_length * self.num_messages());
+        let masks = random_vector(prover_state.rng(), self.mask_length() * self.num_messages());
 
         // Interleaved RS Encode the vectors
         let messages = vectors
@@ -323,29 +367,10 @@ impl<M: Embedding> Config<M> {
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
 
-        // Handle out-of-domain points and values
-        // TODO : Remove this logic after main whir protocol is updated
-        // as this is not required in the new construction. This will be
-        // removed in next PR (Parameter Selection)
-        let oods_points: Vec<M::Target> =
-            prover_state.verifier_message_vec(self.out_domain_samples);
-        let mut oods_matrix = Vec::with_capacity(self.out_domain_samples * self.num_vectors);
-        for &point in &oods_points {
-            for &vector in vectors {
-                let value = mixed_univariate_evaluate(&*self.embedding, vector, point);
-                prover_state.prover_message(&value);
-                oods_matrix.push(value);
-            }
-        }
-
         Witness {
             masks,
             matrix,
             matrix_witness,
-            out_of_domain: Evaluations {
-                points: oods_points,
-                matrix: oods_matrix,
-            },
         }
     }
 
@@ -354,24 +379,67 @@ impl<M: Embedding> Config<M> {
     pub fn receive_commitment<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-    ) -> VerificationResult<Commitment<M::Target>>
+    ) -> VerificationResult<Commitment>
     where
         H: DuplexSpongeInterface,
         Hash: ProverMessage<[H::U]>,
         M::Target: Codec<[H::U]>,
     {
         let matrix_commitment = self.matrix_commit.receive_commitment(verifier_state)?;
-        let oods_points: Vec<M::Target> =
-            verifier_state.verifier_message_vec(self.out_domain_samples);
-        let oods_matrix =
-            verifier_state.prover_messages_vec(self.out_domain_samples * self.num_vectors)?;
-        Ok(Commitment {
-            matrix_commitment,
-            out_of_domain: Evaluations {
-                points: oods_points,
-                matrix: oods_matrix,
-            },
-        })
+        Ok(Commitment { matrix_commitment })
+    }
+
+    /// Commit to vectors and run the legacy WHIR OOD step in one call.
+    ///
+    /// Layered helper bundling `commit` + the OOD message exchange (sample
+    /// `out_domain_samples` random points, send each vector's evaluation at
+    /// each point). Used by the legacy WHIR protocol while the OOD step
+    /// is still part of the per-commit protocol shape; the new construction
+    /// (Construction 9.7) handles OOD at the code-switch level instead.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
+    pub fn commit_with_ood<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        vectors: &[&[M::Source]],
+        out_domain_samples: usize,
+    ) -> (Witness<M::Source>, Evaluations<M::Target>)
+    where
+        Standard: Distribution<M::Source>,
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        M::Target: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        let witness = self.commit(prover_state, vectors);
+        let points: Vec<M::Target> = prover_state.verifier_message_vec(out_domain_samples);
+        let mut matrix = Vec::with_capacity(out_domain_samples * vectors.len());
+        for &point in &points {
+            for &vector in vectors {
+                let value = mixed_univariate_evaluate(&*self.embedding, vector, point);
+                prover_state.prover_message(&value);
+                matrix.push(value);
+            }
+        }
+        (witness, Evaluations { points, matrix })
+    }
+
+    /// Receive a commitment and the legacy WHIR OOD evaluations in one call.
+    /// Verifier mirror of `commit_with_ood`.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
+    pub fn receive_commitment_with_ood<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        out_domain_samples: usize,
+    ) -> VerificationResult<(Commitment, Evaluations<M::Target>)>
+    where
+        H: DuplexSpongeInterface,
+        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec<[H::U]>,
+    {
+        let commitment = self.receive_commitment(verifier_state)?;
+        let points: Vec<M::Target> = verifier_state.verifier_message_vec(out_domain_samples);
+        let matrix = verifier_state.prover_messages_vec(out_domain_samples * self.num_vectors)?;
+        Ok((commitment, Evaluations { points, matrix }))
     }
 
     /// Opens the commitment and returns the evaluations of the vectors.
@@ -385,7 +453,7 @@ impl<M: Embedding> Config<M> {
     pub fn open<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        witnesses: &[&Witness<M::Source, M::Target>],
+        witnesses: &[&Witness<M::Source>],
     ) -> Evaluations<M::Source>
     where
         H: DuplexSpongeInterface,
@@ -395,11 +463,6 @@ impl<M: Embedding> Config<M> {
     {
         for witness in witnesses {
             assert_eq!(witness.matrix.len(), self.size());
-            assert_eq!(witness.out_of_domain.points.len(), self.out_domain_samples);
-            assert_eq!(
-                witness.out_of_domain.matrix.len(),
-                self.out_domain_samples * self.num_vectors
-            );
         }
 
         // Get in-domain openings
@@ -438,20 +501,13 @@ impl<M: Embedding> Config<M> {
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-        commitments: &[&Commitment<M::Target>],
+        commitments: &[&Commitment],
     ) -> VerificationResult<Evaluations<M::Source>>
     where
         H: DuplexSpongeInterface,
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        for commitment in commitments {
-            verify!(commitment.out_of_domain.points.len() == self.out_domain_samples);
-            verify!(
-                commitment.out_of_domain.matrix.len() == self.num_vectors * self.out_domain_samples
-            );
-        }
-
         // Get in-domain openings
         let (indices, points) = self.in_domain_challenges(verifier_state);
 
@@ -497,28 +553,6 @@ impl<M: Embedding> Config<M> {
         );
         let points = self.evaluation_points(&indices);
         (indices, points)
-    }
-}
-
-impl<G: Field> Commitment<G> {
-    /// Returns the out-of-domain evaluations.
-    pub const fn out_of_domain(&self) -> &Evaluations<G> {
-        &self.out_of_domain
-    }
-
-    pub fn num_vectors(&self) -> usize {
-        self.out_of_domain().num_columns()
-    }
-}
-
-impl<F: Field, G: Field> Witness<F, G> {
-    /// Returns the out-of-domain evaluations.
-    pub const fn out_of_domain(&self) -> &Evaluations<G> {
-        &self.out_of_domain
-    }
-
-    pub fn num_vectors(&self) -> usize {
-        self.out_of_domain().num_columns()
     }
 }
 
@@ -568,11 +602,7 @@ impl<M: Embedding> fmt::Display for Config<M> {
             self.num_vectors, self.vector_size, self.interleaving_depth,
         )?;
         write!(f, " rate 2⁻{:.2}", -self.rate().log2())?;
-        write!(
-            f,
-            " samples {} in- {} out-domain",
-            self.in_domain_samples, self.out_domain_samples
-        )
+        write!(f, " samples {} in-domain", self.in_domain_samples)
     }
 }
 
@@ -582,19 +612,19 @@ impl<M: Embedding> fmt::Display for Config<M> {
 /// where `L` is the list size and `degree` is the polynomial degree bound.
 /// See [STIR] Lemma 4.5.
 #[allow(clippy::cast_sign_loss)]
-pub(crate) fn num_ood_samples(
-    unique_decoding: bool,
+pub fn num_ood_samples(
+    decoding_regime: DecodingRegime,
     security_target: f64,
     field_size_bits: f64,
     list_size: f64,
     degree: usize,
 ) -> usize {
-    if unique_decoding {
+    if matches!(decoding_regime, DecodingRegime::Unique) {
         return 0;
     }
-    let l_choose_2 = list_size * (list_size - 1.) / 2.;
-    let log_per_sample = field_size_bits - ((degree - 1) as f64).log2();
+    let log_per_sample = -ood_per_sample_log2(degree, field_size_bits);
     assert!(log_per_sample > 0.);
+    let l_choose_2 = list_size * (list_size - 1.) / 2.;
     ((security_target + l_choose_2.log2()) / log_per_sample)
         .ceil()
         .max(1.) as usize
@@ -602,31 +632,22 @@ pub(crate) fn num_ood_samples(
 
 /// Return the number of in-domain queries.
 ///
+/// Always ≥ 1 — the type carries that invariant so callers don't need to
+/// re-prove it locally.
+///
 /// This is used by [`whir_zk`].
 // TODO: A method with cleaner abstraction.
 #[allow(clippy::cast_sign_loss)]
 pub(crate) fn num_in_domain_queries(
-    unique_decoding: bool,
+    decoding_regime: DecodingRegime,
     security_target: f64,
     rate: f64,
-) -> usize {
-    // Pick in- and out-of-domain samples.
-    // η = slack to Johnson bound. We pick η = √ρ / 20.
-    // TODO: Optimize picking η.
-    let johnson_slack = if unique_decoding {
-        0.0
-    } else {
-        rate.sqrt() / 20.
-    };
-    // Query error is (1 - δ)^q, so we compute 1 - δ
-    let per_sample = if unique_decoding {
-        // Unique decoding bound: δ = (1 - ρ) / 2
-        f64::midpoint(1., rate)
-    } else {
-        // Johnson bound: δ = 1 - √ρ - η
-        rate.sqrt() + johnson_slack
-    };
-    (security_target / (-per_sample.log2())).ceil() as usize
+) -> NonZeroUsize {
+    let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
+    // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
+    let log_one_minus_delta = regime.one_minus_distance_log2(-rate.log2());
+    let q = (security_target / -log_one_minus_delta).ceil() as usize;
+    NonZeroUsize::new(q).unwrap_or(NonZeroUsize::MIN)
 }
 
 #[cfg(test)]
@@ -683,24 +704,27 @@ pub(crate) mod tests {
                 )
             });
 
-            (codeword_matrix, 0_usize..=10, 0_usize..=10, bool::ANY).prop_map(
+            (codeword_matrix, 0_usize..=10, bool::ANY).prop_map(
                 move |(
                     (codeword_length, matrix_commit),
                     in_domain_samples,
-                    out_domain_samples,
                     deduplicate_in_domain,
-                )| Self {
-                    embedding: Typed::new(embedding.clone()),
-                    num_vectors,
-                    vector_size,
-                    mask_length,
-                    codeword_length,
-                    interleaving_depth,
-                    matrix_commit,
-                    johnson_slack: OrderedFloat::default(),
-                    in_domain_samples,
-                    out_domain_samples,
-                    deduplicate_in_domain,
+                )| {
+                    let mode = NonZeroUsize::new(mask_length).map_or(IrsMode::Standard, |n| {
+                        IrsMode::ZeroKnowledge { mask_length: n }
+                    });
+                    Self {
+                        embedding: Typed::new(embedding.clone()),
+                        num_vectors,
+                        vector_size,
+                        codeword_length,
+                        interleaving_depth,
+                        matrix_commit,
+                        regime: DecodingRegimeParams::Unique,
+                        in_domain_samples,
+                        deduplicate_in_domain,
+                        mode,
+                    }
                 },
             )
         }
@@ -732,30 +756,6 @@ pub(crate) mod tests {
             &mut prover_state,
             &vectors.iter().map(|p| p.as_slice()).collect::<Vec<_>>(),
         );
-        assert_eq!(
-            witness.out_of_domain().points.len(),
-            config.out_domain_samples
-        );
-        assert_eq!(
-            witness.out_of_domain().matrix.len(),
-            config.out_domain_samples * config.num_vectors
-        );
-        if config.num_vectors > 0 {
-            for (point, evals) in zip_strict(
-                witness.out_of_domain().points.iter(),
-                witness
-                    .out_of_domain()
-                    .matrix
-                    .chunks_exact(config.num_vectors),
-            ) {
-                for (vector, expected) in zip_strict(vectors.iter(), evals.iter()) {
-                    assert_eq!(
-                        mixed_univariate_evaluate(config.embedding(), vector, *point),
-                        *expected
-                    );
-                }
-            }
-        }
         let in_domain_evals = config.open(&mut prover_state, &[&witness]);
         if config.deduplicate_in_domain {
             // Sorting is over index order, not points
@@ -773,7 +773,11 @@ pub(crate) mod tests {
             in_domain_evals.matrix.len(),
             in_domain_evals.points.len() * config.num_vectors * config.interleaving_depth
         );
-        if config.num_vectors > 0 {
+        // Value-correctness assertion only valid in non-ZK mode: in ZK the
+        // encoding is `Enc(f, r) = f(x) + x^ℓ · r(x)`, so opened values
+        // include the mask term. The lifecycle round-trip (open/verify
+        // agreement below) covers both modes.
+        if config.num_vectors > 0 && config.mask_length() == 0 {
             let base = config.vector_size / config.interleaving_depth;
             for (point, evals) in zip_strict(
                 &in_domain_evals.points,
@@ -799,7 +803,6 @@ pub(crate) mod tests {
         // Verifier
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let commitment = config.receive_commitment(&mut verifier_state).unwrap();
-        assert_eq!(commitment.out_of_domain(), witness.out_of_domain());
         let verifier_in_domain_evals = config.verify(&mut verifier_state, &[&commitment]).unwrap();
         assert_eq!(&verifier_in_domain_evals, &in_domain_evals);
         verifier_state.check_eof().unwrap();
@@ -816,13 +819,13 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let size = select(valid_sizes);
 
-        let config = (0_usize..=3, size, 1_usize..=10).prop_flat_map(
-            |(num_vectors, size, interleaving_depth)| {
+        let config = (0_usize..=3, size, 1_usize..=10, 0_usize..=8).prop_flat_map(
+            |(num_vectors, size, interleaving_depth, mask_length)| {
                 Config::arbitrary(
                     embedding.clone(),
                     num_vectors,
                     size * interleaving_depth,
-                    0,
+                    mask_length,
                     interleaving_depth,
                 )
             },
