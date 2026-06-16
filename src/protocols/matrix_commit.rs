@@ -174,7 +174,7 @@ impl<T: Immutable + IntoBytes> Encoder<T> for ZeroCopyEncoder {
     }
 }
 
-impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
+impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
     /// Create a new matrix commit configuration with the recommended hash function.
     pub fn new(num_rows: usize, num_cols: usize) -> Self {
         // Select a leaf hash function.
@@ -354,7 +354,7 @@ fn metal_merkle_opening_hints(
     nodes.read_hash_indices(&node_indices)
 }
 
-impl<T: TypeInfo + Encodable + Send + Sync + Clone> fmt::Display for Config<T> {
+impl<T: TypeInfo + Encodable + Send + Sync + Copy> fmt::Display for Config<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MatrixCommit({} x {})", self.num_rows(), self.num_cols)
     }
@@ -468,7 +468,7 @@ pub(crate) mod tests {
         num_cols: usize,
         indices: &[usize],
     ) where
-        T: Clone + TypeInfo + Encodable + Send + Sync,
+        T: Copy + TypeInfo + Encodable + Send + Sync,
         Standard: Distribution<T>,
     {
         crate::tests::init();
@@ -511,7 +511,7 @@ pub(crate) mod tests {
 
     fn proptest<T>()
     where
-        T: Clone + TypeInfo + Encodable + Send + Sync,
+        T: Copy + TypeInfo + Encodable + Send + Sync,
         Standard: Distribution<T>,
     {
         let hashes = [hash::COPY, hash::SHA2, hash::SHA3, hash::BLAKE3];
