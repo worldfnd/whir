@@ -6,7 +6,7 @@ use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     os::raw::c_void,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -24,6 +24,7 @@ use crate::{
         embedding::{Embedding, Identity},
         fields::{BN254Config, Field256},
         linear_form::{Covector, LinearForm, UnivariateEvaluation},
+        ntt::{ReedSolomon, RsDomain},
     },
     hash::{metal_profile, Hash as Digest, MetalSha2},
 };
@@ -970,7 +971,7 @@ struct MetalHashBuffer {
 }
 
 #[derive(Clone, Debug)]
-pub struct MetalBuffer<T: Clone> {
+pub struct MetalBuffer<T> {
     len: usize,
     host_cache: OnceCell<Vec<T>>,
     field: Option<MetalFieldBuffer>,
@@ -1518,27 +1519,70 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
         );
         accumulator.invalidate_host_cache();
     }
+}
 
-    fn interleaved_rs_encode(
-        vectors: &[&Self],
-        masks: &Self,
+/// Metal (GPU) Reed-Solomon encoder.
+///
+/// Wraps the shared [`RsDomain`] core: scalar methods delegate to the domain, and the coset
+/// layout used by the GPU encode is taken from [`RsDomain::coset_params`] so it can never
+/// drift from [`RsDomain::evaluation_points`]. Unlike the CPU encoder, it does not need the
+/// host NTT engine at all.
+#[derive(Debug, Clone)]
+pub struct MetalRs<F: Field> {
+    domain: Arc<RsDomain<F>>,
+}
+
+impl<F: Field> MetalRs<F> {
+    pub fn new(domain: Arc<RsDomain<F>>) -> Self {
+        Self { domain }
+    }
+}
+
+impl<F: Field> ReedSolomon<F> for MetalRs<F> {
+    fn next_order(&self, size: usize) -> Option<usize> {
+        self.domain.next_order(size)
+    }
+
+    fn generator(&self, codeword_length: usize) -> F {
+        self.domain.generator(codeword_length)
+    }
+
+    fn evaluation_points(
+        &self,
+        masked_message_length: usize,
+        codeword_length: usize,
+        indices: &[usize],
+    ) -> Vec<F> {
+        self.domain
+            .evaluation_points(masked_message_length, codeword_length, indices)
+    }
+
+    fn interleaved_encode(
+        &self,
+        vectors: &[&MetalBuffer<F>],
+        masks: &MetalBuffer<F>,
         message_length: usize,
         interleaving_depth: usize,
         codeword_length: usize,
-    ) -> Self {
+    ) -> MetalBuffer<F> {
         assert_bn254::<F>();
         let num_messages = vectors.len() * interleaving_depth;
         if num_messages == 0 {
-            return Self::from_vec(Vec::new());
+            return MetalBuffer::from_vec(Vec::new());
         }
         assert!(masks.len().is_multiple_of(num_messages));
         let mask_length = masks.len() / num_messages;
         if vectors.len() == 1 && mask_length == 0 {
+            // Single source of the coset layout: derived from the shared domain rather
+            // than recomputed on the device.
+            let (coset_size, _num_cosets) =
+                self.domain.coset_params(message_length, codeword_length);
             return encode_single_vector_coset_ntt(
                 vectors[0],
                 message_length,
                 interleaving_depth,
                 codeword_length,
+                coset_size,
             );
         }
 
@@ -2156,12 +2200,12 @@ fn encode_single_vector_coset_ntt<F: Field>(
     message_length: usize,
     interleaving_depth: usize,
     codeword_length: usize,
+    coset_size: usize,
 ) -> MetalBuffer<F> {
     assert!(codeword_length.is_power_of_two());
     assert!(Field256::get_root_of_unity(codeword_length as u64).is_some());
     assert_eq!(vector.len(), message_length * interleaving_depth);
 
-    let coset_size = message_length.next_power_of_two();
     assert!(codeword_length.is_multiple_of(coset_size));
     let num_cosets = codeword_length / coset_size;
     let total_elements = interleaving_depth
@@ -2607,7 +2651,7 @@ fn as_field256_slice<T: Clone>(values: &[T]) -> &[Field256] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::buffer::CpuBuffer;
+    use crate::algebra::{buffer::CpuBuffer, ntt::NttEngine};
 
     fn values(len: usize, offset: u64) -> Vec<Field256> {
         (0..len)
@@ -2683,13 +2727,21 @@ mod tests {
 
     #[test]
     fn metal_bn254_interleaved_rs_encode_matches_cpu() {
+        // The GPU encoder and the CPU reference share one coset layout: the engine and the
+        // domain are derived from the same field, and the GPU encode reads its layout from
+        // `RsDomain::coset_params` (which the engine's slice encode also uses).
+        let engine = NttEngine::<Field256>::new_from_fftfield();
+        let gpu_rs = MetalRs::new(Arc::new(RsDomain::<Field256>::from_fftfield()));
+
         let a = values(8, 1);
-        let cpu_a = CpuBuffer::from_slice(&a);
-        let cpu_masks = CpuBuffer::from_slice(&[]);
         let gpu_a = MetalBuffer::from_slice(&a);
         let gpu_masks = MetalBuffer::from_slice(&[]);
-        let cpu = CpuBuffer::interleaved_rs_encode(&[&cpu_a], &cpu_masks, 4, 2, 8);
-        let gpu = MetalBuffer::interleaved_rs_encode(&[&gpu_a], &gpu_masks, 4, 2, 8);
+
+        // CPU reference straight from the engine's slice API: `a` is one vector of two
+        // length-4 messages, no masks, codeword length 8.
+        let messages = a.chunks_exact(4).collect::<Vec<_>>();
+        let cpu = engine.interleaved_encode_slices(&messages, &[], 8);
+        let gpu = gpu_rs.interleaved_encode(&[&gpu_a], &gpu_masks, 4, 2, 8);
         assert_eq!(gpu.as_slice(), cpu.as_slice());
     }
 

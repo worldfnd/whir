@@ -323,13 +323,16 @@ impl<M: Embedding> Config<M> {
             prover_state.rng(),
             self.mask_length * self.num_messages(),
         );
-        let matrix = ActiveBuffer::interleaved_rs_encode(
-            vectors,
-            &masks,
-            self.message_length(),
-            self.interleaving_depth,
-            self.codeword_length,
-        );
+        let matrix = ntt::NTT
+            .get::<M::Source>()
+            .expect("Unsupported NTT field.")
+            .interleaved_encode(
+                vectors,
+                &masks,
+                self.message_length(),
+                self.interleaving_depth,
+                self.codeword_length,
+            );
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);

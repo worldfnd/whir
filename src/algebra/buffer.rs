@@ -3,14 +3,11 @@ use std::{any::Any, mem};
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
 
-use crate::{
-    algebra::{
-        embedding::{Embedding, Identity},
-        linear_form::{Covector, LinearForm, UnivariateEvaluation},
-        mixed_dot, mixed_multilinear_extend, mixed_scalar_mul_add, mixed_univariate_evaluate, ntt,
-        sumcheck::{compute_sumcheck_polynomial, fold},
-    },
-    utils::chunks_exact_or_empty,
+use crate::algebra::{
+    embedding::{Embedding, Identity},
+    linear_form::{Covector, LinearForm, UnivariateEvaluation},
+    mixed_dot, mixed_multilinear_extend, mixed_scalar_mul_add, mixed_univariate_evaluate,
+    sumcheck::{compute_sumcheck_polynomial, fold},
 };
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -95,13 +92,6 @@ pub trait FieldOps<F: Field>: Clone {
         accumulator: &mut Self::TargetBuffer<M::Target>,
         weight: M::Target,
     );
-    fn interleaved_rs_encode(
-        vectors: &[&Self],
-        masks: &Self,
-        message_length: usize,
-        interleaving_depth: usize,
-        codeword_length: usize,
-    ) -> Self;
 }
 
 #[derive(
@@ -116,7 +106,7 @@ pub trait FieldOps<F: Field>: Clone {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct CpuBuffer<T: Clone> {
+pub struct CpuBuffer<T> {
     data: Vec<T>,
 }
 
@@ -278,24 +268,5 @@ impl<F: Field> FieldOps<F> for CpuBuffer<F> {
         weight: M::Target,
     ) {
         mixed_scalar_mul_add(embedding, &mut accumulator.data, weight, self.as_slice());
-    }
-
-    fn interleaved_rs_encode(
-        vectors: &[&Self],
-        masks: &Self,
-        message_length: usize,
-        interleaving_depth: usize,
-        codeword_length: usize,
-    ) -> Self {
-        let vectors = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
-        let messages = vectors
-            .iter()
-            .flat_map(|v| chunks_exact_or_empty(v, message_length, interleaving_depth))
-            .collect::<Vec<_>>();
-        Self::from_vec(ntt::interleaved_rs_encode(
-            &messages,
-            masks.as_slice(),
-            codeword_length,
-        ))
     }
 }

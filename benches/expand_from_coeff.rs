@@ -1,5 +1,5 @@
 use divan::{black_box, AllocProfiler, Bencher};
-use whir::algebra::{fields::Field64, ntt, random_vector};
+use whir::algebra::{fields::Field64, ntt::NttEngine, random_vector};
 
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
@@ -31,11 +31,12 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
             let coeffs: Vec<Vec<Field64>> = (0..num_messages)
                 .map(|_| random_vector(&mut rng, message_length))
                 .collect();
-            (coeffs, expansion, coset_sz)
+            let engine = NttEngine::<Field64>::new_from_fftfield();
+            (engine, coeffs, expansion)
         })
-        .bench_values(|(coeffs, expansion, _coset_sz)| {
+        .bench_values(|(engine, coeffs, expansion)| {
             let coeffs_refs = coeffs.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
-            black_box(ntt::interleaved_rs_encode(
+            black_box(engine.interleaved_encode_slices(
                 &coeffs_refs,
                 &[],
                 coeffs[0].len() * expansion,

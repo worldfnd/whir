@@ -4,6 +4,9 @@
 //! A global cache is used for twiddle factors.
 
 use std::sync::{RwLock, RwLockReadGuard};
+// `Arc` is only used by the CPU encoder, which is gated to non-Metal builds.
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+use std::sync::Arc;
 
 use ark_ff::{FftField, Field};
 #[cfg(feature = "tracing")]
@@ -11,11 +14,13 @@ use tracing::instrument;
 #[cfg(feature = "parallel")]
 use {crate::utils::workload_size, rayon::prelude::*, std::cmp::max};
 
-use super::{
-    transpose,
-    utils::{lcm, sqrt_factor},
-    ReedSolomon,
-};
+use super::transpose;
+use super::utils::{lcm, sqrt_factor};
+// The CPU `ReedSolomon` impl and `CpuBuffer` are only used when CPU buffers are the active backend.
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+use super::ReedSolomon;
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+use crate::algebra::buffer::CpuBuffer;
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
@@ -26,13 +31,26 @@ use crate::{
 // Supported primes
 const PRIMES: [usize; 2] = [2, 3];
 
-/// Engine for computing NTTs over arbitrary fields.
-/// Assumes the field has large two-adicity.
+/// Reed-Solomon code domain for a field `F`: the minimal, backend-neutral core.
+///
+/// Holds only the NTT subgroup `order`, its `divisors`, and a primitive root, together with
+/// the coset convention (`next_order` / `generator` / `coset_params` / `evaluation_points`).
+/// Both the CPU engine ([`NttEngine`]) and the Metal encoder share this, so the coset layout
+/// is defined in exactly one place. Assumes the field has large two-adicity.
+#[derive(Debug)]
+pub struct RsDomain<F: Field> {
+    pub(crate) order: usize,         // order of omega_order
+    pub(crate) divisors: Vec<usize>, // divisors of the order.
+    pub(crate) omega_order: F,       // primitive order'th root.
+}
+
+/// CPU Cooley-Tukey NTT engine for a field `F`.
+///
+/// Wraps the shared [`RsDomain`] and adds the host-side NTT machinery: small-order roots
+/// for the butterflies and an on-demand roots-of-unity cache. CPU only.
 #[derive(Debug)]
 pub struct NttEngine<F: Field> {
-    order: usize,         // order of omega_orger
-    divisors: Vec<usize>, // divisors of the order.
-    omega_order: F,       // primitive order'th root.
+    domain: RsDomain<F>,
 
     // Roots of small order (zero if unavailable). The naming convention is that omega_foo has order foo.
     half_omega_3_1_plus_2: F, // ½(ω₃ + ω₃²)
@@ -48,9 +66,9 @@ pub struct NttEngine<F: Field> {
     roots: RwLock<Vec<F>>,
 }
 
-impl<F: FftField> NttEngine<F> {
-    /// Construct a new engine from the field's `FftField` trait.
-    pub fn new_from_fftfield() -> Self {
+impl<F: FftField> RsDomain<F> {
+    /// Construct the domain from the field's `FftField` parameters.
+    pub fn from_fftfield() -> Self {
         let (mut omega, mut order) = if let (Some(mut omega), Some(b), Some(k)) = (
             F::LARGE_SUBGROUP_ROOT_OF_UNITY,
             F::SMALL_SUBGROUP_BASE,
@@ -79,8 +97,8 @@ impl<F: FftField> NttEngine<F> {
     }
 }
 
-/// Creates a new NttEngine. `omega_order` must be a primitive root of unity of even order `omega`.
-impl<F: Field> NttEngine<F> {
+impl<F: Field> RsDomain<F> {
+    /// Creates a new domain. `omega_order` must be a primitive root of unity of even order `order`.
     pub fn new(order: usize, omega_order: F) -> Self {
         // Make sure `omega_order` is a primitive root of unity.
         assert_eq!(omega_order.pow([order as u64]), F::ONE);
@@ -89,11 +107,99 @@ impl<F: Field> NttEngine<F> {
                 assert_ne!(omega_order.pow([(order / prime) as u64]), F::ONE);
             }
         }
-
-        let mut res = Self {
+        Self {
             order,
             divisors: divisors(order, &PRIMES),
             omega_order,
+        }
+    }
+
+    pub fn next_order(&self, size: usize) -> Option<usize> {
+        match self.divisors.binary_search(&size) {
+            Ok(index) | Err(index) => self.divisors.get(index).copied(),
+        }
+    }
+
+    pub fn generator(&self, codeword_length: usize) -> F {
+        self.omega_order
+            .pow([(self.order / codeword_length) as u64])
+    }
+
+    pub fn checked_root(&self, order: usize) -> Option<F> {
+        if order == 0 {
+            return Some(F::ONE);
+        }
+        self.order
+            .is_multiple_of(order)
+            .then(|| self.omega_order.pow([(self.order / order) as u64]))
+    }
+
+    pub fn root(&self, order: usize) -> F {
+        self.checked_root(order)
+            .expect("Subgroup of requested order does not exist.")
+    }
+
+    /// The single definition of the coset layout used by Reed-Solomon encoding.
+    ///
+    /// Returns `(coset_size, num_cosets)` for the given masked message length and
+    /// codeword length. Both [`Self::evaluation_points`] and every backend's encode
+    /// derive their layout from here, so the index ordering can never drift between them.
+    pub fn coset_params(
+        &self,
+        masked_message_length: usize,
+        codeword_length: usize,
+    ) -> (usize, usize) {
+        let mut coset_size = self.next_order(masked_message_length).unwrap();
+        while !codeword_length.is_multiple_of(coset_size) {
+            coset_size = self.next_order(coset_size + 1).unwrap();
+        }
+        (coset_size, codeword_length / coset_size)
+    }
+
+    pub fn evaluation_points(
+        &self,
+        masked_message_length: usize,
+        codeword_length: usize,
+        indices: &[usize],
+    ) -> Vec<F> {
+        assert!(masked_message_length <= codeword_length);
+        assert!(self.order.is_multiple_of(codeword_length));
+        let mut result = Vec::new();
+        let generator = self.generator(codeword_length);
+
+        let (coset_size, num_cosets) = self.coset_params(masked_message_length, codeword_length);
+        #[cfg(feature = "rs_in_order")]
+        let _ = (coset_size, num_cosets);
+
+        for &index in indices {
+            assert!(index < codeword_length);
+
+            #[cfg(not(feature = "rs_in_order"))]
+            let index = transpose_permute(index, num_cosets, coset_size);
+            result.push(generator.pow([index as u64]));
+        }
+        result
+    }
+}
+
+impl<F: FftField> NttEngine<F> {
+    /// Construct a new engine from the field's `FftField` trait.
+    pub fn new_from_fftfield() -> Self {
+        Self::from_domain(RsDomain::from_fftfield())
+    }
+}
+
+/// Creates a new NttEngine. `omega_order` must be a primitive root of unity of even order `omega`.
+impl<F: Field> NttEngine<F> {
+    pub fn new(order: usize, omega_order: F) -> Self {
+        Self::from_domain(RsDomain::new(order, omega_order))
+    }
+
+    /// Build the CPU engine on top of a shared [`RsDomain`], precomputing small-order roots.
+    pub fn from_domain(domain: RsDomain<F>) -> Self {
+        let order = domain.order;
+        let mut res = Self {
+            domain,
             half_omega_3_1_plus_2: F::ZERO,
             half_omega_3_1_min_2: F::ZERO,
             omega_4_1: F::ZERO,
@@ -105,25 +211,30 @@ impl<F: Field> NttEngine<F> {
             roots: RwLock::new(Vec::new()),
         };
         if order.is_multiple_of(3) {
-            let omega_3_1 = res.root(3);
+            let omega_3_1 = res.domain.root(3);
             let omega_3_2 = omega_3_1 * omega_3_1;
             // Note: char F cannot be 2 and so division by 2 works, because primitive roots of unity with even order exist.
             res.half_omega_3_1_min_2 = (omega_3_1 - omega_3_2) / F::from(2u64);
             res.half_omega_3_1_plus_2 = (omega_3_1 + omega_3_2) / F::from(2u64);
         }
         if order.is_multiple_of(4) {
-            res.omega_4_1 = res.root(4);
+            res.omega_4_1 = res.domain.root(4);
         }
         if order.is_multiple_of(8) {
-            res.omega_8_1 = res.root(8);
+            res.omega_8_1 = res.domain.root(8);
             res.omega_8_3 = res.omega_8_1.pow([3]);
         }
         if order.is_multiple_of(16) {
-            res.omega_16_1 = res.root(16);
+            res.omega_16_1 = res.domain.root(16);
             res.omega_16_3 = res.omega_16_1.pow([3]);
             res.omega_16_9 = res.omega_16_1.pow([9]);
         }
         res
+    }
+
+    /// The shared field/domain core this engine is built on.
+    pub fn domain(&self) -> &RsDomain<F> {
+        &self.domain
     }
 
     pub fn ntt(&self, values: &mut [F]) {
@@ -168,24 +279,10 @@ impl<F: Field> NttEngine<F> {
         self.ntt_batch(values, size);
     }
 
-    pub fn checked_root(&self, order: usize) -> Option<F> {
-        if order == 0 {
-            return Some(F::ONE);
-        }
-        self.order
-            .is_multiple_of(order)
-            .then(|| self.omega_order.pow([(self.order / order) as u64]))
-    }
-
-    pub fn root(&self, order: usize) -> F {
-        self.checked_root(order)
-            .expect("Subgroup of requested order does not exist.")
-    }
-
     /// Returns a cached table of roots of unity of the given order.
     fn roots_table(&self, order: usize) -> RwLockReadGuard<'_, Vec<F>> {
         assert!(
-            self.order.is_multiple_of(order),
+            self.domain.order.is_multiple_of(order),
             "No subgroup of order {order}."
         );
 
@@ -208,7 +305,7 @@ impl<F: Field> NttEngine<F> {
                 roots.reserve_exact(size);
 
                 // Compute powers of roots of unity.
-                let root = self.root(size);
+                let root = self.domain.root(size);
                 #[cfg(not(feature = "parallel"))]
                 {
                     let mut root_i = F::ONE;
@@ -360,47 +457,12 @@ impl<F: Field> NttEngine<F> {
     }
 }
 
-impl<F: Field> ReedSolomon<F> for NttEngine<F> {
-    fn next_order(&self, size: usize) -> Option<usize> {
-        match self.divisors.binary_search(&size) {
-            Ok(index) | Err(index) => self.divisors.get(index).copied(),
-        }
-    }
-
-    fn generator(&self, codeword_length: usize) -> F {
-        self.omega_order
-            .pow([(self.order / codeword_length) as u64])
-    }
-
-    fn evaluation_points(
-        &self,
-        masked_message_length: usize,
-        codeword_length: usize,
-        indices: &[usize],
-    ) -> Vec<F> {
-        assert!(masked_message_length <= codeword_length);
-        assert!(self.order.is_multiple_of(codeword_length));
-        let mut result = Vec::new();
-        let generator = self.generator(codeword_length);
-
-        // Coset transformation
-        let mut coset_size = self.next_order(masked_message_length).unwrap();
-        while !codeword_length.is_multiple_of(coset_size) {
-            coset_size = self.next_order(coset_size + 1).unwrap();
-        }
-        #[cfg(not(feature = "rs_in_order"))]
-        let num_cosets = codeword_length / coset_size;
-
-        for &index in indices {
-            assert!(index < codeword_length);
-
-            #[cfg(not(feature = "rs_in_order"))]
-            let index = transpose_permute(index, num_cosets, coset_size);
-            result.push(generator.pow([index as u64]));
-        }
-        result
-    }
-
+impl<F: Field> NttEngine<F> {
+    /// Masked interleaved Reed-Solomon encoding over CPU slices.
+    ///
+    /// `messages` are `num_messages` already-chunked slices of `message_length` elements.
+    /// Used directly by benchmarks and tests; backend encoders call this (CPU) or reimplement
+    /// it on the device (Metal), all driven by [`Self::coset_params`].
     #[cfg_attr(feature = "tracing", instrument(skip(self, messages, masks), fields(
         num_messages = messages.len(),
         message_len = messages.first().map(|c| c.len()),
@@ -408,8 +470,13 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         mask_len = masks.len().checked_div(messages.len())
 
     )))]
-    fn interleaved_encode(&self, messages: &[&[F]], masks: &[F], codeword_length: usize) -> Vec<F> {
-        assert!(self.order.is_multiple_of(codeword_length));
+    pub fn interleaved_encode_slices(
+        &self,
+        messages: &[&[F]],
+        masks: &[F],
+        codeword_length: usize,
+    ) -> Vec<F> {
+        assert!(self.domain.order.is_multiple_of(codeword_length));
         if messages.is_empty() {
             assert!(masks.is_empty());
             return Vec::new();
@@ -433,11 +500,8 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         // You can also see this as applying a first round of Cooley-Tukey with
         // N = coset_size × num_cosets, and solving it directly by observing that
         // only the first coset is non-zero.
-        let mut coset_size = self.next_order(masked_message_length).unwrap();
-        while !codeword_length.is_multiple_of(coset_size) {
-            coset_size = self.next_order(coset_size + 1).unwrap();
-        }
-        let num_cosets = codeword_length / coset_size;
+        let (coset_size, num_cosets) =
+            self.domain.coset_params(masked_message_length, codeword_length);
         let coset_padding = coset_size - masked_message_length;
 
         // Lay out twisted coefficients in contiguous coset blocks of length
@@ -474,6 +538,69 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         // Transpose to row-major order with vectors stacked horizontally.
         transpose(&mut result, num_messages, codeword_length);
         result
+    }
+}
+
+/// CPU Reed-Solomon encoder.
+///
+/// Thin wrapper over a CPU [`NttEngine`]: the scalar methods delegate to the engine's shared
+/// [`RsDomain`], and `interleaved_encode` chunks the input vectors and runs the host coset-NTT.
+///
+/// Only built when CPU buffers are the active backend. Under a Metal build
+/// `ActiveBuffer = MetalBuffer`, so its `ReedSolomon` impl would not type-check; code that needs
+/// a CPU codeword there reaches it through [`NttEngine::interleaved_encode_slices`] instead.
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+#[derive(Debug, Clone)]
+pub struct CpuRs<F: Field> {
+    engine: Arc<NttEngine<F>>,
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+impl<F: Field> CpuRs<F> {
+    pub fn new(engine: Arc<NttEngine<F>>) -> Self {
+        Self { engine }
+    }
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+impl<F: Field> ReedSolomon<F> for CpuRs<F> {
+    fn next_order(&self, size: usize) -> Option<usize> {
+        self.engine.domain().next_order(size)
+    }
+
+    fn generator(&self, codeword_length: usize) -> F {
+        self.engine.domain().generator(codeword_length)
+    }
+
+    fn evaluation_points(
+        &self,
+        masked_message_length: usize,
+        codeword_length: usize,
+        indices: &[usize],
+    ) -> Vec<F> {
+        self.engine
+            .domain()
+            .evaluation_points(masked_message_length, codeword_length, indices)
+    }
+
+    fn interleaved_encode(
+        &self,
+        vectors: &[&CpuBuffer<F>],
+        masks: &CpuBuffer<F>,
+        message_length: usize,
+        interleaving_depth: usize,
+        codeword_length: usize,
+    ) -> CpuBuffer<F> {
+        let vectors = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+        let messages = vectors
+            .iter()
+            .flat_map(|v| chunks_exact_or_empty(v, message_length, interleaving_depth))
+            .collect::<Vec<_>>();
+        CpuBuffer::from_vec(self.engine.interleaved_encode_slices(
+            &messages,
+            masks.as_slice(),
+            codeword_length,
+        ))
     }
 }
 
@@ -585,12 +712,12 @@ mod tests {
         let engine = NttEngine::<Field64>::new_from_fftfield();
 
         // Verify that the order of the engine is correctly set
-        assert_eq!(engine.order, 3 << 32);
+        assert_eq!(engine.domain.order, 3 << 32);
 
         // Verify that the root of unity is correctly initialized
         assert_eq!(
-            engine.omega_order,
-            Field64::GENERATOR.pow([(18_446_744_069_414_584_320 / engine.order) as u64])
+            engine.domain.omega_order,
+            Field64::GENERATOR.pow([(18_446_744_069_414_584_320 / engine.domain.order) as u64])
         );
     }
 
@@ -599,31 +726,31 @@ mod tests {
         let engine = NttEngine::<Field64>::new_from_fftfield();
 
         // Ensure the root exponentiates correctly
-        assert_eq!(engine.root(8).pow([8]), Field64::ONE);
-        assert_eq!(engine.root(4).pow([4]), Field64::ONE);
-        assert_eq!(engine.root(2).pow([2]), Field64::ONE);
+        assert_eq!(engine.domain().root(8).pow([8]), Field64::ONE);
+        assert_eq!(engine.domain().root(4).pow([4]), Field64::ONE);
+        assert_eq!(engine.domain().root(2).pow([2]), Field64::ONE);
 
         // Ensure it's not a lower-order root
-        assert_ne!(engine.root(8).pow([4]), Field64::ONE);
-        assert_ne!(engine.root(4).pow([2]), Field64::ONE);
+        assert_ne!(engine.domain().root(8).pow([4]), Field64::ONE);
+        assert_ne!(engine.domain().root(4).pow([2]), Field64::ONE);
     }
 
     #[test]
     fn test_root_of_unity_multiplication() {
         let engine = NttEngine::<Field64>::new_from_fftfield();
 
-        let root = engine.root(16);
+        let root = engine.domain().root(16);
 
         // Multiply root by itself repeatedly and verify expected outcomes
-        assert_eq!(root.pow([2]), engine.root(8));
-        assert_eq!(root.pow([4]), engine.root(4));
-        assert_eq!(root.pow([8]), engine.root(2));
+        assert_eq!(root.pow([2]), engine.domain().root(8));
+        assert_eq!(root.pow([4]), engine.domain().root(4));
+        assert_eq!(root.pow([8]), engine.domain().root(2));
     }
 
     #[test]
     fn test_root_of_unity_inversion() {
         let engine = NttEngine::<Field64>::new_from_fftfield();
-        let root = engine.root(16);
+        let root = engine.domain().root(16);
 
         // The inverse of ω is ω^{-1}, computed as ω^(p-2) in Field64.
         let p: u64 = u64::from_be_bytes(Field64::MODULUS.to_bytes_be().try_into().unwrap());
@@ -649,9 +776,9 @@ mod tests {
         let engine2 = NttEngine::<Field64>::new_from_fftfield();
 
         // Ensure that multiple instances yield the same results
-        assert_eq!(engine1.root(8), engine2.root(8));
-        assert_eq!(engine1.root(4), engine2.root(4));
-        assert_eq!(engine1.root(2), engine2.root(2));
+        assert_eq!(engine1.domain().root(8), engine2.domain().root(8));
+        assert_eq!(engine1.domain().root(4), engine2.domain().root(4));
+        assert_eq!(engine1.domain().root(2), engine2.domain().root(2));
     }
 
     #[test]
@@ -661,9 +788,9 @@ mod tests {
 
         // Check hardcoded expected values (ω^i)
         assert_eq!(roots_4[0], Field::ONE);
-        assert_eq!(roots_4[1], engine.root(4));
-        assert_eq!(roots_4[2], engine.root(4).pow([2]));
-        assert_eq!(roots_4[3], engine.root(4).pow([3]));
+        assert_eq!(roots_4[1], engine.domain().root(4));
+        assert_eq!(roots_4[2], engine.domain().root(4).pow([2]));
+        assert_eq!(roots_4[3], engine.domain().root(4).pow([3]));
     }
 
     #[test]
@@ -675,7 +802,7 @@ mod tests {
         // Must contain only ω^0 and ω^1
         assert_eq!(roots_2.len(), 2);
         assert_eq!(roots_2[0], Field64::ONE);
-        assert_eq!(roots_2[1], engine.root(2));
+        assert_eq!(roots_2[1], engine.domain().root(2));
     }
 
     #[test]
@@ -686,7 +813,7 @@ mod tests {
 
         // Ensure the sequence follows expected powers of the root of unity
         for i in 0..4 {
-            assert_eq!(roots_4[i], engine.root(4).pow([i as u64]));
+            assert_eq!(roots_4[i], engine.domain().root(4).pow([i as u64]));
         }
     }
 
@@ -732,7 +859,7 @@ mod tests {
         let roots = vec![r1];
 
         // Ensure the root of unity is correct
-        assert_eq!(engine.root(4).pow([4]), Field64::ONE);
+        assert_eq!(engine.domain().root(4).pow([4]), Field64::ONE);
 
         apply_twiddles(&mut values, &roots, 2, 4);
 
@@ -1051,7 +1178,7 @@ mod tests {
         //
         // ω is the 32nd root of unity: ω³² = 1.
 
-        let omega = engine.root(32);
+        let omega = engine.domain().root(32);
         let mut expected_values = vec![Field64::ZERO; 32];
         for (k, expected_value) in expected_values.iter_mut().enumerate().take(32) {
             let omega_k = omega.pow([k as u64]);
