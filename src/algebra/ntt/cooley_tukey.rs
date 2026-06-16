@@ -18,10 +18,7 @@ use super::{
 };
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
-use crate::{
-    algebra::ntt::utils::divisors,
-    utils::{chunks_exact_or_empty, zip_strict},
-};
+use crate::algebra::ntt::utils::divisors;
 
 // Supported primes
 const PRIMES: [usize; 2] = [2, 3];
@@ -374,17 +371,17 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
 
     fn evaluation_points(
         &self,
-        masked_message_length: usize,
+        poly_length: usize,
         codeword_length: usize,
         indices: &[usize],
     ) -> Vec<F> {
-        assert!(masked_message_length <= codeword_length);
+        assert!(poly_length <= codeword_length);
         assert!(self.order.is_multiple_of(codeword_length));
         let mut result = Vec::new();
         let generator = self.generator(codeword_length);
 
         // Coset transformation
-        let mut coset_size = self.next_order(masked_message_length).unwrap();
+        let mut coset_size = self.next_order(poly_length).unwrap();
         while !codeword_length.is_multiple_of(coset_size) {
             coset_size = self.next_order(coset_size + 1).unwrap();
         }
@@ -401,26 +398,20 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         result
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, messages, masks), fields(
-        num_messages = messages.len(),
-        message_len = messages.first().map(|c| c.len()),
+    #[cfg_attr(feature = "tracing", instrument(skip(self, polys), fields(
+        num_polys = polys.len(),
+        poly_length = polys.first().map(|p| p.len()),
         codeword_length = codeword_length,
-        mask_len = masks.len().checked_div(messages.len())
-
     )))]
-    fn interleaved_encode(&self, messages: &[&[F]], masks: &[F], codeword_length: usize) -> Vec<F> {
+    fn interleaved_encode(&self, polys: &[&[F]], codeword_length: usize) -> Vec<F> {
         assert!(self.order.is_multiple_of(codeword_length));
-        if messages.is_empty() {
-            assert!(masks.is_empty());
+        if polys.is_empty() {
             return Vec::new();
         }
-        let num_messages = messages.len();
-        let message_len = messages[0].len();
-        assert!(messages.iter().all(|m| m.len() == message_len));
-        assert!(masks.len().is_multiple_of(num_messages));
-        let mask_length = masks.len() / num_messages;
-        let masked_message_length = message_len + mask_length;
-        assert!(masked_message_length <= codeword_length);
+        let num_polys = polys.len();
+        let poly_length = polys[0].len();
+        assert!(polys.iter().all(|p| p.len() == poly_length));
+        assert!(poly_length <= codeword_length);
 
         // Coset-NTT: instead of doing one codeword-length NTT on mostly zeros,
         // do `num_cosets` many `coset_size`-point NTTs on twisted coefficient
@@ -433,28 +424,24 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         // You can also see this as applying a first round of Cooley-Tukey with
         // N = coset_size × num_cosets, and solving it directly by observing that
         // only the first coset is non-zero.
-        let mut coset_size = self.next_order(masked_message_length).unwrap();
+        let mut coset_size = self.next_order(poly_length).unwrap();
         while !codeword_length.is_multiple_of(coset_size) {
             coset_size = self.next_order(coset_size + 1).unwrap();
         }
         let num_cosets = codeword_length / coset_size;
-        let coset_padding = coset_size - masked_message_length;
+        let coset_padding = coset_size - poly_length;
 
         // Lay out twisted coefficients in contiguous coset blocks of length
         // `coset_size`, zero-padding each block as needed.
-        let mut result = Vec::with_capacity(num_messages * codeword_length);
-        for (message, mask) in zip_strict(
-            messages,
-            chunks_exact_or_empty(masks, mask_length, num_messages),
-        ) {
+        let mut result = Vec::with_capacity(num_polys * codeword_length);
+        for poly in polys {
             // FFT[a 0 0 0] = [a a a a], so just replicate input in coset dimension.
             for _ in 0..num_cosets {
-                result.extend_from_slice(message);
-                result.extend_from_slice(mask);
+                result.extend_from_slice(poly);
                 result.resize(result.len() + coset_padding, F::ZERO);
             }
         }
-        assert_eq!(result.len(), num_messages * codeword_length);
+        assert_eq!(result.len(), num_polys * codeword_length);
 
         // NTT each coset block, then transpose each codeword block from
         // coset-major `(num_cosets × coset_size)` layout into standard codeword
@@ -472,7 +459,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         transpose(&mut result, num_cosets, coset_size);
 
         // Transpose to row-major order with vectors stacked horizontally.
-        transpose(&mut result, num_messages, codeword_length);
+        transpose(&mut result, num_polys, codeword_length);
         result
     }
 }

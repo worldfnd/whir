@@ -1,6 +1,7 @@
 //! Output of [`super::derive`]: the assembled per-round and basecase configs.
 
 use ark_ff::Field;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     algebra::{embedding::Embedding, fields::FieldWithSize},
@@ -24,7 +25,8 @@ use crate::{
     },
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct ProtocolConfig<M: Embedding> {
     security: SecuritySpec,
     tuning: TuningSpec,
@@ -291,7 +293,8 @@ pub struct PowSlot {
 /// `gamma_analytic` is always computed (the Lemma 7.4 formula is well-defined
 /// in both modes) but only enters validation when the basecase is ZK — the
 /// γ slot does not exist otherwise.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct BasecasePlan<F: Field> {
     config: BasecaseConfig<F>,
     sumcheck_analytic: Bits,
@@ -365,7 +368,8 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct RoundConfig<M: Embedding> {
     round_index: usize,
     sumcheck: Solved<SumcheckConfig<M::Target>>,
@@ -423,7 +427,8 @@ impl<M: Embedding> RoundConfig<M> {
 /// The ZK payload owns the round's mask oracle, so a mode/oracle mismatch is
 /// unrepresentable. Boxed to keep the `Standard` variant from paying the
 /// oracle's footprint.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub enum RoundMode<F: Field> {
     Standard,
     ZeroKnowledge {
@@ -477,7 +482,8 @@ impl<M: Embedding> RoundConfig<M> {
 ///
 /// Both trees share the same C_zk code rate, so `info()` exposes a single
 /// shared list-size to downstream solvers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct MaskOracleConfig<F: Field> {
     sumcheck_masks: Solved<MaskProximityConfig<F>>,
     cs_mask: Solved<MaskProximityConfig<F>>,
@@ -529,7 +535,7 @@ impl<F: Field> MaskOracleConfig<F> {
 }
 
 /// Slim mask-oracle view (C_zk's list size + ℓ_zk).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MaskOracleInfo {
     pub c_zk_list_size: ListSize,
     pub l_zk: MaskCodeMessageLen,

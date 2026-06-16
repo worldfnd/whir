@@ -37,7 +37,6 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
             let coeffs_refs = coeffs.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
             black_box(ntt::interleaved_rs_encode(
                 &coeffs_refs,
-                &[],
                 coeffs[0].len() * expansion,
             ))
         });

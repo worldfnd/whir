@@ -143,6 +143,19 @@ mod tests {
     }
 
     #[test]
+    fn protocol_config_json_roundtrip() {
+        let spec = test_spec(Mode::Standard);
+        let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
+        let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size)).unwrap();
+
+        let json = serde_json::to_string(&plan).unwrap();
+        let decoded: ProtocolConfig<TestEmbedding> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, plan);
+        assert!(decoded.check_all_invariants());
+    }
+
+    #[test]
     fn derive_zk_with_no_rounds_uses_zk_basecase_only() {
         let spec = test_spec(Mode::ZeroKnowledge);
         let plan = ProtocolConfig::<TestEmbedding>::derive(

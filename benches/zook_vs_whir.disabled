@@ -1,3 +1,4 @@
+//! Enable to benchmark base WHIR and Zook Std + ZK Mode
 //! Sweep benchmark: base WHIR (non-ZK), Zook (Standard mode), and Zook (ZK
 //! mode) across polynomial sizes 2^8 .. 2^24. For each (protocol, size) we
 //! run [`ITERATIONS`] passes and record commit / prove / verify wall-clock

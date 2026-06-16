@@ -61,42 +61,50 @@ impl type_map::Family for NttFamily {
     type Dyn<F: 'static> = dyn ReedSolomon<F>;
 }
 
-/// Trait for a Reed-Solomon encoder implementation for a given field `F`.
+/// Reed-Solomon encoder for a given field `F`.
+///
+/// Pure-NTT abstraction: encodes polynomials, knows nothing about how callers
+/// structure those polynomials (whir's IRS, for example, concatenates a
+/// message and a mask into a single polynomial before calling this trait —
+/// that split lives entirely on the caller side).
 pub trait ReedSolomon<F>: Debug + Send + Sync {
-    /// Returns the next supported order equal or larger than `size`.
-    ///
-    /// The result will be an NTT-smooth number suitable for `codeword_length`.
-    ///
-    /// Returns `None` if `size` exceeds the largest supported order.
+    /// Smallest supported codeword length `>= size`, or `None` if `size`
+    /// exceeds the engine's maximum order. The returned length is always
+    /// NTT-smooth for this engine.
     fn next_order(&self, size: usize) -> Option<usize>;
 
+    /// Generator of the multiplicative subgroup of order `codeword_length`.
     fn generator(&self, codeword_length: usize) -> F;
 
-    /// Returns the `index`th evaluation point.
+    /// Evaluation points for the requested codeword positions.
     ///
-    /// `masked_message_length`: the total message length including any mask values.
+    /// `result[i]` is the field point at which `codeword[indices[i]]` lives.
+    /// `poly_length` is the length of the polynomial whose codeword is being
+    /// queried — some engines (e.g. cooley_tukey) derive their internal coset
+    /// structure from it, so the same codeword index can map to different
+    /// points depending on `poly_length`.
     ///
     /// # Panics
     ///
-    /// Panics if any of the indices are `>= codeword_length` or `order` is not supported.
+    /// Panics if any index is `>= codeword_length` or `codeword_length` is
+    /// not supported.
     fn evaluation_points(
         &self,
-        masked_message_length: usize,
+        poly_length: usize,
         codeword_length: usize,
         indices: &[usize],
     ) -> Vec<F>;
 
-    /// Compute a masked interleaved Reed-Solomon encoding.
+    /// Batch-encode polynomials in parallel.
     ///
-    /// `messages` are `num_messages` slices of `message_length` elements.
-    /// `masks` is a `num_messages` × `mask_length` matrix of blinding coefficients.
-    /// `codeword_length` must be an NTT-smooth number >= `message_length + mask_length`.
-    /// returns an `codeword_length × num_messages` matrix.
+    /// All `polys[i]` must have the same length. Output is a flat buffer of
+    /// `polys.len() * codeword_length` elements in row-major
+    /// `(eval_index, poly)` layout: `result[i * polys.len() + j]` is poly
+    /// `j`'s value at the `i`-th evaluation point.
     ///
-    /// Each output value is the univariate polynomial evaluation in the evaluation point
-    /// corresponding with the index of a coefficient list formed by concatenating message and mask.
-    ///
-    fn interleaved_encode(&self, messages: &[&[F]], masks: &[F], codeword_length: usize) -> Vec<F>;
+    /// `codeword_length` must be NTT-smooth for this engine and at least the
+    /// polynomial length.
+    fn interleaved_encode(&self, polys: &[&[F]], codeword_length: usize) -> Vec<F>;
 }
 
 assert_obj_safe!(ReedSolomon<crate::algebra::fields::Field256>);
@@ -108,23 +116,19 @@ pub fn next_order<F: 'static>(size: usize) -> Option<usize> {
 }
 
 pub fn evaluation_points<F: 'static>(
-    masked_message_length: usize,
+    poly_length: usize,
     codeword_length: usize,
     indices: &[usize],
 ) -> Vec<F> {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
-        .evaluation_points(masked_message_length, codeword_length, indices)
+        .evaluation_points(poly_length, codeword_length, indices)
 }
 
-pub fn interleaved_rs_encode<F: 'static>(
-    messages: &[&[F]],
-    masks: &[F],
-    codeword_length: usize,
-) -> Vec<F> {
+pub fn interleaved_rs_encode<F: 'static>(polys: &[&[F]], codeword_length: usize) -> Vec<F> {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
-        .interleaved_encode(messages, masks, codeword_length)
+        .interleaved_encode(polys, codeword_length)
 }
 
 pub fn generator<F: 'static>(codeword_length: usize) -> F {
@@ -145,7 +149,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{random_vector, univariate_evaluate},
-        utils::{chunks_exact_or_empty, zip_strict},
+        utils::zip_strict,
     };
 
     fn valid_codeword_lengths<F: 'static>(size: usize, count: usize) -> Vec<usize> {
@@ -187,13 +191,17 @@ mod tests {
             let messages = (0..num_messages)
                 .map(|_| random_vector(&mut rng, message_length))
                 .collect::<Vec<_>>();
-            let masks = random_vector(&mut rng, mask_length * num_messages);
-            let message_refs = messages.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
-            let codeword = ntt.interleaved_encode(
-                &message_refs,
-                &masks,
-                codeword_length,
-            );
+            let masks: Vec<Vec<F>> = (0..num_messages)
+                .map(|_| random_vector(&mut rng, mask_length))
+                .collect();
+            // Build each polynomial as `message || mask`. The engine takes
+            // unified polynomial slices; the message/mask split is purely a
+            // caller-side concept.
+            let polys: Vec<Vec<F>> = (0..num_messages)
+                .map(|i| messages[i].iter().chain(masks[i].iter()).copied().collect())
+                .collect();
+            let poly_refs: Vec<&[F]> = polys.iter().map(Vec::as_slice).collect();
+            let codeword = ntt.interleaved_encode(&poly_refs, codeword_length);
 
             // Output must be the right size.
             assert_eq!(codeword.len(), codeword_length * num_messages);
@@ -202,8 +210,7 @@ mod tests {
             let mut evaluation_points = ntt.evaluation_points(message_length + mask_length, codeword_length, &sampled_indices);
             for (&index, &evaluation_point) in zip_strict(&sampled_indices, &evaluation_points) {
                 let evaluations = &codeword[index * num_messages.. (index + 1) * num_messages];
-                let masks = chunks_exact_or_empty(&masks, mask_length, num_messages);
-                for ((message, mask), value) in zip_strict(zip_strict(&messages, masks), evaluations) {
+                for ((message, mask), value) in zip_strict(zip_strict(&messages, &masks), evaluations) {
                     assert_eq!(*value,
                         univariate_evaluate(message, evaluation_point)
                         + evaluation_point.pow([message_length as u64])

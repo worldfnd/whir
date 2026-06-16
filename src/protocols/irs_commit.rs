@@ -375,15 +375,32 @@ impl<M: Embedding> Config<M> {
         assert_eq!(vectors.len(), self.num_vectors);
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
-        // Generate random mask
-        let masks = random_vector(prover_state.rng(), self.mask_length() * self.num_messages());
+        // Sample masks in whir's canonical per-polynomial-contiguous layout:
+        // `masks[i * mask_length + c]` is polynomial `i`'s coefficient at
+        // column `c`. Downstream sites (mask_proximity discharge, code_switch
+        // fold) read masks back via this layout.
+        let mask_length = self.mask_length();
+        let num_polys = self.num_messages();
+        let masks: Vec<M::Source> = random_vector(prover_state.rng(), mask_length * num_polys);
 
-        // Interleaved RS Encode the vectors
-        let messages = vectors
-            .iter()
-            .flat_map(|v| chunks_exact_or_empty(v, self.message_length(), self.interleaving_depth))
-            .collect::<Vec<_>>();
-        let matrix = ntt::interleaved_rs_encode(&messages, &masks, self.codeword_length);
+        // Engine takes unified polynomial slices (message || mask); the
+        // message/mask split is an IRS-side concept, not part of the NTT API.
+        let message_length = self.message_length();
+        let poly_length = message_length + mask_length;
+        let mut poly_buf = Vec::with_capacity(num_polys * poly_length);
+        let mut poly_idx = 0;
+        for vector in vectors {
+            for message in chunks_exact_or_empty(vector, message_length, self.interleaving_depth) {
+                poly_buf.extend_from_slice(message);
+                poly_buf.extend_from_slice(
+                    &masks[poly_idx * mask_length..(poly_idx + 1) * mask_length],
+                );
+                poly_idx += 1;
+            }
+        }
+        debug_assert_eq!(poly_idx, num_polys);
+        let polys: Vec<&[M::Source]> = poly_buf.chunks_exact(poly_length).collect();
+        let matrix = ntt::interleaved_rs_encode(&polys, self.codeword_length);
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);

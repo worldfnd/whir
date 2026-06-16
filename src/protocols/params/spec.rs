@@ -8,7 +8,7 @@ use std::{
 };
 
 use ordered_float::OrderedFloat;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{bits::Bits, engines::EngineId, hash};
@@ -94,7 +94,19 @@ impl<T: Hash, Tag> Hash for Tagged<T, Tag> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl<T: Serialize, Tag> Serialize for Tagged<T, Tag> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>, Tag> Deserialize<'de> for Tagged<T, Tag> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(|value| Self(value, PhantomData))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecuritySpec {
     pub mode: Mode,
     pub decoding_regime: DecodingRegime,
@@ -196,7 +208,7 @@ impl FoldingFactor {
 }
 
 /// Proof-size / prover-time / soundness-margin tradeoffs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TuningSpec {
     pub vector_size: usize,
     pub starting_log_inv_rate: u32,
@@ -416,7 +428,7 @@ pub type MaskCodeMessageLen = Tagged<usize, MaskCodeMessageLenTag>;
 pub type LogInvRate = Tagged<u32, LogInvRateTag>;
 
 /// Reed–Solomon list-decoding ball size `|Λ(C, δ)|`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ListSize(OrderedFloat<f64>);
 
 impl ListSize {

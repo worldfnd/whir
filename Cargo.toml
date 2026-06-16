@@ -88,9 +88,10 @@ harness = false
 name = "sumcheck"
 harness = false
 
-[[bench]]
-name = "zook_vs_whir"
-harness = false
+# Enable to bench zook std + ZK vs Base WHIR performance
+# [[bench]]
+# name = "zook_vs_whir"
+# harness = false
 
 # Disable untill fixed.
 # [[bench]]
