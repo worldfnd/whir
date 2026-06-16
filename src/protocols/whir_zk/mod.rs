@@ -587,4 +587,83 @@ mod tests {
             );
         }
     }
+
+    /// 1 polynomial of size 2^19 with 3 multilinear-extension claims on BN254,
+    /// target_security 128 with a 10-bit PoW budget. Used to compare
+    /// prove/verify wall-clock against the zook orchestrator under the same
+    /// workload shape.
+    ///
+    /// Run with: `cargo test --release --features tracing,rs_in_order --lib \
+    /// protocols::whir_zk::tests::roundtrip_2_pow_20_three_claims_whir_zk -- --nocapture`
+    #[test]
+    fn roundtrip_2_pow_20_three_claims_whir_zk() {
+        use crate::algebra::fields::Field256;
+        type FB = Field256;
+
+        const NV: usize = 19;
+        const NC: usize = 1 << NV;
+
+        let mut rng = ark_std::test_rng();
+
+        let whir_params = ProtocolParameters {
+            decoding_regime: DecodingRegime::Johnson,
+            security_level: 128,
+            pow_bits: 10,
+            initial_folding_factor: 3,
+            folding_factor: 3,
+            starting_log_inv_rate: 2,
+            batch_size: 1,
+            hash_id: hash::SHA2,
+        };
+        let params = Config::<FB>::new(1 << NV, &whir_params, 1);
+
+        let vector: Vec<FB> = random_vector(&mut rng, NC);
+        let f0 = MultilinearExtension {
+            point: random_vector::<FB>(&mut rng, NV),
+        };
+        let f1 = MultilinearExtension {
+            point: random_vector::<FB>(&mut rng, NV),
+        };
+        let f2 = MultilinearExtension {
+            point: random_vector::<FB>(&mut rng, NV),
+        };
+        let embedding = params.blinded_commitment.embedding();
+        let evaluations = vec![
+            f0.evaluate(embedding, &vector),
+            f1.evaluate(embedding, &vector),
+            f2.evaluate(embedding, &vector),
+        ];
+
+        let forms: Vec<Box<dyn LinearForm<FB>>> = vec![Box::new(f0), Box::new(f1), Box::new(f2)];
+        let refs: Vec<&dyn LinearForm<FB>> = forms.iter().map(|w| w.as_ref()).collect();
+        let prove_forms: Vec<Box<dyn LinearForm<FB>>> = forms
+            .iter()
+            .map(|f| {
+                let mut cv = vec![FB::ZERO; params.blinded_commitment.initial_size()];
+                f.accumulate(&mut cv, FB::ONE);
+                Box::new(Covector { vector: cv }) as Box<dyn LinearForm<FB>>
+            })
+            .collect();
+
+        let ds = DomainSeparator::protocol(&params)
+            .session(&format!("whir-zk-bench-2^20 {}:{}", file!(), line!()))
+            .instance(&Empty);
+        let mut prover_state = ProverState::new_std(&ds);
+        let witness = params.commit(&mut prover_state, &[&vector[..]]);
+        let _ = params.prove(
+            &mut prover_state,
+            vec![Cow::Borrowed(&vector[..])],
+            witness,
+            prove_forms,
+            Cow::Borrowed(&evaluations),
+        );
+        let proof = prover_state.proof();
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+        let commitment = params
+            .receive_commitments(&mut verifier_state, 1)
+            .expect("receive_commitments");
+        params
+            .verify(&mut verifier_state, &refs, &evaluations, &commitment)
+            .expect("verify");
+    }
 }

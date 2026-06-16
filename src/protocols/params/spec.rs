@@ -201,6 +201,93 @@ pub struct TuningSpec {
     pub vector_size: usize,
     pub starting_log_inv_rate: u32,
     pub folding_factor: FoldingFactor,
+    /// Per-round inverse-rate schedule (see [`RateSchedule`]).
+    pub rate_schedule: RateSchedule,
+}
+
+/// Pareto-knee bias for [`RateSchedule::Adaptive`]'s planner. Controls the
+/// tradeoff between prover-time and proof-size axes when picking per-round
+/// inverse rates. Clamped to `[0, 1]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KneeWeight(OrderedFloat<f64>);
+
+impl KneeWeight {
+    /// Pure geometric knee — equal weighting on both axes.
+    pub const DEFAULT: Self = Self(OrderedFloat(0.5));
+
+    /// Build a `KneeWeight`, clamping `value` to `[0, 1]`. Out-of-range
+    /// inputs (including NaN) are silently corrected — the planner has no
+    /// meaningful behavior outside `[0, 1]`, so reject-by-clamp at the API
+    /// boundary rather than propagating a `Result`.
+    pub const fn new(value: f64) -> Self {
+        let clamped = if value.is_nan() {
+            0.5
+        } else {
+            value.clamp(0.0, 1.0)
+        };
+        Self(OrderedFloat(clamped))
+    }
+
+    pub const fn get(self) -> f64 {
+        self.0 .0
+    }
+}
+
+impl Default for KneeWeight {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Per-round inverse-rate schedule.
+///
+/// The Section 10 code-switching IOPP (Theorem 10.2) commits a fresh codeword
+/// each round, so the per-round rate is a free parameter — the only structural
+/// constraint is on message lengths (`2^{k_{i+1}} · ℓ_{i+1} ≥ ℓ_i`).
+///
+/// Capping the inverse rate trades a small increase in per-round query count
+/// (cheap on tiny late-round Merkle trees) for dramatically smaller late-round
+/// and basecase NTTs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RateSchedule {
+    /// Step `log_inv_rate += folding − 1` per round, unbounded — the
+    /// canonical legacy in-place WHIR behavior. Late-round and basecase NTTs
+    /// grow with depth.
+    Stepping,
+    /// Step like [`Self::Stepping`], then clamp at `max_log_inv_rate`. Set
+    /// `max_log_inv_rate == tuning.starting_log_inv_rate` for a constant-rate
+    /// schedule.
+    Capped { max_log_inv_rate: u32 },
+    /// Per-round rates chosen at `derive` time by a planner that minimises a
+    /// `(prover_time_proxy, proof_size_proxy)` pareto knee under the security
+    /// target. No user-supplied budget; the knee is scale-free. The
+    /// [`KneeWeight`] biases the picker between the two axes.
+    Adaptive { knee_weight: KneeWeight },
+}
+
+impl RateSchedule {
+    /// Compute the next round's inverse rate from the current one and the
+    /// current round's folding factor.
+    ///
+    /// `Adaptive` returns the unbounded step here; the planner runs after the
+    /// skeleton is built and overwrites every per-round rate.
+    pub const fn step(self, current_log_inv_rate: u32, folding_factor: u32) -> u32 {
+        let stepped = current_log_inv_rate.saturating_add(folding_factor.saturating_sub(1));
+        match self {
+            Self::Stepping | Self::Adaptive { .. } => stepped,
+            Self::Capped { max_log_inv_rate } => {
+                if stepped < max_log_inv_rate {
+                    stepped
+                } else {
+                    max_log_inv_rate
+                }
+            }
+        }
+    }
+
+    pub const fn is_adaptive(self) -> bool {
+        matches!(self, Self::Adaptive { .. })
+    }
 }
 
 /// Per-round context handed to a sub-protocol builder.
@@ -410,6 +497,39 @@ mod tests {
         assert_eq!(
             spec(PowBudget::per_slot(pow_over_target)).protocol_security_target_bits(),
             Bits::new(0.0),
+        );
+    }
+
+    #[test]
+    fn rate_schedule_stepping_unbounded() {
+        // Stepping adds `folding − 1` per round regardless of magnitude
+        // (legacy unbounded-stepping behavior).
+        assert_eq!(RateSchedule::Stepping.step(2, 3), 4);
+        assert_eq!(RateSchedule::Stepping.step(100, 5), 104);
+    }
+
+    #[test]
+    fn rate_schedule_capped_clamps_above_cap() {
+        let cap = RateSchedule::Capped {
+            max_log_inv_rate: 5,
+        };
+        assert_eq!(cap.step(2, 3), 4); // below cap → step normally
+        assert_eq!(cap.step(4, 3), 5); // would step to 6 → clamp to 5
+        assert_eq!(cap.step(5, 3), 5); // already at cap → stays
+        assert_eq!(cap.step(10, 3), 5); // above cap → snaps back to cap
+    }
+
+    #[test]
+    fn rate_schedule_folding_factor_one_never_steps() {
+        // folding == 1 means rate step is `1 − 1 = 0`. The IRS layer disallows
+        // folding < 1, but the math here should still be consistent.
+        assert_eq!(RateSchedule::Stepping.step(2, 1), 2);
+        assert_eq!(
+            RateSchedule::Capped {
+                max_log_inv_rate: 5
+            }
+            .step(2, 1),
+            2,
         );
     }
 }

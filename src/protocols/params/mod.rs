@@ -4,6 +4,7 @@
 //! "the bounds doc, §N") live at
 //! <https://hackmd.io/@1q1q-TiuQN6fAkxaN41u-Q/ryBoT_UA-e>.
 
+pub(crate) mod adaptive;
 pub(crate) mod basecase;
 pub(crate) mod bounds;
 pub(crate) mod branch;
@@ -31,7 +32,7 @@ pub use protocol_config::{
 };
 pub use solved::Solved;
 pub use spec::{
-    DecodingRegime, FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
-    ParseDecodingRegimeError, PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
-    DEFAULT_POW_BUDGET_BITS,
+    DecodingRegime, FoldingFactor, KneeWeight, ListSize, LogInvRate, MaskCodeMessageLen, Mode,
+    OodSampleBudget, ParseDecodingRegimeError, PowBudget, RateSchedule, RoundContext, SecuritySpec,
+    TuningSpec, ZkSpec, DEFAULT_POW_BUDGET_BITS,
 };

@@ -3,15 +3,11 @@
 use ark_ff::Field;
 
 use crate::{
-    algebra::{
-        embedding::{Embedding, Identity},
-        fields::FieldWithSize,
-    },
+    algebra::{embedding::Embedding, fields::FieldWithSize},
     bits::Bits,
     protocols::{
         basecase::Config as BasecaseConfig,
         code_switch::Config as CodeSwitchConfig,
-        irs_commit::Config as IrsConfig,
         mask_proximity::Config as MaskProximityConfig,
         params::{
             basecase as basecase_params,
@@ -119,18 +115,25 @@ impl<M: Embedding> ProtocolConfig<M> {
                     mask_info,
                 ),
             };
-            let mask_proximity = r.mask_oracle().map(|mo| PowSlot {
-                kind: Pow::RoundMaskProximity { index },
-                pow: mo.mask_proximity.pow(),
-                recorded: mo.mask_proximity.analytic(),
-                recompute: mask_proximity_params::analytic_error_bits(
-                    mo.mask_proximity.c_zk_commit(),
-                    mo.mask_proximity.num_masks(),
-                ),
-            });
-            [Some(sumcheck), Some(code_switch), mask_proximity]
+            let mask_slots = r
+                .mask_oracle()
+                .map(|mo| {
+                    [mo.sumcheck_masks(), mo.cs_mask()].map(|mp| PowSlot {
+                        kind: Pow::RoundMaskProximity { index },
+                        pow: mp.pow(),
+                        recorded: mp.analytic(),
+                        recompute: mask_proximity_params::analytic_error_bits(
+                            mp.c_zk_commit(),
+                            mp.num_masks(),
+                        ),
+                    })
+                })
+                .into_iter()
+                .flatten();
+            [Some(sumcheck), Some(code_switch)]
                 .into_iter()
                 .flatten()
+                .chain(mask_slots)
         });
 
         let basecase = self.basecase.config();
@@ -465,43 +468,61 @@ impl<M: Embedding> RoundConfig<M> {
     }
 }
 
-/// One round's mask oracle: a C_zk codeword + ℓ_zk + mask-proximity check.
+/// One round's mask oracle, split across two independent C_zk trees:
+///   - `sumcheck_masks`: the `k` sumcheck masks (Lemma 6.4), each of length
+///     `next_pow_2(mask_length)`. Committed BEFORE sumcheck.
+///   - `cs_mask`: the single `(r ‖ s)` code-switch mask (Construction 9.7),
+///     length `ℓ_zk`. Committed AFTER sumcheck so its `r` part can carry the
+///     folded source-IRS randomness.
+///
+/// Both trees share the same C_zk code rate, so `info()` exposes a single
+/// shared list-size to downstream solvers.
 #[derive(Clone, Debug)]
 pub struct MaskOracleConfig<F: Field> {
-    c_zk: IrsConfig<Identity<F>>,
-    /// `next_pow2(r + t_ood)` (Theorem 9.6 + Lemma 9.3).
+    sumcheck_masks: Solved<MaskProximityConfig<F>>,
+    cs_mask: Solved<MaskProximityConfig<F>>,
+    /// `next_pow2(r + t_ood)` for this round (Lemma 9.3).
     l_zk: MaskCodeMessageLen,
-    mask_proximity: Solved<MaskProximityConfig<F>>,
+    /// Lemma 9.9 OOD-sample budget (bounds doc §5.2).
+    t_ood: OodSampleBudget,
 }
 
 impl<F: Field> MaskOracleConfig<F> {
     pub(crate) const fn new(
-        c_zk: IrsConfig<Identity<F>>,
+        sumcheck_masks: Solved<MaskProximityConfig<F>>,
+        cs_mask: Solved<MaskProximityConfig<F>>,
         l_zk: MaskCodeMessageLen,
-        mask_proximity: Solved<MaskProximityConfig<F>>,
+        t_ood: OodSampleBudget,
     ) -> Self {
         Self {
-            c_zk,
+            sumcheck_masks,
+            cs_mask,
             l_zk,
-            mask_proximity,
+            t_ood,
         }
     }
 
-    pub const fn c_zk(&self) -> &IrsConfig<Identity<F>> {
-        &self.c_zk
+    pub const fn sumcheck_masks(&self) -> &Solved<MaskProximityConfig<F>> {
+        &self.sumcheck_masks
+    }
+
+    pub const fn cs_mask(&self) -> &Solved<MaskProximityConfig<F>> {
+        &self.cs_mask
     }
 
     pub const fn l_zk(&self) -> MaskCodeMessageLen {
         self.l_zk
     }
 
-    pub const fn mask_proximity(&self) -> &Solved<MaskProximityConfig<F>> {
-        &self.mask_proximity
+    pub const fn t_ood(&self) -> OodSampleBudget {
+        self.t_ood
     }
 
     pub fn info(&self) -> MaskOracleInfo {
+        // Both sub-trees use the same C_zk rate, so either's list size is the
+        // shared C_zk list size.
         MaskOracleInfo {
-            c_zk_list_size: ListSize::new(self.c_zk.list_size()),
+            c_zk_list_size: ListSize::new(self.cs_mask.c_zk_commit().list_size()),
             l_zk: self.l_zk,
         }
     }
@@ -516,7 +537,8 @@ pub struct MaskOracleInfo {
 
 impl<F: Field> MaskOracleConfig<F> {
     /// Analytic soundness bits (excluding PoW) for this round's mask oracle.
+    /// Returns the minimum of both sub-trees.
     pub fn analytic_bits(&self) -> Bits {
-        self.mask_proximity.analytic_bits()
+        Bits::new(f64::from(self.sumcheck_masks.analytic()).min(f64::from(self.cs_mask.analytic())))
     }
 }

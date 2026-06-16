@@ -1,0 +1,410 @@
+//! Sweep benchmark: base WHIR (non-ZK), Zook (Standard mode), and Zook (ZK
+//! mode) across polynomial sizes 2^8 .. 2^24. For each (protocol, size) we
+//! run [`ITERATIONS`] passes and record commit / prove / verify wall-clock
+//! separately.
+//!
+//! Outputs:
+//! - Tabular summary printed to stdout (min / mean / max in ms per cell)
+//! - `bench_results.csv` in the working directory — tidy long-form, one row
+//!   per (size, protocol, phase) with min/mean/max columns
+//!
+//! Run: `cargo bench --bench zook_vs_whir`
+//!
+//! NOTE: With `ITERATIONS = 3` the first iteration at each size carries
+//! cold-cache / allocator / rayon-warmup overhead. We do not discard a
+//! warmup pass — at 2^24 each prove can take ~1 min and the user opted for
+//! tight iters. `max` therefore tends to be inflated by the first sample.
+
+use std::{
+    borrow::Cow,
+    fs::File,
+    io::Write,
+    time::{Duration, Instant},
+};
+
+use whir::{
+    algebra::{
+        embedding::Identity,
+        fields::Field64_3,
+        linear_form::{Evaluate, LinearForm, MultilinearExtension},
+        random_vector,
+    },
+    hash,
+    parameters::ProtocolParameters,
+    protocols::{
+        params::{
+            DecodingRegime, FoldingFactor, Mode, PowBudget, ProtocolConfig, RateSchedule,
+            SecuritySpec, TuningSpec,
+        },
+        whir as whir_non_zk,
+    },
+    transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
+};
+
+type F = Field64_3;
+type Embed = Identity<F>;
+
+/// Polynomial sizes swept by `main`. Each entry `k` means a witness of
+/// length 2^k. 2^24 is ~16M F-elements ≈ 384 MB raw; the prover allocates
+/// a few × that for the codeword + Merkle tree, so peak RSS at the top end
+/// will be several GB. Trim the slice if you run into memory pressure.
+const LOG_SIZES: &[u32] = &[
+    8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+];
+
+/// Number of measured iterations per (size, protocol). User-chosen tight
+/// budget — see module note about first-iteration cold-cache noise.
+const ITERATIONS: usize = 25;
+
+/// Shared protocol params — held constant across sizes so we measure scaling
+/// in vector size only.
+const FOLDING_FACTOR: usize = 4;
+const STARTING_LOG_INV_RATE: u32 = 2;
+const SECURITY_LEVEL: u32 = 128;
+const POW_BITS: u32 = 10;
+
+/// Fixed RNG seed so iteration-to-iteration variance comes only from runtime
+/// noise, not from sampling a different witness.
+const SEED: u64 = 0;
+
+/// Per-iteration timings for one (size, protocol) cell. `proof_bytes` is
+/// deterministic given the spec + seeded witness, so it's recorded once
+/// (overwritten on every iter — all values are equal).
+#[derive(Default)]
+struct PhaseSamples {
+    commit: Vec<Duration>,
+    prove: Vec<Duration>,
+    verify: Vec<Duration>,
+    proof_bytes: usize,
+}
+
+/// (min, mean, max). Caller guarantees `samples` is non-empty.
+fn summarize(samples: &[Duration]) -> (Duration, Duration, Duration) {
+    let min = *samples.iter().min().expect("non-empty");
+    let max = *samples.iter().max().expect("non-empty");
+    let sum_ns: u128 = samples.iter().map(Duration::as_nanos).sum();
+    let mean = Duration::from_nanos((sum_ns / samples.len() as u128) as u64);
+    (min, mean, max)
+}
+
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+/// Deterministic per-size witness + a single linear form to evaluate. We
+/// reuse the same `(witness, form, eval)` across iterations to keep CPU
+/// caches as warm as they would be in a tight prove loop.
+fn make_workload(log_size: u32) -> (Vec<F>, MultilinearExtension<F>, F) {
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
+    let size = 1usize << log_size;
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let witness = random_vector::<F>(&mut rng, size);
+    let form = MultilinearExtension::<F> {
+        point: random_vector::<F>(&mut rng, log_size as usize),
+    };
+    let embedding = Embed::default();
+    let evaluation = form.evaluate(&embedding, &witness);
+    (witness, form, evaluation)
+}
+
+fn bench_whir(log_size: u32) -> Result<PhaseSamples, String> {
+    let size = 1usize << log_size;
+    let whir_params = ProtocolParameters {
+        decoding_regime: DecodingRegime::Johnson,
+        starting_log_inv_rate: STARTING_LOG_INV_RATE as usize,
+        initial_folding_factor: FOLDING_FACTOR,
+        folding_factor: FOLDING_FACTOR,
+        security_level: SECURITY_LEVEL as usize,
+        pow_bits: POW_BITS as usize,
+        batch_size: 1,
+        hash_id: hash::SHA2,
+    };
+    let config = whir_non_zk::Config::<Embed>::new(size, &whir_params);
+    let (witness, form, evaluation) = make_workload(log_size);
+    let mut samples = PhaseSamples::default();
+
+    for _ in 0..ITERATIONS {
+        // Fresh DS per iteration so the transcript is independent each run.
+        let ds = DomainSeparator::protocol(&config)
+            .session(&format!("bench-whir-non-zk-2^{log_size}"))
+            .instance(&Empty);
+        let mut ps = ProverState::new_std(&ds);
+
+        // ---- commit ----
+        let t = Instant::now();
+        let committed = config.commit(&mut ps, &[&witness]);
+        samples.commit.push(t.elapsed());
+
+        // ---- prove ----
+        // Clone witness/form into the prove call (it consumes them). Clones
+        // happen before the timer starts so they don't contaminate prove time.
+        let witness_owned = witness.clone();
+        let form_box: Box<dyn LinearForm<F>> = Box::new(form.clone());
+        let t = Instant::now();
+        let _ = config.prove(
+            &mut ps,
+            vec![Cow::Owned(witness_owned)],
+            vec![Cow::Owned(committed)],
+            vec![form_box],
+            Cow::Owned(vec![evaluation]),
+        );
+        samples.prove.push(t.elapsed());
+
+        // ---- verify ----
+        let proof = ps.proof();
+        samples.proof_bytes = proof.narg_string.len() + proof.hints.len();
+        let mut vs = VerifierState::new_std(&ds, &proof);
+        let t = Instant::now();
+        let commitment = config
+            .receive_commitment(&mut vs)
+            .map_err(|e| format!("whir receive_commitment: {e:?}"))?;
+        let final_claim = config
+            .verify(&mut vs, &[&commitment], &[evaluation])
+            .map_err(|e| format!("whir verify: {e:?}"))?;
+        final_claim
+            .verify(std::iter::once(&form as &dyn LinearForm<F>))
+            .map_err(|e| format!("whir final_claim verify: {e:?}"))?;
+        samples.verify.push(t.elapsed());
+    }
+    Ok(samples)
+}
+
+fn bench_zook(
+    log_size: u32,
+    mode: Mode,
+    rate_schedule: RateSchedule,
+) -> Result<PhaseSamples, String> {
+    let size = 1usize << log_size;
+    let schedule_tag = match rate_schedule {
+        RateSchedule::Adaptive { .. } => "adaptive",
+        RateSchedule::Stepping => "stepping",
+        RateSchedule::Capped { .. } => "capped",
+    };
+    let mode_tag = match mode {
+        Mode::Standard => "standard",
+        Mode::ZeroKnowledge => "zk",
+    };
+    let label = format!("zook-{mode_tag}-{schedule_tag}");
+    let spec = SecuritySpec {
+        mode,
+        decoding_regime: DecodingRegime::Johnson,
+        target_security_bits: SECURITY_LEVEL,
+        pow_budget: PowBudget::per_slot(POW_BITS),
+        hash_id: hash::SHA2,
+    };
+    let tuning = TuningSpec {
+        vector_size: size,
+        starting_log_inv_rate: STARTING_LOG_INV_RATE,
+        folding_factor: FoldingFactor::Constant(FOLDING_FACTOR),
+        rate_schedule,
+    };
+    let config = ProtocolConfig::<Embed>::derive(spec, tuning)
+        .map_err(|e| format!("{label} derive: {e:?}"))?;
+    let (witness, form, evaluation) = make_workload(log_size);
+    let mut samples = PhaseSamples::default();
+
+    for _ in 0..ITERATIONS {
+        let ds = DomainSeparator::protocol(&format!("bench-{label}"))
+            .session(&format!("bench-{label}-2^{log_size}"))
+            .instance(&Empty);
+        let mut ps = ProverState::new_std(&ds);
+
+        // ---- commit ----
+        let t = Instant::now();
+        let committed = config.commit(&mut ps, &witness);
+        samples.commit.push(t.elapsed());
+
+        // ---- prove ----
+        let form_ref: &dyn LinearForm<F> = &form;
+        let t = Instant::now();
+        config.prove(&mut ps, committed, &[form_ref], &[evaluation]);
+        samples.prove.push(t.elapsed());
+
+        // ---- verify ----
+        let proof = ps.proof();
+        samples.proof_bytes = proof.narg_string.len() + proof.hints.len();
+        let mut vs = VerifierState::new_std(&ds, &proof);
+        let t = Instant::now();
+        let commitment = config
+            .receive_commitment(&mut vs)
+            .map_err(|e| format!("{label} receive_commitment: {e:?}"))?;
+        let _ = config
+            .verify(&mut vs, commitment, &[form_ref], &[evaluation])
+            .map_err(|e| format!("{label} verify: {e:?}"))?;
+        samples.verify.push(t.elapsed());
+    }
+    Ok(samples)
+}
+
+fn print_header() {
+    println!(
+        "{:<9} {:<14} {:<8} {:>12} {:>12} {:>12} {:>12}",
+        "log_size", "protocol", "phase", "min (ms)", "mean (ms)", "max (ms)", "proof (B)"
+    );
+    println!("{}", "-".repeat(85));
+}
+
+fn record_cell(
+    csv: &mut File,
+    log_size: u32,
+    size: usize,
+    protocol: &str,
+    phase: &str,
+    samples: &[Duration],
+    proof_bytes: usize,
+) {
+    let (min, mean, max) = summarize(samples);
+    println!(
+        "{:<9} {:<14} {:<8} {:>12.3} {:>12.3} {:>12.3} {:>12}",
+        log_size,
+        protocol,
+        phase,
+        ms(min),
+        ms(mean),
+        ms(max),
+        proof_bytes,
+    );
+    writeln!(
+        csv,
+        "{},{},{},{},{},{},{},{}",
+        log_size,
+        size,
+        protocol,
+        phase,
+        ms(min),
+        ms(mean),
+        ms(max),
+        proof_bytes,
+    )
+    .expect("write CSV row");
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "bench harness — sweep + table format is naturally long"
+)]
+fn main() {
+    let mut csv = File::create("bench_results.csv").expect("create bench_results.csv");
+    writeln!(
+        csv,
+        "log_size,size,protocol,phase,min_ms,mean_ms,max_ms,proof_bytes"
+    )
+    .unwrap();
+    print_header();
+
+    for &log_size in LOG_SIZES {
+        let size = 1usize << log_size;
+
+        eprintln!("\n[2^{log_size} = {size} elements] whir_non_zk ...");
+        match bench_whir(log_size) {
+            Ok(s) => {
+                let pb = s.proof_bytes;
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "whir_non_zk",
+                    "commit",
+                    &s.commit,
+                    pb,
+                );
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "whir_non_zk",
+                    "prove",
+                    &s.prove,
+                    pb,
+                );
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "whir_non_zk",
+                    "verify",
+                    &s.verify,
+                    pb,
+                );
+            }
+            Err(e) => eprintln!("  whir_non_zk failed: {e}"),
+        }
+
+        // Zook Standard on `RateSchedule::Stepping` — same per-round step
+        // WHIR's legacy `Config::new` uses internally, so proof-size and
+        // prove-time comparisons isolate the *protocol* delta rather than
+        // the rate-schedule delta.
+        let stepping = RateSchedule::Stepping;
+        eprintln!("[2^{log_size}] zook_standard_stepping ...");
+        match bench_zook(log_size, Mode::Standard, stepping) {
+            Ok(s) => {
+                let pb = s.proof_bytes;
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "zook_standard_stepping",
+                    "commit",
+                    &s.commit,
+                    pb,
+                );
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "zook_standard_stepping",
+                    "prove",
+                    &s.prove,
+                    pb,
+                );
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "zook_standard_stepping",
+                    "verify",
+                    &s.verify,
+                    pb,
+                );
+            }
+            Err(e) => eprintln!("  zook_standard_stepping failed: {e}"),
+        }
+
+        eprintln!("[2^{log_size}] zook_zk_stepping ...");
+        match bench_zook(log_size, Mode::ZeroKnowledge, RateSchedule::Stepping) {
+            Ok(s) => {
+                let pb = s.proof_bytes;
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "zook_zk_stepping",
+                    "commit",
+                    &s.commit,
+                    pb,
+                );
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "zook_zk_stepping",
+                    "prove",
+                    &s.prove,
+                    pb,
+                );
+                record_cell(
+                    &mut csv,
+                    log_size,
+                    size,
+                    "zook_zk_stepping",
+                    "verify",
+                    &s.verify,
+                    pb,
+                );
+            }
+            Err(e) => eprintln!("  zook_zk failed: {e}"),
+        }
+    }
+
+    println!("\nCSV written to bench_results.csv");
+}

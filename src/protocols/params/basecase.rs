@@ -33,6 +33,20 @@ pub fn solve<F: Field>(
         folding_factor: 0,
     };
     let commit = irs_params::solve(spec, &ctx, OodSampleBudget::ZERO)?;
+    solve_with_commit(spec, commit)
+}
+
+/// Same as [`solve`] but with a pre-built IRS config — used by `derive` when
+/// the last round's `code_switch.target` is being reused as the basecase
+/// commit (Phase 2: no recommit of the folded message). The shared IRS is
+/// built once at the previous-round layer; this function only owns the
+/// basecase-specific sumcheck + γ-combination PoW grind.
+pub fn solve_with_commit<F: Field>(
+    spec: &SecuritySpec,
+    commit: IrsConfig<Identity<F>>,
+) -> Result<BasecasePlan<F>, DeriveError> {
+    let vector_size = commit.vector_size();
+    assert!(vector_size > 0, "basecase requires vector_size ≥ 1");
 
     let sumcheck_analytic = sumcheck_params::analytic_error_bits(&commit, None);
     let sumcheck_pow = grind_to_at(spec, sumcheck_analytic, Pow::BasecaseSumcheck)?;
