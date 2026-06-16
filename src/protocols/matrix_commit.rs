@@ -226,51 +226,9 @@ impl<T: TypeInfo + Encodable + Send + Sync + Clone> Config<T> {
     {
         assert_eq!(matrix.len(), self.num_rows() * self.num_cols);
 
-        let engine = hash::ENGINES
-            .retrieve(self.leaf_hash_id)
-            .expect("Failed to retrieve hash engine");
-        #[cfg(feature = "tracing")]
-        tracing::Span::current().record("engine", engine.name().as_ref());
-
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if self.leaf_hash_id == hash::SHA2
-            && self
-                .merkle_tree
-                .layers
-                .iter()
-                .all(|layer| layer.hash_id == hash::SHA2)
-        {
-            if let Some(nodes) = matrix.commit_bn254_rows_sha2_merkle(
-                self.num_cols,
-                self.num_rows(),
-                self.merkle_tree.layers.len(),
-            ) {
-                let root = nodes
-                    .read_hash_at(self.merkle_tree.num_nodes() - 1)
-                    .expect("missing Metal Merkle root");
-                prover_state.prover_message(&root);
-                return BufferWitness { nodes };
-            }
-        }
-
-        // Compute leaf hashes
-        let mut leaves = Vec::with_capacity(self.merkle_tree.num_nodes());
-        leaves.resize(self.merkle_tree.num_leaves, Hash::default());
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        let hashed_on_metal = self.leaf_hash_id == hash::SHA2
-            && matrix.hash_bn254_rows_sha2(self.num_cols, &mut leaves[..self.num_rows()]);
-        #[cfg(not(all(feature = "metal", target_os = "macos")))]
-        let hashed_on_metal = false;
-        if !hashed_on_metal {
-            hash_rows(&*engine, matrix.as_slice(), &mut leaves[..self.num_rows()]);
-        }
-
-        // Commit the leaf hashes
-        BufferWitness {
-            nodes: ActiveBuffer::<Hash>::from_vec(
-                self.merkle_tree.commit(prover_state, leaves).nodes,
-            ),
-        }
+        let (nodes, root) = matrix.merklize(self.num_cols, self.leaf_hash_id, &self.merkle_tree);
+        prover_state.prover_message(&root);
+        BufferWitness { nodes }
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
@@ -412,7 +370,7 @@ fn hash_rows<T: Encodable + Send + Sync>(
 }
 
 #[cfg(feature = "parallel")]
-fn hash_rows<T: Encodable + Send + Sync>(
+pub fn hash_rows<T: Encodable + Send + Sync>(
     engine: &dyn hash::HashEngine,
     matrix: &[T],
     out: &mut [Hash],

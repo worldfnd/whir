@@ -78,13 +78,10 @@ impl Config {
         (1 << (self.layers.len() + 1)) - 1
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(prover_state, leaves), fields(self = %self)))]
-    pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, leaves: Vec<Hash>) -> Witness
-    where
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        Hash: ProverMessage<[H::U]>,
-    {
+    /// Build the full node array from leaf hashes, without touching the transcript.
+    ///
+    /// The returned vector holds the leaf layer first and the root last (at `num_nodes() - 1`).
+    pub fn build_nodes(&self, leaves: Vec<Hash>) -> Vec<Hash> {
         assert_eq!(
             leaves.len(),
             self.num_leaves,
@@ -120,10 +117,7 @@ impl Config {
             remaining = next_remaining;
         }
 
-        // Commit to the root hash.
-        prover_state.prover_message(&previous[0]);
-
-        Witness { nodes }
+        nodes
     }
 
     pub fn receive_commitment<H>(
@@ -340,8 +334,10 @@ pub(crate) mod tests {
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
-        let tree = config.commit(&mut prover_state, leaves);
-        config.open(&mut prover_state, &tree, &[13, 42]);
+        let nodes = config.build_nodes(leaves);
+        prover_state.prover_message(&nodes[config.num_nodes() - 1]);
+        let witness = Witness { nodes };
+        config.open(&mut prover_state, &witness, &[13, 42]);
         let proof = prover_state.proof();
 
         // Verifier

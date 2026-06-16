@@ -3,11 +3,16 @@ use std::{any::Any, mem};
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
 
-use crate::algebra::{
-    embedding::{Embedding, Identity},
-    linear_form::{Covector, LinearForm, UnivariateEvaluation},
-    mixed_dot, mixed_multilinear_extend, mixed_scalar_mul_add, mixed_univariate_evaluate,
-    sumcheck::{compute_sumcheck_polynomial, fold},
+use crate::{
+    algebra::{
+        embedding::{Embedding, Identity},
+        linear_form::{Covector, LinearForm, UnivariateEvaluation},
+        mixed_dot, mixed_multilinear_extend, mixed_scalar_mul_add, mixed_univariate_evaluate,
+        sumcheck::{compute_sumcheck_polynomial, fold},
+    },
+    engines::EngineId,
+    hash::{self, Hash},
+    protocols::{matrix_commit::Encodable, merkle_tree},
 };
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -31,6 +36,14 @@ pub trait BufferOps<T> {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    fn merklize(
+        &self,
+        num_cols: usize,
+        hash_engine_id: EngineId,
+        merkle_config: &merkle_tree::Config,
+    ) -> (ActiveBuffer<Hash>, Hash)
+    where
+        T: Encodable + Send + Sync;
 }
 
 pub trait FieldOps<F: Field>: Clone {
@@ -149,6 +162,31 @@ impl<T: Clone> BufferOps<T> for CpuBuffer<T> {
 
     fn from_slice(source: &[T]) -> Self {
         Self::from_slice(source)
+    }
+
+    fn merklize(
+        &self,
+        num_cols: usize,
+        hash_engine_id: EngineId,
+        merkle_config: &merkle_tree::Config,
+    ) -> (ActiveBuffer<Hash>, Hash)
+    where
+        T: Encodable + Send + Sync,
+    {
+        let _ = num_cols; // CPU leaf hashing derives the column count from the row count.
+        let engine = hash::ENGINES
+            .retrieve(hash_engine_id)
+            .expect("Failed to retrieve hash engine");
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("engine", engine.name().as_ref());
+
+        // Hash each row into a leaf, then build the full Merkle node array.
+        let mut leaves = vec![Hash::default(); merkle_config.num_leaves];
+        crate::protocols::matrix_commit::hash_rows(&*engine, self.as_slice(), &mut leaves);
+        let nodes = merkle_config.build_nodes(leaves);
+        let root = nodes[nodes.len() - 1];
+
+        (ActiveBuffer::<Hash>::from_vec(nodes), root)
     }
 }
 

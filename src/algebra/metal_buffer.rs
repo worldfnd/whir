@@ -26,7 +26,12 @@ use crate::{
         linear_form::{Covector, LinearForm, UnivariateEvaluation},
         ntt::{ReedSolomon, RsDomain},
     },
-    hash::{metal_profile, Hash as Digest, MetalSha2},
+    engines::EngineId,
+    hash::{self, metal_profile, Hash as Digest, MetalSha2, SHA2},
+    protocols::{
+        matrix_commit::{hash_rows, Encodable},
+        merkle_tree,
+    },
 };
 
 const METAL_SOURCE: &str = r#"
@@ -1186,6 +1191,53 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
 
     fn from_slice(source: &[T]) -> Self {
         Self::from_slice(source)
+    }
+
+    fn merklize(
+        &self,
+        num_cols: usize,
+        leaf_hash: EngineId,
+        merkle: &merkle_tree::Config,
+    ) -> (MetalBuffer<Digest>, Digest)
+    where
+        T: Encodable + Send + Sync,
+    {
+        let num_rows = merkle.num_leaves;
+        let layers = merkle.layers.len();
+
+        // Fast path: build the whole tree on the GPU when the leaf and every node layer is SHA2.
+        if leaf_hash == SHA2 && merkle.layers.iter().all(|layer| layer.hash_id == SHA2) {
+            if let Some(nodes) = self.commit_bn254_rows_sha2_merkle(num_cols, num_rows, layers) {
+                let root = nodes
+                    .read_hash_at(merkle.num_nodes() - 1)
+                    .expect("missing Metal Merkle root");
+                return (nodes, root);
+            }
+        }
+
+        // CPU fallback: hash each row on the CPU, then build the tree.
+        let cpu_nodes = || {
+            let engine = hash::ENGINES
+                .retrieve(leaf_hash)
+                .expect("Failed to retrieve hash engine");
+            let mut leaves = vec![Digest::default(); num_rows];
+            hash_rows(&*engine, self.as_slice(), &mut leaves);
+            merkle.build_nodes(leaves)
+        };
+
+        // Otherwise hash leaves (on the GPU if SHA2, else CPU) and build the tree on the CPU.
+        let nodes = if leaf_hash == SHA2 {
+            let mut leaves = vec![Digest::default(); num_rows];
+            if self.hash_bn254_rows_sha2(num_cols, &mut leaves) {
+                merkle.build_nodes(leaves)
+            } else {
+                cpu_nodes()
+            }
+        } else {
+            cpu_nodes()
+        };
+        let root = nodes[merkle.num_nodes() - 1];
+        (MetalBuffer::from_vec(nodes), root)
     }
 }
 
