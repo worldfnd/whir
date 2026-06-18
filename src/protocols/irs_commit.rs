@@ -24,7 +24,7 @@ use std::{
     ops::Neg,
 };
 
-use crate::algebra::buffer::FieldOps;
+use crate::algebra::buffer::{Buffer, BufferRead};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use ordered_float::OrderedFloat;

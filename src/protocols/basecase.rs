@@ -14,7 +14,7 @@ use spongefish::{Decoding, VerificationResult};
 
 use crate::{
     algebra::{
-        buffer::{ActiveBuffer, BufferOps, FieldOps},
+        buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead},
         embedding::Identity,
         multilinear_extend, scalar_mul_add_new, univariate_evaluate,
     },

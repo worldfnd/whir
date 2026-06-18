@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     marker::PhantomData,
+    ops::RangeBounds,
     os::raw::c_void,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
@@ -20,7 +21,7 @@ use zerocopy::IntoBytes;
 
 use crate::{
     algebra::{
-        buffer::{BufferOps, FieldOps},
+        buffer::{BufferOps, BufferRead, BufferWrite},
         embedding::{Embedding, Identity},
         fields::{BN254Config, Field256},
         linear_form::{Covector, LinearForm, UnivariateEvaluation},
@@ -352,6 +353,17 @@ kernel void bn254_scalar_mul_add(
     if (gid >= len) return;
     F weight = load_f(weight_buf, 0);
     store_f(acc, gid, add_f(load_f(acc, gid), mul_f(weight, load_f(vector, gid))));
+}
+
+kernel void bn254_scalar_mul(
+    device ulong *acc [[buffer(0)]],
+    device const ulong *weight_buf [[buffer(1)]],
+    constant uint &len [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= len) return;
+    F weight = load_f(weight_buf, 0);
+    store_f(acc, gid, mul_f(weight, load_f(acc, gid)));
 }
 
 kernel void bn254_dot(
@@ -1162,6 +1174,10 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
         self.as_slice()
     }
 
+    fn at_index(&self, index: usize) -> Option<T> {
+        self.as_slice().get(index).cloned()
+    }
+
     fn len(&self) -> usize {
         self.len
     }
@@ -1191,6 +1207,13 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
 
     fn from_slice(source: &[T]) -> Self {
         Self::from_slice(source)
+    }
+
+    fn extend(&self, other: &Self) -> Self {
+        let mut data = Vec::with_capacity(self.len() + other.len());
+        data.extend_from_slice(self.as_slice());
+        data.extend_from_slice(other.as_slice());
+        Self::from_vec(data)
     }
 
     fn merklize(
@@ -1241,9 +1264,7 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
     }
 }
 
-impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
-    type TargetBuffer<T: Field> = MetalBuffer<T>;
-
+impl<F: Field + Clone> crate::algebra::buffer::Buffer<F> for MetalBuffer<F> {
     fn zeros(length: usize) -> Self {
         assert_bn254::<F>();
         // Montgomery zero is all-zero bytes, so a device-side fill suffices.
@@ -1254,6 +1275,11 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
             hash: None,
             _marker: PhantomData,
         }
+    }
+
+    fn geometric_sequence(base: F, length: usize) -> Self {
+        assert_bn254::<F>();
+        Self::from_vec(crate::algebra::geometric_sequence(base, length))
     }
 
     fn random<R>(rng: &mut R, length: usize) -> Self
@@ -1272,14 +1298,6 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
             data.resize(self.len().next_power_of_two(), F::ZERO);
             *self = Self::from_vec(data);
         }
-    }
-
-    fn dot(&self, other: &Self) -> F {
-        assert_bn254::<F>();
-        assert_eq!(self.len(), other.len());
-        let this = self.bn254_buffer();
-        let other = other.bn254_buffer();
-        field256_to_f::<F>(parallel_dot(&this, &other, self.len()))
     }
 
     fn fold(&mut self, weight: F) {
@@ -1324,22 +1342,6 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
         other.invalidate_host_cache();
     }
 
-    fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
-        assert_bn254::<F>();
-        let len = self.len().min(other.len());
-        if len == 0 {
-            return (F::ZERO, F::ZERO);
-        }
-        if len == 1 {
-            return (self.as_slice()[0] * other.as_slice()[0], F::ZERO);
-        }
-        let fold_half = len.next_power_of_two() >> 1;
-        let this = self.bn254_buffer();
-        let other = other.bn254_buffer();
-        let (c0, c2) = parallel_sumcheck(&this, &other, len, fold_half);
-        (field256_to_f::<F>(c0), field256_to_f::<F>(c2))
-    }
-
     fn fold_pair_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F) {
         assert_bn254::<F>();
         assert_eq!(self.len(), other.len());
@@ -1361,100 +1363,6 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
         self.invalidate_host_cache();
         other.invalidate_host_cache();
         (field256_to_f::<F>(c0), field256_to_f::<F>(c2))
-    }
-
-    fn accumulate_univariate_evaluations(
-        &mut self,
-        evaluators: &[UnivariateEvaluation<F>],
-        scalars: &[F],
-    ) {
-        assert_bn254::<F>();
-        assert_eq!(evaluators.len(), scalars.len());
-        let Some(size) = evaluators.first().map(|e| e.size) else {
-            return;
-        };
-        assert_eq!(self.len(), size);
-        for evaluator in evaluators {
-            assert_eq!(evaluator.size, size);
-        }
-        let points = evaluators
-            .iter()
-            .map(|e| f_to_field256(e.point))
-            .collect::<Vec<_>>();
-        let scalars = scalars
-            .iter()
-            .copied()
-            .map(f_to_field256)
-            .collect::<Vec<_>>();
-        let points = upload_field(&points);
-        let scalars = upload_field(&scalars);
-        let field = self.bn254_buffer();
-        let chunk_size = geometric_accumulate_chunk_size(self.len());
-        if std::env::var_os("WHIR_METAL_TRACE").is_some() {
-            eprintln!(
-                "metal geometric shape len={} points={} chunk={} chunks={}",
-                self.len(),
-                evaluators.len(),
-                chunk_size,
-                self.len().div_ceil(chunk_size)
-            );
-        }
-        if chunk_size <= 1 {
-            run_in_place(
-                "bn254_geometric_accumulate",
-                &[&field.limbs, &points.limbs, &scalars.limbs],
-                &[self.len() as u32, evaluators.len() as u32],
-                self.len(),
-            );
-        } else {
-            let point_steps = evaluators
-                .iter()
-                .map(|e| f_to_field256(e.point.pow([chunk_size as u64])))
-                .collect::<Vec<_>>();
-            let point_steps = upload_field(&point_steps);
-            if should_use_geometric_point_blocks(self.len(), evaluators.len(), chunk_size) {
-                parallel_geometric_accumulate_point_blocks(
-                    &field,
-                    &points,
-                    &point_steps,
-                    &scalars,
-                    self.len(),
-                    evaluators.len(),
-                    chunk_size,
-                );
-            } else if should_use_geometric_point_blocks_batched(
-                self.len(),
-                evaluators.len(),
-                chunk_size,
-            ) {
-                parallel_geometric_accumulate_point_blocks_batched(
-                    &field,
-                    &points,
-                    &point_steps,
-                    &scalars,
-                    self.len(),
-                    evaluators.len(),
-                    chunk_size,
-                );
-            } else {
-                run_in_place(
-                    "bn254_geometric_accumulate_chunks_strided",
-                    &[
-                        &field.limbs,
-                        &points.limbs,
-                        &point_steps.limbs,
-                        &scalars.limbs,
-                    ],
-                    &[
-                        self.len() as u32,
-                        evaluators.len() as u32,
-                        chunk_size as u32,
-                    ],
-                    self.len().div_ceil(chunk_size),
-                );
-            }
-        }
-        self.invalidate_host_cache();
     }
 
     fn linear_forms_rlc(
@@ -1481,55 +1389,6 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
         accumulator
     }
 
-    fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
-        &self,
-        _embedding: &M,
-        point: &[M::Target],
-    ) -> M::Target {
-        assert_bn254::<F>();
-        assert_bn254::<T>();
-        let num_vars = point.len();
-        let point = point
-            .iter()
-            .copied()
-            .map(target_to_field256)
-            .collect::<Vec<_>>();
-        let point = upload_field(&point);
-        let this = self.bn254_buffer();
-        let out = run_reduce(
-            "bn254_multilinear_extend",
-            &[&this.limbs, &point.limbs],
-            &[self.len() as u32, num_vars as u32],
-            1,
-        );
-        field256_to_target::<M::Target>(out[0])
-    }
-
-    fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
-        &self,
-        _embedding: &M,
-        other: &Self::TargetBuffer<T>,
-    ) -> M::Target {
-        assert_bn254::<F>();
-        assert_bn254::<T>();
-        let this = self.bn254_buffer();
-        let other = other.bn254_buffer_target();
-        let value = field256_to_f::<F>(parallel_dot(&this, &other, self.len()));
-        field256_to_target::<M::Target>(f_to_field256(value))
-    }
-
-    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
-        &self,
-        _embedding: &M,
-        point: M::Target,
-    ) -> M::Target {
-        assert_bn254::<F>();
-        let point = target_to_field256(point);
-        let point = upload_field(&[point]);
-        let this = self.bn254_buffer();
-        field256_to_target::<M::Target>(parallel_univariate_evaluate(&this, &point, self.len()))
-    }
-
     fn mixed_linear_combination<M: Embedding<Source = F>>(
         _embedding: &M,
         vectors: &[&Self],
@@ -1552,24 +1411,271 @@ impl<F: Field + Clone> FieldOps<F> for MetalBuffer<F> {
         }
         accumulator
     }
+}
+
+/// Core geometric accumulate over `field[0..len]` (offset 0). Shared by the
+/// owned buffer and a full-range view so the optimized chunk strategies are
+/// written once.
+fn geometric_accumulate_full<F: Field>(
+    field: &MetalFieldBuffer,
+    len: usize,
+    evaluators: &[UnivariateEvaluation<F>],
+    scalars: &[F],
+) {
+    let points = evaluators
+        .iter()
+        .map(|e| f_to_field256(e.point))
+        .collect::<Vec<_>>();
+    let scalars = scalars
+        .iter()
+        .copied()
+        .map(f_to_field256)
+        .collect::<Vec<_>>();
+    let points = upload_field(&points);
+    let scalars = upload_field(&scalars);
+    let chunk_size = geometric_accumulate_chunk_size(len);
+    if std::env::var_os("WHIR_METAL_TRACE").is_some() {
+        eprintln!(
+            "metal geometric shape len={} points={} chunk={} chunks={}",
+            len,
+            evaluators.len(),
+            chunk_size,
+            len.div_ceil(chunk_size)
+        );
+    }
+    if chunk_size <= 1 {
+        run_in_place(
+            "bn254_geometric_accumulate",
+            &[&field.limbs, &points.limbs, &scalars.limbs],
+            &[len as u32, evaluators.len() as u32],
+            len,
+        );
+    } else {
+        let point_steps = evaluators
+            .iter()
+            .map(|e| f_to_field256(e.point.pow([chunk_size as u64])))
+            .collect::<Vec<_>>();
+        let point_steps = upload_field(&point_steps);
+        if should_use_geometric_point_blocks(len, evaluators.len(), chunk_size) {
+            parallel_geometric_accumulate_point_blocks(
+                field,
+                &points,
+                &point_steps,
+                &scalars,
+                len,
+                evaluators.len(),
+                chunk_size,
+            );
+        } else if should_use_geometric_point_blocks_batched(len, evaluators.len(), chunk_size) {
+            parallel_geometric_accumulate_point_blocks_batched(
+                field,
+                &points,
+                &point_steps,
+                &scalars,
+                len,
+                evaluators.len(),
+                chunk_size,
+            );
+        } else {
+            run_in_place(
+                "bn254_geometric_accumulate_chunks_strided",
+                &[
+                    &field.limbs,
+                    &points.limbs,
+                    &point_steps.limbs,
+                    &scalars.limbs,
+                ],
+                &[len as u32, evaluators.len() as u32, chunk_size as u32],
+                len.div_ceil(chunk_size),
+            );
+        }
+    }
+}
+
+/// Validate that every evaluator targets `len` entries; returns `false` when
+/// there is nothing to accumulate.
+fn check_univariate_evaluators<F: Field>(
+    evaluators: &[UnivariateEvaluation<F>],
+    scalars: &[F],
+    len: usize,
+) -> bool {
+    assert_bn254::<F>();
+    assert_eq!(evaluators.len(), scalars.len());
+    let Some(size) = evaluators.first().map(|e| e.size) else {
+        return false;
+    };
+    assert_eq!(len, size);
+    for evaluator in evaluators {
+        assert_eq!(evaluator.size, size);
+    }
+    true
+}
+
+impl<F: Field + Clone> BufferRead<F> for MetalBuffer<F> {
+    type TargetBuffer<T: Field> = MetalBuffer<T>;
+    type Slice<'a>
+        = MetalSlice<'a, F>
+    where
+        Self: 'a,
+        F: 'a;
+
+    fn read_len(&self) -> usize {
+        self.len()
+    }
+
+    fn dot(&self, other: &Self) -> F {
+        assert_bn254::<F>();
+        assert_eq!(self.len(), other.len());
+        let this = self.bn254_buffer();
+        let other = other.bn254_buffer();
+        field256_to_f::<F>(parallel_dot(&this, &other, self.len()))
+    }
+
+    fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
+        assert_bn254::<F>();
+        let len = self.len().min(other.len());
+        if len == 0 {
+            return (F::ZERO, F::ZERO);
+        }
+        if len == 1 {
+            return (self.as_slice()[0] * other.as_slice()[0], F::ZERO);
+        }
+        let fold_half = len.next_power_of_two() >> 1;
+        let this = self.bn254_buffer();
+        let other = other.bn254_buffer();
+        let (c0, c2) = parallel_sumcheck(&this, &other, len, fold_half);
+        (field256_to_f::<F>(c0), field256_to_f::<F>(c2))
+    }
+
+    fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        _embedding: &M,
+        point: &[M::Target],
+    ) -> M::Target {
+        assert_bn254::<F>();
+        assert_bn254::<T>();
+        let num_vars = point.len();
+        let point = point
+            .iter()
+            .copied()
+            .map(target_to_field256)
+            .collect::<Vec<_>>();
+        let point = upload_field(&point);
+        let this = self.bn254_buffer();
+        let value = parallel_multilinear_extend_at(&this, 0, self.len(), &point, num_vars);
+        field256_to_target::<M::Target>(value)
+    }
+
+    fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        _embedding: &M,
+        other: &MetalBuffer<T>,
+    ) -> M::Target {
+        assert_bn254::<F>();
+        assert_bn254::<T>();
+        let this = self.bn254_buffer();
+        let other = other.bn254_buffer_target();
+        let value = field256_to_f::<F>(parallel_dot(&this, &other, self.len()));
+        field256_to_target::<M::Target>(f_to_field256(value))
+    }
+
+    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
+        &self,
+        _embedding: &M,
+        point: M::Target,
+    ) -> M::Target {
+        assert_bn254::<F>();
+        let point = target_to_field256(point);
+        let point = upload_field(&[point]);
+        let this = self.bn254_buffer();
+        field256_to_target::<M::Target>(parallel_univariate_evaluate(&this, &point, self.len()))
+    }
 
     fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
         &self,
         _embedding: &M,
-        accumulator: &mut Self::TargetBuffer<M::Target>,
+        accumulator: &mut MetalBuffer<M::Target>,
         weight: M::Target,
     ) {
         assert_bn254::<F>();
         let weight = upload_field(&[target_to_field256(weight)]);
         let vector = self.bn254_buffer();
         let acc = accumulator.bn254_buffer_target();
+        scalar_mul_add_at(&acc, 0, &vector, 0, &weight, self.len());
+        accumulator.field = Some(acc);
+        accumulator.invalidate_host_cache();
+    }
+
+    fn slice(&self, range: impl RangeBounds<usize>) -> MetalSlice<'_, F> {
+        assert_bn254::<F>();
+        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len());
+        MetalSlice {
+            field: self.bn254_buffer(),
+            offset: start,
+            len: end - start,
+            _parent: PhantomData,
+        }
+    }
+}
+
+impl<F: Field + Clone> BufferWrite<F> for MetalBuffer<F> {
+    type SliceMut<'a>
+        = MetalSliceMut<'a, F>
+    where
+        Self: 'a,
+        F: 'a;
+
+    fn scale(&mut self, weight: F) {
+        assert_bn254::<F>();
+        if self.is_empty() {
+            return;
+        }
+        let weight = upload_field(&[f_to_field256(weight)]);
+        let field = self.bn254_buffer();
         run_in_place(
-            "bn254_scalar_mul_add",
-            &[&acc.limbs, &vector.limbs, &weight.limbs],
+            "bn254_scalar_mul",
+            &[&field.limbs, &weight.limbs],
             &[self.len() as u32],
             self.len(),
         );
-        accumulator.invalidate_host_cache();
+        self.field = Some(field);
+        self.invalidate_host_cache();
+    }
+
+    fn accumulate_univariate_evaluations(
+        &mut self,
+        evaluators: &[UnivariateEvaluation<F>],
+        scalars: &[F],
+    ) {
+        if !check_univariate_evaluators(evaluators, scalars, self.len()) {
+            return;
+        }
+        let field = self.bn254_buffer();
+        geometric_accumulate_full(&field, self.len(), evaluators, scalars);
+        self.field = Some(field);
+        self.invalidate_host_cache();
+    }
+
+    fn slice_mut(&mut self, range: impl RangeBounds<usize>) -> MetalSliceMut<'_, F> {
+        assert_bn254::<F>();
+        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len());
+        MetalSliceMut::new(self, start, end - start)
+    }
+
+    fn split_at_mut(&mut self, mid: usize) -> (MetalSliceMut<'_, F>, MetalSliceMut<'_, F>) {
+        assert_bn254::<F>();
+        let len = self.len();
+        assert!(mid <= len, "split_at_mut mid {mid} out of bounds for {len}");
+        // Materialize the parent's GPU allocation and invalidate its host
+        // cache once up front; the returned views share the handle and write
+        // disjoint ranges, so no per-op parent borrow is needed.
+        let field = self.bn254_buffer();
+        self.field = Some(field.clone());
+        self.invalidate_host_cache();
+        (
+            MetalSliceMut::from_field(field.clone(), 0, mid),
+            MetalSliceMut::from_field(field, mid, len - mid),
+        )
     }
 }
 
@@ -1684,6 +1790,338 @@ impl<T: Clone> MetalBuffer<T> {
     }
 }
 
+/// Read-only, zero-copy view into a [`MetalBuffer`]'s GPU allocation.
+///
+/// Holds a clone of the parent's allocation handle plus an `(offset, len)`
+/// window. Reductions bind the handle at the byte offset, so they read
+/// `parent[offset + i]` without copying.
+pub struct MetalSlice<'a, F> {
+    field: MetalFieldBuffer,
+    offset: usize,
+    len: usize,
+    _parent: PhantomData<&'a MetalBuffer<F>>,
+}
+
+/// Mutable, zero-copy view into a [`MetalBuffer`]'s GPU allocation.
+///
+/// Like [`MetalSlice`] but exclusive: the parent's host cache is invalidated
+/// up front when the view is created, and writes go through the shared handle
+/// at the byte offset, landing in the parent's own memory.
+pub struct MetalSliceMut<'a, F> {
+    field: MetalFieldBuffer,
+    offset: usize,
+    len: usize,
+    _parent: PhantomData<&'a mut MetalBuffer<F>>,
+}
+
+impl<'a, F: Field + Clone> MetalSliceMut<'a, F> {
+    /// Borrow `parent[offset..offset+len]`, materializing the parent's GPU
+    /// allocation and invalidating its host cache once up front.
+    fn new(parent: &'a mut MetalBuffer<F>, offset: usize, len: usize) -> Self {
+        let field = parent.bn254_buffer();
+        parent.field = Some(field.clone());
+        parent.invalidate_host_cache();
+        Self {
+            field,
+            offset,
+            len,
+            _parent: PhantomData,
+        }
+    }
+
+    /// Build a view directly from an already-materialized handle (used by
+    /// `split_at_mut`, where the parent cache was invalidated by the caller).
+    fn from_field(field: MetalFieldBuffer, offset: usize, len: usize) -> Self {
+        Self {
+            field,
+            offset,
+            len,
+            _parent: PhantomData,
+        }
+    }
+
+    fn as_read(&self) -> MetalSlice<'_, F> {
+        MetalSlice {
+            field: self.field.clone(),
+            offset: self.offset,
+            len: self.len,
+            _parent: PhantomData,
+        }
+    }
+}
+
+impl<F: Field + Clone> MetalSlice<'_, F> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<F: Field + Clone> MetalSliceMut<'_, F> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<F: Field + Clone> BufferRead<F> for MetalSlice<'_, F> {
+    type TargetBuffer<T: Field> = MetalBuffer<T>;
+    type Slice<'a>
+        = MetalSlice<'a, F>
+    where
+        Self: 'a,
+        F: 'a;
+
+    fn read_len(&self) -> usize {
+        self.len
+    }
+
+    fn dot(&self, other: &Self) -> F {
+        assert_bn254::<F>();
+        assert_eq!(self.len, other.len);
+        field256_to_f::<F>(parallel_dot_at(
+            &self.field,
+            self.offset,
+            &other.field,
+            other.offset,
+            self.len,
+        ))
+    }
+
+    fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
+        assert_bn254::<F>();
+        let len = self.len.min(other.len);
+        if len == 0 {
+            return (F::ZERO, F::ZERO);
+        }
+        let fold_half = len.next_power_of_two() >> 1;
+        let (c0, c2) = parallel_sumcheck_at(
+            &self.field,
+            self.offset,
+            &other.field,
+            other.offset,
+            len,
+            fold_half,
+        );
+        (field256_to_f::<F>(c0), field256_to_f::<F>(c2))
+    }
+
+    fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        _embedding: &M,
+        point: &[M::Target],
+    ) -> M::Target {
+        assert_bn254::<F>();
+        assert_bn254::<T>();
+        let num_vars = point.len();
+        let point = point
+            .iter()
+            .copied()
+            .map(target_to_field256)
+            .collect::<Vec<_>>();
+        let point = upload_field(&point);
+        let value =
+            parallel_multilinear_extend_at(&self.field, self.offset, self.len, &point, num_vars);
+        field256_to_target::<M::Target>(value)
+    }
+
+    fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        _embedding: &M,
+        other: &MetalBuffer<T>,
+    ) -> M::Target {
+        assert_bn254::<F>();
+        assert_bn254::<T>();
+        let other = other.bn254_buffer_target();
+        let value = field256_to_f::<F>(parallel_dot_at(
+            &self.field,
+            self.offset,
+            &other,
+            0,
+            self.len,
+        ));
+        field256_to_target::<M::Target>(f_to_field256(value))
+    }
+
+    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
+        &self,
+        _embedding: &M,
+        point: M::Target,
+    ) -> M::Target {
+        assert_bn254::<F>();
+        let point = upload_field(&[target_to_field256(point)]);
+        field256_to_target::<M::Target>(parallel_univariate_evaluate_at(
+            &self.field,
+            self.offset,
+            &point,
+            self.len,
+        ))
+    }
+
+    fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
+        &self,
+        _embedding: &M,
+        accumulator: &mut MetalBuffer<M::Target>,
+        weight: M::Target,
+    ) {
+        assert_bn254::<F>();
+        let weight = upload_field(&[target_to_field256(weight)]);
+        let acc = accumulator.bn254_buffer_target();
+        scalar_mul_add_at(&acc, 0, &self.field, self.offset, &weight, self.len);
+        accumulator.field = Some(acc);
+        accumulator.invalidate_host_cache();
+    }
+
+    fn slice(&self, range: impl RangeBounds<usize>) -> MetalSlice<'_, F> {
+        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len);
+        MetalSlice {
+            field: self.field.clone(),
+            offset: self.offset + start,
+            len: end - start,
+            _parent: PhantomData,
+        }
+    }
+}
+
+impl<F: Field + Clone> BufferRead<F> for MetalSliceMut<'_, F> {
+    type TargetBuffer<T: Field> = MetalBuffer<T>;
+    type Slice<'a>
+        = MetalSlice<'a, F>
+    where
+        Self: 'a,
+        F: 'a;
+
+    fn read_len(&self) -> usize {
+        self.len
+    }
+
+    fn dot(&self, other: &Self) -> F {
+        self.as_read().dot(&other.as_read())
+    }
+
+    fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
+        self.as_read().sumcheck_polynomial(&other.as_read())
+    }
+
+    fn mixed_extend<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        embedding: &M,
+        point: &[M::Target],
+    ) -> M::Target {
+        self.as_read().mixed_extend(embedding, point)
+    }
+
+    fn mixed_dot<M: Embedding<Source = F, Target = T>, T: Field>(
+        &self,
+        embedding: &M,
+        other: &MetalBuffer<T>,
+    ) -> M::Target {
+        self.as_read().mixed_dot(embedding, other)
+    }
+
+    fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        point: M::Target,
+    ) -> M::Target {
+        self.as_read().mixed_univariate_evaluate(embedding, point)
+    }
+
+    fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        accumulator: &mut MetalBuffer<M::Target>,
+        weight: M::Target,
+    ) {
+        self.as_read()
+            .mixed_scalar_mul_add_to(embedding, accumulator, weight)
+    }
+
+    fn slice(&self, range: impl RangeBounds<usize>) -> MetalSlice<'_, F> {
+        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len);
+        MetalSlice {
+            field: self.field.clone(),
+            offset: self.offset + start,
+            len: end - start,
+            _parent: PhantomData,
+        }
+    }
+}
+
+impl<F: Field + Clone> BufferWrite<F> for MetalSliceMut<'_, F> {
+    type SliceMut<'a>
+        = MetalSliceMut<'a, F>
+    where
+        Self: 'a,
+        F: 'a;
+
+    fn scale(&mut self, weight: F) {
+        assert_bn254::<F>();
+        if self.len == 0 {
+            return;
+        }
+        let weight = upload_field(&[f_to_field256(weight)]);
+        scalar_mul_at_offset(&self.field, self.offset, self.len, &weight);
+    }
+
+    fn accumulate_univariate_evaluations(
+        &mut self,
+        evaluators: &[UnivariateEvaluation<F>],
+        scalars: &[F],
+    ) {
+        if !check_univariate_evaluators(evaluators, scalars, self.len) {
+            return;
+        }
+        if self.offset == 0 {
+            // Offset 0: reuse the optimized full-buffer accumulate path.
+            geometric_accumulate_full(&self.field, self.len, evaluators, scalars);
+        } else {
+            // Arbitrary offset: bind the buffer at a byte offset so the
+            // kernel's gid-based indexing addresses field[offset + gid].
+            let points = evaluators
+                .iter()
+                .map(|e| f_to_field256(e.point))
+                .collect::<Vec<_>>();
+            let scalars = scalars
+                .iter()
+                .copied()
+                .map(f_to_field256)
+                .collect::<Vec<_>>();
+            let points = upload_field(&points);
+            let scalars = upload_field(&scalars);
+            geometric_accumulate_at_offset(
+                &self.field,
+                self.offset,
+                self.len,
+                &points,
+                &scalars,
+                evaluators.len(),
+            );
+        }
+    }
+
+    fn slice_mut(&mut self, range: impl RangeBounds<usize>) -> MetalSliceMut<'_, F> {
+        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len);
+        MetalSliceMut::from_field(self.field.clone(), self.offset + start, end - start)
+    }
+
+    fn split_at_mut(&mut self, mid: usize) -> (MetalSliceMut<'_, F>, MetalSliceMut<'_, F>) {
+        assert!(
+            mid <= self.len,
+            "split_at_mut mid {mid} out of bounds for {}",
+            self.len
+        );
+        (
+            MetalSliceMut::from_field(self.field.clone(), self.offset, mid),
+            MetalSliceMut::from_field(self.field.clone(), self.offset + mid, self.len - mid),
+        )
+    }
+}
+
 impl<T: Clone + Field> MetalBuffer<T> {
     fn bn254_buffer_target(&self) -> MetalFieldBuffer {
         self.field
@@ -1698,6 +2136,7 @@ struct MetalRuntime {
     fold: ComputePipelineState,
     fold_pair: ComputePipelineState,
     scalar_mul_add: ComputePipelineState,
+    scalar_mul: ComputePipelineState,
     dot: ComputePipelineState,
     sumcheck: ComputePipelineState,
     dot_chunks: ComputePipelineState,
@@ -1749,6 +2188,7 @@ fn runtime() -> &'static MetalRuntime {
             fold: pipeline("bn254_fold"),
             fold_pair: pipeline("bn254_fold_pair"),
             scalar_mul_add: pipeline("bn254_scalar_mul_add"),
+            scalar_mul: pipeline("bn254_scalar_mul"),
             dot: pipeline("bn254_dot"),
             sumcheck: pipeline("bn254_sumcheck"),
             dot_chunks: pipeline("bn254_dot_chunks"),
@@ -1796,6 +2236,7 @@ fn pipeline<'a>(rt: &'a MetalRuntime, name: &str) -> &'a ComputePipelineState {
         "bn254_fold" => &rt.fold,
         "bn254_fold_pair" => &rt.fold_pair,
         "bn254_scalar_mul_add" => &rt.scalar_mul_add,
+        "bn254_scalar_mul" => &rt.scalar_mul,
         "bn254_dot" => &rt.dot,
         "bn254_sumcheck" => &rt.sumcheck,
         "bn254_dot_chunks" => &rt.dot_chunks,
@@ -1934,6 +2375,17 @@ struct ApplyCosetTwiddlesParams {
 }
 
 fn parallel_dot(a: &MetalFieldBuffer, b: &MetalFieldBuffer, len: usize) -> Field256 {
+    parallel_dot_at(a, 0, b, 0, len)
+}
+
+/// Inner product of `a[a_off..a_off+len]` and `b[b_off..b_off+len]`.
+fn parallel_dot_at(
+    a: &MetalFieldBuffer,
+    a_off: usize,
+    b: &MetalFieldBuffer,
+    b_off: usize,
+    len: usize,
+) -> Field256 {
     if len == 0 {
         return Field256::ZERO;
     }
@@ -1943,10 +2395,11 @@ fn parallel_dot(a: &MetalFieldBuffer, b: &MetalFieldBuffer, len: usize) -> Field
         limbs: new_shared_buffer(rt, (partial_count * size_of::<Field256>()) as u64),
     };
     let command = rt.queue.new_command_buffer();
-    encode_u32_kernel(
+    encode_u32_kernel_with_offsets(
         command,
         pipeline(rt, "bn254_dot_chunks"),
         &[&a.limbs, &b.limbs, &partials.limbs],
+        &[field_byte_offset(a_off), field_byte_offset(b_off), 0],
         &[len as u32, REDUCTION_CHUNK_SIZE as u32],
         partial_count,
     );
@@ -1961,16 +2414,29 @@ fn parallel_sumcheck(
     len: usize,
     fold_half: usize,
 ) -> (Field256, Field256) {
+    parallel_sumcheck_at(a, 0, b, 0, len, fold_half)
+}
+
+/// Sumcheck `(c0, c2)` over `a[a_off..]` and `b[b_off..]` (logical length `len`).
+fn parallel_sumcheck_at(
+    a: &MetalFieldBuffer,
+    a_off: usize,
+    b: &MetalFieldBuffer,
+    b_off: usize,
+    len: usize,
+    fold_half: usize,
+) -> (Field256, Field256) {
     let partial_count = fold_half.div_ceil(REDUCTION_CHUNK_SIZE);
     let rt = runtime();
     let partials = MetalFieldBuffer {
         limbs: new_shared_buffer(rt, (partial_count * 2 * size_of::<Field256>()) as u64),
     };
     let command = rt.queue.new_command_buffer();
-    encode_u32_kernel(
+    encode_u32_kernel_with_offsets(
         command,
         pipeline(rt, "bn254_sumcheck_chunks"),
         &[&a.limbs, &b.limbs, &partials.limbs],
+        &[field_byte_offset(a_off), field_byte_offset(b_off), 0],
         &[
             len as u32,
             fold_half as u32,
@@ -2022,6 +2488,16 @@ fn parallel_univariate_evaluate(
     point: &MetalFieldBuffer,
     len: usize,
 ) -> Field256 {
+    parallel_univariate_evaluate_at(coeffs, 0, point, len)
+}
+
+/// Univariate evaluation of `coeffs[coeff_off..coeff_off+len]` at `point`.
+fn parallel_univariate_evaluate_at(
+    coeffs: &MetalFieldBuffer,
+    coeff_off: usize,
+    point: &MetalFieldBuffer,
+    len: usize,
+) -> Field256 {
     if len == 0 {
         return Field256::ZERO;
     }
@@ -2031,10 +2507,11 @@ fn parallel_univariate_evaluate(
         limbs: new_shared_buffer(rt, (partial_count * size_of::<Field256>()) as u64),
     };
     let command = rt.queue.new_command_buffer();
-    encode_u32_kernel(
+    encode_u32_kernel_with_offsets(
         command,
         pipeline(rt, "bn254_univariate_eval_chunks"),
         &[&coeffs.limbs, &point.limbs, &partials.limbs],
+        &[field_byte_offset(coeff_off), 0, 0],
         &[len as u32, REDUCTION_CHUNK_SIZE as u32],
         partial_count,
     );
@@ -2535,6 +3012,111 @@ fn maybe_upload_bn254<T: Clone>(values: &[T]) -> Option<MetalFieldBuffer> {
     (type_name::<T>() == type_name::<Field256>()).then(|| upload_field(as_field256_slice(values)))
 }
 
+/// Geometric accumulate into `field[offset .. offset+len]` by binding the
+/// field buffer at a byte offset; the kernel itself indexes from `gid == 0`.
+fn geometric_accumulate_at_offset(
+    field: &MetalFieldBuffer,
+    offset: usize,
+    len: usize,
+    points: &MetalFieldBuffer,
+    scalars: &MetalFieldBuffer,
+    num_points: usize,
+) {
+    if len == 0 || num_points == 0 {
+        return;
+    }
+    let rt = runtime();
+    let command = rt.queue.new_command_buffer();
+    let encoder = command.new_compute_command_encoder();
+    let pipe = pipeline(rt, "bn254_geometric_accumulate");
+    encoder.set_compute_pipeline_state(pipe);
+    let byte_offset = (offset * size_of::<Field256>()) as u64;
+    encoder.set_buffer(0, Some(&field.limbs), byte_offset);
+    encoder.set_buffer(1, Some(&points.limbs), 0);
+    encoder.set_buffer(2, Some(&scalars.limbs), 0);
+    let len_u32 = len as u32;
+    let num_u32 = num_points as u32;
+    encoder.set_bytes(3, size_of::<u32>() as u64, (&len_u32 as *const u32).cast());
+    encoder.set_bytes(4, size_of::<u32>() as u64, (&num_u32 as *const u32).cast());
+    dispatch(&encoder, pipe, len);
+    encoder.end_encoding();
+    wait_for_command_named(command, "bn254_geometric_accumulate_window");
+}
+
+/// In-place scalar multiply of `field[offset .. offset+len]` by binding the
+/// field buffer at a byte offset; the kernel indexes from `gid == 0`.
+fn scalar_mul_at_offset(
+    field: &MetalFieldBuffer,
+    offset: usize,
+    len: usize,
+    weight: &MetalFieldBuffer,
+) {
+    if len == 0 {
+        return;
+    }
+    let rt = runtime();
+    let command = rt.queue.new_command_buffer();
+    let encoder = command.new_compute_command_encoder();
+    let pipe = pipeline(rt, "bn254_scalar_mul");
+    encoder.set_compute_pipeline_state(pipe);
+    let byte_offset = (offset * size_of::<Field256>()) as u64;
+    encoder.set_buffer(0, Some(&field.limbs), byte_offset);
+    encoder.set_buffer(1, Some(&weight.limbs), 0);
+    let len_u32 = len as u32;
+    encoder.set_bytes(2, size_of::<u32>() as u64, (&len_u32 as *const u32).cast());
+    dispatch(&encoder, pipe, len);
+    encoder.end_encoding();
+    wait_for_command_named(command, "bn254_scalar_mul_window");
+}
+
+/// Multilinear extension of `field[off..off+len]` evaluated at `point`.
+fn parallel_multilinear_extend_at(
+    field: &MetalFieldBuffer,
+    off: usize,
+    len: usize,
+    point: &MetalFieldBuffer,
+    num_vars: usize,
+) -> Field256 {
+    let rt = runtime();
+    let out = new_shared_buffer(rt, (4 * size_of::<u64>()) as u64);
+    let command = rt.queue.new_command_buffer();
+    encode_u32_kernel_with_offsets(
+        command,
+        pipeline(rt, "bn254_multilinear_extend"),
+        &[&field.limbs, &point.limbs, &out],
+        &[field_byte_offset(off), 0, 0],
+        &[len as u32, num_vars as u32],
+        1,
+    );
+    wait_for_command_named(command, "bn254_multilinear_extend");
+    download_field(&out, 1)[0]
+}
+
+/// `acc[acc_off..] += weight * vector[vec_off..]` over `len` elements.
+fn scalar_mul_add_at(
+    acc: &MetalFieldBuffer,
+    acc_off: usize,
+    vector: &MetalFieldBuffer,
+    vec_off: usize,
+    weight: &MetalFieldBuffer,
+    len: usize,
+) {
+    if len == 0 {
+        return;
+    }
+    let rt = runtime();
+    let command = rt.queue.new_command_buffer();
+    encode_u32_kernel_with_offsets(
+        command,
+        pipeline(rt, "bn254_scalar_mul_add"),
+        &[&acc.limbs, &vector.limbs, &weight.limbs],
+        &[field_byte_offset(acc_off), field_byte_offset(vec_off), 0],
+        &[len as u32],
+        len,
+    );
+    wait_for_command_named(command, "bn254_scalar_mul_add");
+}
+
 fn copy_field_buffer(source: &MetalFieldBuffer, len: usize) -> MetalFieldBuffer {
     let rt = runtime();
     let byte_len = (len * 4 * size_of::<u64>()) as u64;
@@ -2556,11 +3138,28 @@ fn encode_u32_kernel(
     constants: &[u32],
     threads: usize,
 ) {
+    encode_u32_kernel_with_offsets(command, pipeline, buffers, &[], constants, threads);
+}
+
+/// Like [`encode_u32_kernel`], but binds `buffers[i]` at byte offset
+/// `offsets[i]` (defaulting to 0 when `offsets` is shorter). This is the
+/// mechanism that lets a view dispatch a kernel over `parent[offset..]`
+/// without copying: only the input binding shifts, the kernel still indexes
+/// from `gid == 0`.
+fn encode_u32_kernel_with_offsets(
+    command: &metal::CommandBufferRef,
+    pipeline: &ComputePipelineState,
+    buffers: &[&Buffer],
+    offsets: &[u64],
+    constants: &[u32],
+    threads: usize,
+) {
     let encoder = command.new_compute_command_encoder();
     encoder.set_compute_pipeline_state(pipeline);
     let mut index = 0;
-    for buffer in buffers {
-        encoder.set_buffer(index, Some(buffer), 0);
+    for (i, buffer) in buffers.iter().enumerate() {
+        let byte_offset = offsets.get(i).copied().unwrap_or(0);
+        encoder.set_buffer(index, Some(buffer), byte_offset);
         index += 1;
     }
     for constant in constants {
@@ -2575,20 +3174,17 @@ fn encode_u32_kernel(
     encoder.end_encoding();
 }
 
+/// Byte offset of element `offset` within a `Field256` buffer.
+#[inline]
+fn field_byte_offset(offset: usize) -> u64 {
+    (offset * size_of::<Field256>()) as u64
+}
+
 fn run_in_place(name: &str, buffers: &[&Buffer], constants: &[u32], threads: usize) {
     let rt = runtime();
     let command = rt.queue.new_command_buffer();
     encode_u32_kernel(command, pipeline(rt, name), buffers, constants, threads);
     wait_for_command_named(command, name);
-}
-
-fn run_reduce(name: &str, buffers: &[&Buffer], constants: &[u32], out_len: usize) -> Vec<Field256> {
-    let rt = runtime();
-    let out = new_shared_buffer(rt, (out_len * 4 * size_of::<u64>()) as u64);
-    let mut all = buffers.to_vec();
-    all.push(&out);
-    run_in_place(name, &all, constants, 1);
-    download_field(&out, out_len)
 }
 
 fn dispatch(

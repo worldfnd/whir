@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::algebra::buffer::FieldOps;
+use crate::algebra::buffer::{Buffer, BufferRead, BufferWrite};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
@@ -141,8 +141,11 @@ impl<M: Embedding> Config<M> {
         // Random linear combination of the vectors.
         let mut vector_rlc_coeffs: Vec<M::Target> = geometric_challenge(prover_state, num_vectors);
         assert_eq!(vector_rlc_coeffs[0], M::Target::ONE);
-        let mut vector =
-            FieldOps::mixed_linear_combination(self.embedding(), vectors, &vector_rlc_coeffs);
+        let mut vector = ActiveBuffer::<M::Source>::mixed_linear_combination(
+            self.embedding(),
+            vectors,
+            &vector_rlc_coeffs,
+        );
 
         let mut prev_witness: RoundWitness<'a, M::Target, M> = RoundWitness::Initial(witnesses);
 
@@ -154,13 +157,13 @@ impl<M: Embedding> Config<M> {
             constraint_rlc_coeffs.split_at(linear_forms.len());
         let mut linear_forms = linear_forms;
         let mut covector = if has_constraints {
-            FieldOps::linear_forms_rlc(
+            ActiveBuffer::<M::Target>::linear_forms_rlc(
                 self.initial_size(),
                 &mut linear_forms,
                 initial_forms_rlc_coeffs,
             )
         } else {
-            FieldOps::zeros(0)
+            ActiveBuffer::<M::Target>::zeros(0)
         };
         drop(linear_forms);
 
@@ -203,7 +206,7 @@ impl<M: Embedding> Config<M> {
                 vector.fold(f);
             }
             // Covector must be all zeros.
-            covector = FieldOps::zeros(self.initial_sumcheck.final_size());
+            covector = ActiveBuffer::<M::Target>::zeros(self.initial_sumcheck.final_size());
             folding_randomness
         };
         let mut evaluation_point = folding_randomness.clone();

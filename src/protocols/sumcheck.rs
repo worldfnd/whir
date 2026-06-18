@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::algebra::buffer::FieldOps;
+use crate::algebra::buffer::{Buffer, BufferRead};
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};

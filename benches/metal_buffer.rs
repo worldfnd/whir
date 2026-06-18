@@ -3,7 +3,7 @@ mod bench {
     use divan::{black_box, AllocProfiler, Bencher};
     use whir::{
         algebra::{
-            buffer::{CpuBuffer, FieldOps, MetalBuffer},
+            buffer::{BufferRead, CpuBuffer, MetalBuffer},
             fields::Field256 as F,
         },
         hash::{Hash, HashEngine, MetalSha2, Sha2},

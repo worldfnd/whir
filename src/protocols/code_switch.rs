@@ -15,7 +15,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::{ActiveBuffer, BufferOps, FieldOps, WindowOps},
+        buffer::{ActiveBuffer, BufferOps, BufferRead, BufferWrite},
         dot,
         embedding::{Embedding, Identity},
         eq_weights, lift,
@@ -255,7 +255,7 @@ impl<M: Embedding> Config<M> {
             let masked = self.source.masked_message_length();
             let in_domain_evaluators = evaluators(&eval_points, masked);
             covector
-                .window_mut(0, masked)
+                .slice_mut(..masked)
                 .accumulate_univariate_evaluations(&in_domain_evaluators, in_domain_rlc_coeffs);
         }
 
