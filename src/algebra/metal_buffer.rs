@@ -28,7 +28,7 @@ use crate::{
         ntt::{ReedSolomon, RsDomain},
     },
     engines::EngineId,
-    hash::{self, metal_profile, Hash as Digest, MetalSha2, SHA2},
+    hash::{self, metal_profile, Hash as Digest, MetalSha2},
     protocols::{
         matrix_commit::{hash_rows, Encodable},
         merkle_tree,
@@ -1055,34 +1055,13 @@ where
         D: Deserializer<'de>,
     {
         let data = Vec::<T>::deserialize(deserializer)?;
-        Ok(Self::from_vec(data))
+        Ok(BufferOps::from_vec(data))
     }
 }
 
 impl<T: Clone> MetalBuffer<T> {
     pub fn warmup() {
         let _ = runtime();
-    }
-
-    pub fn from_vec(source: Vec<T>) -> Self {
-        let len = source.len();
-        let field = maybe_upload_bn254(&source);
-        let host_cache = if field.is_some() {
-            OnceCell::new()
-        } else {
-            OnceCell::from(source)
-        };
-        Self {
-            len,
-            host_cache,
-            field,
-            hash: None,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn from_slice(source: &[T]) -> Self {
-        Self::from_vec(Vec::from(source))
     }
 
     pub(crate) fn as_slice(&self) -> &[T] {
@@ -1170,6 +1149,8 @@ impl MetalBuffer<Digest> {
 }
 
 impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
+    type Nodes = MetalBuffer<Digest>;
+
     fn as_slice(&self) -> &[T] {
         self.as_slice()
     }
@@ -1202,18 +1183,24 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
     }
 
     fn from_vec(source: Vec<T>) -> Self {
-        Self::from_vec(source)
+        let len = source.len();
+        let field = maybe_upload_bn254(&source);
+        let host_cache = if field.is_some() {
+            OnceCell::new()
+        } else {
+            OnceCell::from(source)
+        };
+        Self {
+            len,
+            host_cache,
+            field,
+            hash: None,
+            _marker: PhantomData,
+        }
     }
 
     fn from_slice(source: &[T]) -> Self {
-        Self::from_slice(source)
-    }
-
-    fn extend(&self, other: &Self) -> Self {
-        let mut data = Vec::with_capacity(self.len() + other.len());
-        data.extend_from_slice(self.as_slice());
-        data.extend_from_slice(other.as_slice());
-        Self::from_vec(data)
+        Self::from_vec(Vec::from(source))
     }
 
     fn merklize(
@@ -1221,15 +1208,21 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
         num_cols: usize,
         leaf_hash: EngineId,
         merkle: &merkle_tree::Config,
-    ) -> (MetalBuffer<Digest>, Digest)
+    ) -> (Self::Nodes, Digest)
     where
         T: Encodable + Send + Sync,
     {
         let num_rows = merkle.num_leaves;
         let layers = merkle.layers.len();
+        assert_eq!(self.len(), num_cols * num_rows);
 
         // Fast path: build the whole tree on the GPU when the leaf and every node layer is SHA2.
-        if leaf_hash == SHA2 && merkle.layers.iter().all(|layer| layer.hash_id == SHA2) {
+        if leaf_hash == hash::SHA2
+            && merkle
+                .layers
+                .iter()
+                .all(|layer| layer.hash_id == hash::SHA2)
+        {
             if let Some(nodes) = self.commit_bn254_rows_sha2_merkle(num_cols, num_rows, layers) {
                 let root = nodes
                     .read_hash_at(merkle.num_nodes() - 1)
@@ -1238,7 +1231,6 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
             }
         }
 
-        // CPU fallback: hash each row on the CPU, then build the tree.
         let cpu_nodes = || {
             let engine = hash::ENGINES
                 .retrieve(leaf_hash)
@@ -1248,8 +1240,7 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
             merkle.build_nodes(leaves)
         };
 
-        // Otherwise hash leaves (on the GPU if SHA2, else CPU) and build the tree on the CPU.
-        let nodes = if leaf_hash == SHA2 {
+        let nodes = if leaf_hash == hash::SHA2 {
             let mut leaves = vec![Digest::default(); num_rows];
             if self.hash_bn254_rows_sha2(num_cols, &mut leaves) {
                 merkle.build_nodes(leaves)
@@ -1260,7 +1251,7 @@ impl<T: Clone> BufferOps<T> for MetalBuffer<T> {
             cpu_nodes()
         };
         let root = nodes[merkle.num_nodes() - 1];
-        (MetalBuffer::from_vec(nodes), root)
+        (BufferOps::from_vec(nodes), root)
     }
 }
 
@@ -1279,7 +1270,7 @@ impl<F: Field + Clone> crate::algebra::buffer::Buffer<F> for MetalBuffer<F> {
 
     fn geometric_sequence(base: F, length: usize) -> Self {
         assert_bn254::<F>();
-        Self::from_vec(crate::algebra::geometric_sequence(base, length))
+        BufferOps::from_vec(crate::algebra::geometric_sequence(base, length))
     }
 
     fn random<R>(rng: &mut R, length: usize) -> Self
@@ -1288,7 +1279,7 @@ impl<F: Field + Clone> crate::algebra::buffer::Buffer<F> for MetalBuffer<F> {
         Standard: Distribution<F>,
     {
         assert_bn254::<F>();
-        Self::from_vec((0..length).map(|_| rng.gen()).collect())
+        BufferOps::from_vec((0..length).map(|_| rng.gen()).collect())
     }
 
     fn zero_pad(&mut self) {
@@ -1296,7 +1287,7 @@ impl<F: Field + Clone> crate::algebra::buffer::Buffer<F> for MetalBuffer<F> {
         if !self.is_empty() {
             let mut data = self.as_slice().to_vec();
             data.resize(self.len().next_power_of_two(), F::ZERO);
-            *self = Self::from_vec(data);
+            *self = BufferOps::from_vec(data);
         }
     }
 
@@ -1378,12 +1369,12 @@ impl<F: Field + Clone> crate::algebra::buffer::Buffer<F> for MetalBuffer<F> {
         let first = (first.as_mut() as &mut dyn std::any::Any)
             .downcast_mut::<Covector<F>>()
             .expect("MetalBuffer only supports Covector linear forms for BN254 RLC");
-        let mut accumulator = Self::from_slice(&first.vector);
+        let mut accumulator = <Self as BufferOps<F>>::from_slice(&first.vector);
         for (coeff, linear_form) in rlc_coeffs[1..].iter().zip(rest) {
             let covector = (linear_form.as_mut() as &mut dyn std::any::Any)
                 .downcast_mut::<Covector<F>>()
                 .expect("MetalBuffer only supports Covector linear forms for BN254 RLC");
-            let vector = Self::from_slice(&covector.vector);
+            let vector = <Self as BufferOps<F>>::from_slice(&covector.vector);
             vector.mixed_scalar_mul_add_to(&Identity::new(), &mut accumulator, *coeff);
         }
         accumulator
@@ -1397,7 +1388,7 @@ impl<F: Field + Clone> crate::algebra::buffer::Buffer<F> for MetalBuffer<F> {
         assert_bn254::<F>();
         assert_eq!(vectors.len(), coeffs.len());
         let Some((first, vectors)) = vectors.split_first() else {
-            return MetalBuffer::from_vec(Vec::new());
+            return BufferOps::from_vec(Vec::new());
         };
         let mut accumulator = MetalBuffer::<M::Target> {
             len: first.len(),
@@ -1608,7 +1599,7 @@ impl<F: Field + Clone> BufferRead<F> for MetalBuffer<F> {
 
     fn slice(&self, range: impl RangeBounds<usize>) -> MetalSlice<'_, F> {
         assert_bn254::<F>();
-        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len());
+        let (start, end) = crate::buffer::cpu::resolve_range(range, self.len());
         MetalSlice {
             field: self.bn254_buffer(),
             offset: start,
@@ -1625,7 +1616,7 @@ impl<F: Field + Clone> BufferWrite<F> for MetalBuffer<F> {
         Self: 'a,
         F: 'a;
 
-    fn scale(&mut self, weight: F) {
+    fn scalar_mul(&mut self, weight: F) {
         assert_bn254::<F>();
         if self.is_empty() {
             return;
@@ -1658,7 +1649,7 @@ impl<F: Field + Clone> BufferWrite<F> for MetalBuffer<F> {
 
     fn slice_mut(&mut self, range: impl RangeBounds<usize>) -> MetalSliceMut<'_, F> {
         assert_bn254::<F>();
-        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len());
+        let (start, end) = crate::buffer::cpu::resolve_range(range, self.len());
         MetalSliceMut::new(self, start, end - start)
     }
 
@@ -1726,7 +1717,7 @@ impl<F: Field> ReedSolomon<F> for MetalRs<F> {
         assert_bn254::<F>();
         let num_messages = vectors.len() * interleaving_depth;
         if num_messages == 0 {
-            return MetalBuffer::from_vec(Vec::new());
+            return BufferOps::from_vec(Vec::new());
         }
         assert!(masks.len().is_multiple_of(num_messages));
         let mask_length = masks.len() / num_messages;
@@ -1977,7 +1968,7 @@ impl<F: Field + Clone> BufferRead<F> for MetalSlice<'_, F> {
     }
 
     fn slice(&self, range: impl RangeBounds<usize>) -> MetalSlice<'_, F> {
-        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len);
+        let (start, end) = crate::buffer::cpu::resolve_range(range, self.len);
         MetalSlice {
             field: self.field.clone(),
             offset: self.offset + start,
@@ -2042,7 +2033,7 @@ impl<F: Field + Clone> BufferRead<F> for MetalSliceMut<'_, F> {
     }
 
     fn slice(&self, range: impl RangeBounds<usize>) -> MetalSlice<'_, F> {
-        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len);
+        let (start, end) = crate::buffer::cpu::resolve_range(range, self.len);
         MetalSlice {
             field: self.field.clone(),
             offset: self.offset + start,
@@ -2059,7 +2050,7 @@ impl<F: Field + Clone> BufferWrite<F> for MetalSliceMut<'_, F> {
         Self: 'a,
         F: 'a;
 
-    fn scale(&mut self, weight: F) {
+    fn scalar_mul(&mut self, weight: F) {
         assert_bn254::<F>();
         if self.len == 0 {
             return;
@@ -2105,7 +2096,7 @@ impl<F: Field + Clone> BufferWrite<F> for MetalSliceMut<'_, F> {
     }
 
     fn slice_mut(&mut self, range: impl RangeBounds<usize>) -> MetalSliceMut<'_, F> {
-        let (start, end) = crate::algebra::buffer::resolve_range(range, self.len);
+        let (start, end) = crate::buffer::cpu::resolve_range(range, self.len);
         MetalSliceMut::from_field(self.field.clone(), self.offset + start, end - start)
     }
 
@@ -3299,7 +3290,11 @@ fn as_field256_slice<T: Clone>(values: &[T]) -> &[Field256] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::{buffer::CpuBuffer, ntt::NttEngine};
+    use crate::algebra::{
+        buffer::{Buffer, CpuBuffer},
+        ntt::NttEngine,
+    };
+    use crate::buffer::BufferOps;
 
     fn values(len: usize, offset: u64) -> Vec<Field256> {
         (0..len)

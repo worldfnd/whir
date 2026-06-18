@@ -1,4 +1,8 @@
-use std::{borrow::Cow, fs, path::PathBuf};
+use std::{
+    borrow::Cow,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -11,6 +15,8 @@ use whir::{
     protocols::whir::Config as WhirConfig,
     transcript::{codecs::Empty, DomainSeparator, Proof, ProverState, VerifierState},
 };
+
+use whir::buffer::BufferOps;
 
 type F = Field256;
 type M = Identity<F>;
@@ -70,12 +76,12 @@ struct Artifact {
 fn main() {
     let args = Args::parse();
     match args.command {
-        Command::Prove(args) => prove(args),
-        Command::Verify { input } => verify(input),
+        Command::Prove(args) => prove(&args),
+        Command::Verify { input } => verify(&input),
     }
 }
 
-fn prove(args: RoundtripArgs) {
+fn prove(args: &RoundtripArgs) {
     assert!(args.fold <= args.log_size, "fold must be <= log_size");
     let size = 1usize << args.log_size;
     let whir_params = protocol_parameters(args.security_level, args.pow_bits, args.fold, args.rate);
@@ -120,8 +126,8 @@ fn prove(args: RoundtripArgs) {
     );
 }
 
-fn verify(input: PathBuf) {
-    let bytes = fs::read(&input).expect("read proof artifact");
+fn verify(input: &Path) {
+    let bytes = fs::read(input).expect("read proof artifact");
     let artifact: Artifact = serde_json::from_slice(&bytes).expect("decode proof artifact");
     let size = 1usize << artifact.log_size;
     let whir_params = protocol_parameters(
@@ -156,7 +162,7 @@ fn verify(input: PathBuf) {
     );
 }
 
-fn protocol_parameters(
+const fn protocol_parameters(
     security_level: usize,
     pow_bits: usize,
     fold: usize,
@@ -179,11 +185,11 @@ fn input_vector(size: usize) -> Vec<F> {
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-fn backend_name() -> &'static str {
+const fn backend_name() -> &'static str {
     "gpu-metal"
 }
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
-fn backend_name() -> &'static str {
+const fn backend_name() -> &'static str {
     "cpu"
 }

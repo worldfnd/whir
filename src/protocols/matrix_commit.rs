@@ -12,7 +12,8 @@ use tracing::instrument;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
-    algebra::buffer::{ActiveBuffer, BufferOps},
+    algebra::buffer::ActiveBuffer,
+    buffer::BufferOps,
     engines::EngineId,
     hash::{self, Hash},
     protocols::merkle_tree,
@@ -223,6 +224,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
+        ActiveBuffer<T>: BufferOps<T, Nodes = ActiveBuffer<Hash>>,
     {
         assert_eq!(matrix.len(), self.num_rows() * self.num_cols);
 

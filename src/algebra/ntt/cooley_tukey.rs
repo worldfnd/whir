@@ -20,7 +20,7 @@ use super::utils::{lcm, sqrt_factor};
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 use super::ReedSolomon;
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
-use crate::algebra::buffer::CpuBuffer;
+use crate::algebra::buffer::{BufferOps, CpuBuffer};
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
@@ -233,7 +233,7 @@ impl<F: Field> NttEngine<F> {
     }
 
     /// The shared field/domain core this engine is built on.
-    pub fn domain(&self) -> &RsDomain<F> {
+    pub const fn domain(&self) -> &RsDomain<F> {
         &self.domain
     }
 
@@ -557,7 +557,7 @@ pub struct CpuRs<F: Field> {
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 impl<F: Field> CpuRs<F> {
-    pub fn new(engine: Arc<NttEngine<F>>) -> Self {
+    pub const fn new(engine: Arc<NttEngine<F>>) -> Self {
         Self { engine }
     }
 }

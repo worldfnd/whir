@@ -22,6 +22,8 @@ use whir::{
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
+use whir::buffer::BufferOps;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {

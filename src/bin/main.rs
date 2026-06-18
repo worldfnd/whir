@@ -18,6 +18,8 @@ use whir::{
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
+use whir::buffer::BufferOps;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -324,7 +326,7 @@ where
     let _ = params.prove(
         &mut prover_state,
         &[&vector_buffer],
-        vec![&witness],
+        witness,
         prove_linear_forms,
         Cow::Borrowed(&evaluations),
     );

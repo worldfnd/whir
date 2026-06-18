@@ -1,5 +1,3 @@
-// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
-
 //! Code-switching IOR: R_{C, C_zk, sl} → R_{C', C_zk, sl'}
 //!
 //! Reduces a proximity claim about oracle f (source code C) to a proximity
@@ -62,9 +60,8 @@ pub enum MaskInput<F> {
     Enabled(ActiveBuffer<F>),
 }
 
-// helper function to get UnivariateEvaluations
 #[inline]
-fn evaluators<F: Field>(points: &[F], size: usize) -> Vec<UnivariateEvaluation<F>> {
+fn univariate_evaluators<F: Field>(points: &[F], size: usize) -> Vec<UnivariateEvaluation<F>> {
     points
         .iter()
         .map(|&point| UnivariateEvaluation::new(point, size))
@@ -170,7 +167,7 @@ impl<M: Embedding> Config<M> {
         message: ActiveBuffer<M::Target>,
         witness: &IrsWitness<M::Source, M::Target>,
         covector: &mut ActiveBuffer<M::Target>,
-        folding_randomness: &mut ActiveBuffer<M::Target>,
+        folding_randomness: &ActiveBuffer<M::Target>,
         mask_input: &MaskInput<M::Target>,
     ) -> Witness<M::Target>
     where
@@ -239,21 +236,21 @@ impl<M: Embedding> Config<M> {
         let (ood_rlc_coeffs, in_domain_rlc_coeffs) = constraint_rlc_coeffs.split_at(num_ood);
 
         // Covector update — sl' from Completeness proof (p.55-56).
-        covector.scale(original_sl_coeff);
+        covector.scalar_mul(original_sl_coeff);
         let eval_points = lift(self.source.embedding(), &source_evaluations.points);
         if self.message_mask_length == 0 {
             // Non-ZK: single accumulate over all points. Scalars are the
             // contiguous challenge tail (ood ‖ in-domain), so no copy is needed.
-            let mut all_evaluators = evaluators(&ood_points, covector.len());
-            all_evaluators.extend(evaluators(&eval_points, covector.len()));
+            let mut all_evaluators = univariate_evaluators(&ood_points, covector.len());
+            all_evaluators.extend(univariate_evaluators(&eval_points, covector.len()));
             covector.accumulate_univariate_evaluations(&all_evaluators, constraint_rlc_coeffs);
         } else {
             // ZK: OOD contributes to full [f; r; s], in-domain only to [f; r].
-            let ood_evaluators = evaluators(&ood_points, covector.len());
+            let ood_evaluators = univariate_evaluators(&ood_points, covector.len());
             covector.accumulate_univariate_evaluations(&ood_evaluators, ood_rlc_coeffs);
 
             let masked = self.source.masked_message_length();
-            let in_domain_evaluators = evaluators(&eval_points, masked);
+            let in_domain_evaluators = univariate_evaluators(&eval_points, masked);
             covector
                 .slice_mut(..masked)
                 .accumulate_univariate_evaluations(&in_domain_evaluators, in_domain_rlc_coeffs);
@@ -529,7 +526,7 @@ mod tests {
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
-        let covector = ActiveBuffer::from_vec(covector);
+        let mut covector = ActiveBuffer::from_vec(covector);
 
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -553,8 +550,8 @@ mod tests {
             &mut prover_state,
             folded_message.clone(),
             &source_witness,
-            &mut covector.clone(),
-            &mut ActiveBuffer::from_vec(folding_randomness.clone()),
+            &mut covector,
+            &ActiveBuffer::from_vec(folding_randomness.clone()),
             &mask_input(ActiveBuffer::from_vec(mask_msg)),
         );
         let proof = prover_state.proof();
@@ -628,7 +625,7 @@ mod tests {
             folded_message,
             &source_witness,
             &mut covector,
-            &mut ActiveBuffer::from_vec(folding_randomness.clone()),
+            &ActiveBuffer::from_vec(folding_randomness.clone()),
             &mask_input(ActiveBuffer::from_vec(mask_msg)),
         );
         let proof = prover_state.proof();
@@ -677,11 +674,11 @@ mod tests {
             fold_chunks(&f_full, config.source.message_length(), &folding_randomness);
 
         // For non-ZK and source.mask_length == 0, h = folded_message and identity holds.
-        let folded_message_buffer = ActiveBuffer::from_vec(folded_message.clone());
+        let folded_message_buffer = ActiveBuffer::from_slice(&folded_message);
         let initial_mu = folded_message_buffer.dot(&covector);
 
         // Tamper the post-fold message before proving.
-        let mut tampered = folded_message.clone();
+        let mut tampered = folded_message;
         tampered[0] += F::ONE;
         let tampered = ActiveBuffer::from_vec(tampered);
         let _witness = config.prove(
@@ -689,7 +686,7 @@ mod tests {
             tampered,
             &source_witness,
             &mut covector,
-            &mut ActiveBuffer::from_vec(folding_randomness.clone()),
+            &ActiveBuffer::from_vec(folding_randomness.clone()),
             &MaskInput::Disabled,
         );
         let proof = prover_state.proof();

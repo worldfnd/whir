@@ -11,11 +11,11 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use ark_ff::{Field, FftField};
+use ark_ff::{FftField, Field};
 use static_assertions::assert_obj_safe;
 
-use self::matrix::MatrixMut;
 pub use self::cooley_tukey::{NttEngine, RsDomain};
+use self::matrix::MatrixMut;
 // The CPU encoder is only the active backend (and only constructible) on non-Metal builds.
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub use self::cooley_tukey::CpuRs;
@@ -30,28 +30,28 @@ use crate::{
 
 pub static NTT: LazyLock<TypeMap<NttFamily>> = LazyLock::new(|| {
     let map = TypeMap::new();
-    fn register<F: FftField>(map: &TypeMap<NttFamily>) {
-        // Both backends share the same `RsDomain` coset convention and differ only in how
-        // `interleaved_encode` runs: the CPU encoder needs the full NTT engine, while the
-        // Metal encoder only needs the shared domain (the NTT itself runs on the GPU).
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        let encoder = crate::algebra::metal_buffer::MetalRs::new(Arc::new(
-            RsDomain::<F>::from_fftfield(),
-        ));
-        #[cfg(not(all(feature = "metal", target_os = "macos")))]
-        let encoder = CpuRs::new(Arc::new(NttEngine::<F>::new_from_fftfield()));
-        map.insert(Arc::new(encoder) as Arc<dyn ReedSolomon<F>>);
-    }
-    register::<fields::Field64>(&map);
-    register::<fields::Field128>(&map);
-    register::<fields::Field192>(&map);
-    register::<fields::Field256>(&map);
-    register::<fields::Field64_2>(&map);
-    register::<fields::Field64_3>(&map);
-    register::<<fields::Field64_2 as Field>::BasePrimeField>(&map);
-    register::<<fields::Field64_3 as Field>::BasePrimeField>(&map);
+    register_ntt::<fields::Field64>(&map);
+    register_ntt::<fields::Field128>(&map);
+    register_ntt::<fields::Field192>(&map);
+    register_ntt::<fields::Field256>(&map);
+    register_ntt::<fields::Field64_2>(&map);
+    register_ntt::<fields::Field64_3>(&map);
+    register_ntt::<<fields::Field64_2 as Field>::BasePrimeField>(&map);
+    register_ntt::<<fields::Field64_3 as Field>::BasePrimeField>(&map);
     map
 });
+
+fn register_ntt<F: FftField>(map: &TypeMap<NttFamily>) {
+    // Both backends share the same `RsDomain` coset convention and differ only in how
+    // `interleaved_encode` runs: the CPU encoder needs the full NTT engine, while the
+    // Metal encoder only needs the shared domain (the NTT itself runs on the GPU).
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    let encoder =
+        crate::algebra::metal_buffer::MetalRs::new(Arc::new(RsDomain::<F>::from_fftfield()));
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    let encoder = CpuRs::new(Arc::new(NttEngine::<F>::new_from_fftfield()));
+    map.insert(Arc::new(encoder) as Arc<dyn ReedSolomon<F>>);
+}
 
 #[derive(Default)]
 pub struct NttFamily;

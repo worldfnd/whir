@@ -1,5 +1,3 @@
-// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
-
 //! Mask proximity verification via γ-combination.
 //!
 //! Implements Construction 7.2 (p.43-44) specialized for zero-constraint mask
@@ -48,8 +46,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     algebra::{
-        buffer::ActiveBuffer, embedding::Identity, random_vector, scalar_mul_add_new,
-        univariate_evaluate,
+        buffer::{ActiveBuffer, Buffer, BufferOps},
+        embedding::Identity,
+        scalar_mul_add_new, univariate_evaluate,
     },
     hash::Hash,
     protocols::irs_commit::{
@@ -77,7 +76,7 @@ pub struct Config<F: Field> {
 #[must_use]
 pub struct Witness<F: Field> {
     pub(crate) mask_witness: IrsWitness<F>,
-    pub(crate) fresh_msgs: Vec<Vec<F>>,
+    pub(crate) fresh_msgs: Vec<ActiveBuffer<F>>,
 }
 
 /// Verifier output from the commit phase.
@@ -115,7 +114,7 @@ impl<F: Field> Config<F> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        original_msgs: &[Vec<F>],
+        original_msgs: &[&ActiveBuffer<F>],
     ) -> Witness<F>
     where
         F: Codec<[H::U]>,
@@ -130,23 +129,15 @@ impl<F: Field> Config<F> {
         }
 
         // Sample fresh mask-of-masks
-        let fresh_msgs: Vec<Vec<F>> = (0..self.num_masks)
-            .map(|_| random_vector(prover_state.rng(), self.c_zk_commit.vector_size))
+        let fresh_msgs: Vec<ActiveBuffer<F>> = (0..self.num_masks)
+            .map(|_| ActiveBuffer::random(prover_state.rng(), self.c_zk_commit.vector_size))
             .collect();
 
-        let original_buffers = original_msgs
-            .iter()
-            .map(|msg| ActiveBuffer::from_slice(msg))
-            .collect::<Vec<_>>();
-        let fresh_buffers = fresh_msgs
-            .iter()
-            .map(|msg| ActiveBuffer::from_slice(msg))
-            .collect::<Vec<_>>();
-
         // Tree layout: [originals..., freshes...]
-        let all_vectors: Vec<&ActiveBuffer<F>> = original_buffers
+        let all_vectors: Vec<&ActiveBuffer<F>> = original_msgs
             .iter()
-            .chain(fresh_buffers.iter())
+            .copied()
+            .chain(fresh_msgs.iter())
             .collect();
 
         let mask_witness = self.c_zk_commit.commit(prover_state, &all_vectors);
@@ -175,7 +166,7 @@ impl<F: Field> Config<F> {
         &self,
         prover_state: &mut ProverState<H, R>,
         witness: &Witness<F>,
-        original_msgs: &[Vec<F>],
+        original_msgs: &[&ActiveBuffer<F>],
     ) where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
@@ -197,11 +188,13 @@ impl<F: Field> Config<F> {
         assert_eq!(irs_masks.len(), 2 * self.num_masks * irs_masks_per_vector);
         for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()
+            .copied()
             .zip(witness.fresh_msgs.iter())
             .enumerate()
         {
             // ξ*_i = s_i + γ · ξ_i
-            let combined_msg = scalar_mul_add_new(fresh_msg, gamma, orig_msg);
+            // TODO: port to buffer backend
+            let combined_msg = scalar_mul_add_new(fresh_msg.as_slice(), gamma, orig_msg.as_slice());
             prover_state.prover_messages(&combined_msg);
 
             // r*_i = r'_i + γ · r_i
@@ -352,10 +345,15 @@ mod tests {
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
             .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size))
             .collect();
+        let original_buffers = original_msgs
+            .iter()
+            .map(|msg| ActiveBuffer::from_slice(msg))
+            .collect::<Vec<_>>();
+        let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit(&mut prover_state, &original_msgs);
-        config.prove(&mut prover_state, &witness, &original_msgs);
+        let witness = config.commit(&mut prover_state, &original_refs);
+        config.prove(&mut prover_state, &witness, &original_refs);
         let proof = prover_state.proof();
 
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
@@ -426,13 +424,23 @@ mod tests {
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
             .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size))
             .collect();
+        let original_buffers = original_msgs
+            .iter()
+            .map(|msg| ActiveBuffer::from_slice(msg))
+            .collect::<Vec<_>>();
+        let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit(&mut prover_state, &original_msgs);
+        let witness = config.commit(&mut prover_state, &original_refs);
 
         let mut tampered_msgs = original_msgs;
         tampered_msgs[0][0] += F::ONE;
-        config.prove(&mut prover_state, &witness, &tampered_msgs);
+        let tampered_buffers = tampered_msgs
+            .iter()
+            .map(|msg| ActiveBuffer::from_slice(msg))
+            .collect::<Vec<_>>();
+        let tampered_refs = tampered_buffers.iter().collect::<Vec<_>>();
+        config.prove(&mut prover_state, &witness, &tampered_refs);
         let proof = prover_state.proof();
 
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
@@ -457,21 +465,28 @@ mod tests {
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
             .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size))
             .collect();
+        let original_buffers = original_msgs
+            .iter()
+            .map(|msg| ActiveBuffer::from_slice(msg))
+            .collect::<Vec<_>>();
+        let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit(&mut prover_state, &original_msgs);
+        let witness = config.commit(&mut prover_state, &original_refs);
 
         let gamma: F = prover_state.verifier_message();
         let irs_masks_per_vector =
             config.c_zk_commit.mask_length * config.c_zk_commit.interleaving_depth;
         let irs_masks = witness.mask_witness.masks.as_slice();
 
-        for (i, (orig_msg, fresh_msg)) in original_msgs
+        for (i, (orig_msg, fresh_msg)) in original_refs
             .iter()
+            .copied()
             .zip(witness.fresh_msgs.iter())
             .enumerate()
         {
-            let mut combined_msg = scalar_mul_add_new(fresh_msg, gamma, orig_msg);
+            let mut combined_msg =
+                scalar_mul_add_new(fresh_msg.as_slice(), gamma, orig_msg.as_slice());
             if i == 0 {
                 combined_msg[0] += F::ONE;
             }

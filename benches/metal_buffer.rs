@@ -6,6 +6,7 @@ mod bench {
             buffer::{BufferRead, CpuBuffer, MetalBuffer},
             fields::Field256 as F,
         },
+        buffer::BufferOps,
         hash::{Hash, HashEngine, MetalSha2, Sha2},
     };
 

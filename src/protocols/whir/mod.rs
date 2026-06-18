@@ -131,6 +131,7 @@ mod tests {
     use ark_std::rand::thread_rng;
 
     use super::*;
+    use crate::buffer::BufferOps;
     use crate::{
         algebra::{
             buffer::ActiveBuffer,

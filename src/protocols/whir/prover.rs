@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use crate::algebra::buffer::{Buffer, BufferRead, BufferWrite};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
@@ -9,7 +8,7 @@ use tracing::instrument;
 use super::{Config, Witness};
 use crate::{
     algebra::{
-        buffer::{ActiveBuffer, BufferOps},
+        buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead, BufferWrite},
         dot,
         embedding::Embedding,
         eq_weights,

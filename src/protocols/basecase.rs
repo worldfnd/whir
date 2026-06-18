@@ -83,7 +83,7 @@ impl<F: Field> Config<F> {
         // Even more trivial non-zk protocol: send f and r directly.
         if !self.masked {
             // TODO: avoid these big readbacks even though they are transcript-sized
-            prover_state.prover_messages(&*vector.as_slice());
+            prover_state.prover_messages(vector.as_slice());
             prover_state.prover_messages(witness.masks.as_slice());
             let _ = self.commit.open(prover_state, &[witness]);
             let point = self
@@ -91,7 +91,7 @@ impl<F: Field> Config<F> {
                 .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
                 .round_challenges;
             assert!(
-                !vector.at_index(0).unwrap_or(F::one()).is_zero(),
+                !vector.at_index(0).unwrap_or_else(F::one).is_zero(),
                 "Proof failed"
             );
             return Opening {
@@ -115,7 +115,7 @@ impl<F: Field> Config<F> {
         assert!(!mask_rlc.is_zero(), "Proof failed");
         let mut masked_vector = mask.clone();
         vector.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_vector, mask_rlc);
-        prover_state.prover_messages(&*masked_vector.as_slice());
+        prover_state.prover_messages(masked_vector.as_slice());
 
         // Send combined IRS randomness. (r^* in paper)
         let masked_masks = scalar_mul_add_new(
@@ -146,7 +146,7 @@ impl<F: Field> Config<F> {
         // no constraints on l(r) that the verifier can return.
         // This event is cryptographically unlikely as `F` is challenge sized.
         assert!(
-            !masked_vector.at_index(0).unwrap_or(F::one()).is_zero(),
+            !masked_vector.at_index(0).unwrap_or_else(F::one).is_zero(),
             "Proof failed"
         );
 
