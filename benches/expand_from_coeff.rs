@@ -34,7 +34,7 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
             let num_messages = 1 << coset_sz;
             let mut rng = ark_std::rand::thread_rng();
             let coeffs: Vec<ActiveBuffer<Field64>> = (0..num_messages)
-                .map(|_| ActiveBuffer::from_vec(random_vector(&mut rng, message_length)))
+                .map(|_| ActiveBuffer::random(&mut rng, message_length))
                 .collect();
             let engine = NttEngine::<Field64>::new_from_fftfield();
             (engine, coeffs, expansion)
