@@ -31,17 +31,17 @@ use crate::{
     serde::Deserialize,
 )]
 pub struct CpuBuffer<T> {
-    pub(super) data: Vec<T>,
+    data: Vec<T>,
 }
 
 /// Read-only view into a [`CpuBuffer`], backed by a borrowed sub-slice.
 pub struct CpuSlice<'a, F> {
-    pub(super) data: &'a [F],
+    data: &'a [F],
 }
 
 /// Mutable view into a [`CpuBuffer`], backed by a borrowed sub-slice.
 pub struct CpuSliceMut<'a, F> {
-    pub(super) data: &'a mut [F],
+    data: &'a mut [F],
 }
 
 impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
