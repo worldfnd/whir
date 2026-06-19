@@ -511,18 +511,4 @@ pub(crate) mod tests {
     fn test_field256() {
         proptest::<fields::Field256>();
     }
-
-    #[test]
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    fn test_field256_sha2_metal_commit_open() {
-        test::<fields::Field256>(
-            StdRng::seed_from_u64(7),
-            hash::SHA2,
-            hash::SHA2,
-            4,
-            16,
-            2,
-            &[0, 1, 3, 8, 8, 15],
-        );
-    }
 }

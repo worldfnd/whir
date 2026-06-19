@@ -13,8 +13,6 @@
 //! [`DefaultRs`] selects the Reed-Solomon encoder for the active backend.
 
 pub mod cpu;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub mod metal;
 use std::ops::RangeBounds;
 
 use ark_ff::Field;
@@ -35,25 +33,9 @@ use crate::{
 
 pub use cpu::{CpuBuffer, CpuSlice, CpuSliceMut};
 
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub use metal::{MetalBuffer, MetalRs, MetalSlice, MetalSliceMut};
-
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub type ActiveBuffer<T> = MetalBuffer<T>;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub type ActiveSlice<'a, T> = MetalSlice<'a, T>;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub type ActiveSliceMut<'a, T> = MetalSliceMut<'a, T>;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub type DefaultRs<T> = MetalRs<T>;
-
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub type ActiveBuffer<T> = CpuBuffer<T>;
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub type ActiveSlice<'a, T> = CpuSlice<'a, T>;
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub type ActiveSliceMut<'a, T> = CpuSliceMut<'a, T>;
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
 
 /// Owned buffer operations over any element type.

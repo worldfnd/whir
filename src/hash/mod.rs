@@ -14,10 +14,6 @@ use serde::{Deserialize, Serialize};
 use static_assertions::{assert_impl_all, assert_obj_safe};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub use crate::buffer::metal::{
-    metal_profile_snapshot, metal_reset_device_peak, MetalProfileSnapshot, MetalSha2,
-};
 pub use self::{
     blake3_engine::{Blake3, BLAKE3},
     copy_engine::{Copy, COPY},
@@ -36,8 +32,6 @@ pub static ENGINES: LazyLock<Engines<dyn HashEngine>> = LazyLock::new(|| {
     engines.register(Arc::new(Keccak::new()));
     engines.register(Arc::new(Sha3::new()));
     engines.register(Arc::new(Blake3::detect()));
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    engines.register(Arc::new(MetalSha2::new()));
     engines
 });
 
