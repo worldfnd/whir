@@ -13,13 +13,13 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::{ActiveBuffer, BufferOps, BufferRead, BufferWrite},
         dot,
         embedding::{Embedding, Identity},
         eq_weights, lift,
         linear_form::UnivariateEvaluation,
         mixed_dot,
     },
+    buffer::{ActiveBuffer, BufferOps, BufferRead, BufferWrite},
     hash::Hash,
     protocols::{
         geometric_challenge::geometric_challenge,

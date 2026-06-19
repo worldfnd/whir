@@ -12,7 +12,7 @@ use tracing::instrument;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
-    algebra::buffer::ActiveBuffer,
+    buffer::ActiveBuffer,
     buffer::BufferOps,
     engines::EngineId,
     hash::{self, Hash},
@@ -260,26 +260,14 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
     {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if let Some(hints) = metal_merkle_opening_hints(
-            &witness.nodes,
+        let node_indices = merkle_tree::opening_sibling_indices(
             self.merkle_tree.num_leaves,
             self.merkle_tree.layers.len(),
             indices,
-        ) {
-            for hint in hints {
-                prover_state.prover_hint(&hint);
-            }
-            return;
-        }
-
-        self.merkle_tree.open(
-            prover_state,
-            &merkle_tree::Witness {
-                nodes: Vec::from(witness.nodes.as_slice()),
-            },
-            indices,
         );
+        for hint in witness.nodes.gather_at_indices(&node_indices) {
+            prover_state.prover_hint(&hint);
+        }
     }
 
     /// Verifies the commitment at the provided row indices.
@@ -311,49 +299,6 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         self.merkle_tree
             .verify(verifier_state, commitment, indices, &leaf_hashes)
     }
-}
-
-#[cfg(all(feature = "metal", target_os = "macos"))]
-fn metal_merkle_opening_hints(
-    nodes: &ActiveBuffer<Hash>,
-    num_leaves: usize,
-    layers: usize,
-    indices: &[usize],
-) -> Option<Vec<Hash>> {
-    if num_leaves != (1usize << layers) {
-        return None;
-    }
-    assert!(indices.iter().all(|&i| i < num_leaves));
-
-    let mut indices = indices.to_vec();
-    indices.sort_unstable();
-    indices.dedup();
-
-    let mut node_indices = Vec::new();
-    let mut layer_offset = 0usize;
-    let mut layer_len = 1usize << layers;
-    while layer_len > 1 {
-        let mut next_indices = Vec::with_capacity(indices.len());
-        let mut iter = indices.iter().copied().peekable();
-        loop {
-            match (iter.next(), iter.peek()) {
-                (Some(a), Some(&b)) if b == a ^ 1 => {
-                    next_indices.push(a >> 1);
-                    iter.next();
-                }
-                (Some(a), _) => {
-                    node_indices.push(layer_offset + (a ^ 1));
-                    next_indices.push(a >> 1);
-                }
-                (None, _) => break,
-            }
-        }
-        indices = next_indices;
-        layer_offset += layer_len;
-        layer_len /= 2;
-    }
-
-    nodes.read_hash_indices(&node_indices)
 }
 
 impl<T: TypeInfo + Encodable + Send + Sync + Copy> fmt::Display for Config<T> {

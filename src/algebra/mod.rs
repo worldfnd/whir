@@ -1,9 +1,6 @@
-pub mod buffer;
 pub mod embedding;
 pub mod fields;
 pub mod linear_form;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-mod metal_buffer;
 mod multilinear;
 pub mod ntt;
 pub mod sumcheck;

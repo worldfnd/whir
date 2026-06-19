@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::algebra::buffer::{Buffer, BufferRead};
+use crate::buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead};
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -10,10 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    algebra::{
-        buffer::{ActiveBuffer, BufferOps},
-        univariate_evaluate,
-    },
+    algebra::univariate_evaluate,
     protocols::proof_of_work,
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult,
@@ -240,11 +237,11 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
-            buffer::ActiveBuffer,
             dot,
             fields::{self, Field64},
             multilinear_extend, random_vector,
         },
+        buffer::ActiveBuffer,
         transcript::DomainSeparator,
     };
     use ark_std::rand::{

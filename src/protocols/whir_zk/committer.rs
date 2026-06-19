@@ -8,7 +8,7 @@ use tracing::instrument;
 use super::{utils::BlindingPolynomials, Config};
 use crate::buffer::BufferOps;
 use crate::{
-    algebra::buffer::ActiveBuffer,
+    buffer::ActiveBuffer,
     hash::Hash,
     protocols::{irs_commit, whir},
     transcript::{

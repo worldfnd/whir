@@ -7,16 +7,14 @@ use std::{
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use whir::{
-    algebra::{
-        buffer::ActiveBuffer, embedding::Identity, fields::Field256, linear_form::LinearForm,
-    },
+    algebra::{embedding::Identity, fields::Field256, linear_form::LinearForm},
     hash,
     parameters::ProtocolParameters,
     protocols::whir::Config as WhirConfig,
     transcript::{codecs::Empty, DomainSeparator, Proof, ProverState, VerifierState},
 };
 
-use whir::buffer::BufferOps;
+use whir::buffer::{ActiveBuffer, BufferOps};
 
 type F = Field256;
 type M = Identity<F>;

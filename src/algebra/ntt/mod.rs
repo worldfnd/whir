@@ -11,47 +11,49 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use ark_ff::{FftField, Field};
+use ark_ff::Field;
 use static_assertions::assert_obj_safe;
 
-pub use self::cooley_tukey::{NttEngine, RsDomain};
 use self::matrix::MatrixMut;
-// The CPU encoder is only the active backend (and only constructible) on non-Metal builds.
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
-pub use self::cooley_tukey::CpuRs;
 pub use self::{
+    cooley_tukey::NttEngine,
     transpose::transpose,
     wavelet::{inverse_wavelet_transform, wavelet_transform},
 };
 use crate::{
-    algebra::{buffer::ActiveBuffer, fields},
+    algebra::fields,
+    buffer::{ActiveBuffer, BufferOps, DefaultRs},
     type_map::{self, TypeMap},
 };
 
 pub static NTT: LazyLock<TypeMap<NttFamily>> = LazyLock::new(|| {
     let map = TypeMap::new();
-    register_ntt::<fields::Field64>(&map);
-    register_ntt::<fields::Field128>(&map);
-    register_ntt::<fields::Field192>(&map);
-    register_ntt::<fields::Field256>(&map);
-    register_ntt::<fields::Field64_2>(&map);
-    register_ntt::<fields::Field64_3>(&map);
-    register_ntt::<<fields::Field64_2 as Field>::BasePrimeField>(&map);
-    register_ntt::<<fields::Field64_3 as Field>::BasePrimeField>(&map);
+    map.insert(
+        Arc::new(DefaultRs::<fields::Field64>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+    );
+    map.insert(
+        Arc::new(DefaultRs::<fields::Field128>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+    );
+    map.insert(
+        Arc::new(DefaultRs::<fields::Field192>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+    );
+    map.insert(
+        Arc::new(DefaultRs::<fields::Field256>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+    );
+    map.insert(
+        Arc::new(DefaultRs::<fields::Field64_2>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
+    );
+    map.insert(
+        Arc::new(DefaultRs::<fields::Field64_3>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
+    );
+    map.insert(Arc::new(
+        DefaultRs::<<fields::Field64_2 as Field>::BasePrimeField>::new_from_fftfield(),
+    ) as Arc<dyn ReedSolomon<_>>);
+    map.insert(Arc::new(
+        DefaultRs::<<fields::Field64_3 as Field>::BasePrimeField>::new_from_fftfield(),
+    ) as Arc<dyn ReedSolomon<_>>);
     map
 });
-
-fn register_ntt<F: FftField>(map: &TypeMap<NttFamily>) {
-    // Both backends share the same `RsDomain` coset convention and differ only in how
-    // `interleaved_encode` runs: the CPU encoder needs the full NTT engine, while the
-    // Metal encoder only needs the shared domain (the NTT itself runs on the GPU).
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    let encoder =
-        crate::algebra::metal_buffer::MetalRs::new(Arc::new(RsDomain::<F>::from_fftfield()));
-    #[cfg(not(all(feature = "metal", target_os = "macos")))]
-    let encoder = CpuRs::new(Arc::new(NttEngine::<F>::new_from_fftfield()));
-    map.insert(Arc::new(encoder) as Arc<dyn ReedSolomon<F>>);
-}
 
 #[derive(Default)]
 pub struct NttFamily;
@@ -60,11 +62,38 @@ impl type_map::Family for NttFamily {
     type Dyn<F: 'static> = dyn ReedSolomon<F>;
 }
 
-/// Trait for a Reed-Solomon encoder implementation for a given field `F`.
+/// Interleaved Reed-Solomon input buffers.
 ///
-/// The scalar methods (`next_order`, `generator`, `evaluation_points`) describe the
-/// field/domain structure and are backend independent. `interleaved_encode` produces a
-/// codeword over the active backend buffer ([`ActiveBuffer`]).
+/// Chunking buffer-backed vectors into per-message views can require backend work. This descriptor
+/// keeps the encoding input compact and lets each backend derive the chunked messages internally.
+///
+/// Each vector stores `interleaving_depth` consecutive messages of `message_length` field
+/// elements.
+#[derive(Clone, Copy)]
+pub struct Messages<'a, F> {
+    pub(crate) vectors: &'a [&'a ActiveBuffer<F>],
+    pub(crate) message_length: usize,
+    pub(crate) interleaving_depth: usize,
+}
+
+impl<'a, F: Field> Messages<'a, F> {
+    pub fn new(
+        vectors: &'a [&'a ActiveBuffer<F>],
+        message_length: usize,
+        interleaving_depth: usize,
+    ) -> Self {
+        assert!(vectors
+            .iter()
+            .all(|vector| vector.len() == message_length * interleaving_depth));
+        Self {
+            vectors,
+            message_length,
+            interleaving_depth,
+        }
+    }
+}
+
+/// Trait for a Reed-Solomon encoder implementation for a given field `F`.
 pub trait ReedSolomon<F>: Debug + Send + Sync {
     /// Returns the next supported order equal or larger than `size`.
     ///
@@ -91,9 +120,9 @@ pub trait ReedSolomon<F>: Debug + Send + Sync {
 
     /// Compute a masked interleaved Reed-Solomon encoding.
     ///
-    /// `vectors` are `num_vectors` buffers, each holding `interleaving_depth` messages of
+    /// `messages` contains `num_vectors` buffers, each holding `interleaving_depth` messages of
     /// `message_length` elements laid out contiguously. `masks` is a
-    /// `num_vectors * interleaving_depth` × `mask_length` matrix of blinding coefficients.
+    /// `(num_vectors * interleaving_depth) × mask_length` matrix of blinding coefficients.
     /// `codeword_length` must be an NTT-smooth number >= `message_length + mask_length`.
     /// Returns a `codeword_length × (num_vectors * interleaving_depth)` matrix.
     ///
@@ -101,10 +130,8 @@ pub trait ReedSolomon<F>: Debug + Send + Sync {
     /// corresponding with the index of a coefficient list formed by concatenating message and mask.
     fn interleaved_encode(
         &self,
-        vectors: &[&ActiveBuffer<F>],
+        messages: Messages<'_, F>,
         masks: &ActiveBuffer<F>,
-        message_length: usize,
-        interleaving_depth: usize,
         codeword_length: usize,
     ) -> ActiveBuffer<F>;
 }
@@ -127,6 +154,16 @@ pub fn evaluation_points<F: 'static>(
         .evaluation_points(masked_message_length, codeword_length, indices)
 }
 
+pub fn interleaved_rs_encode<F: 'static>(
+    messages: Messages<'_, F>,
+    masks: &ActiveBuffer<F>,
+    codeword_length: usize,
+) -> ActiveBuffer<F> {
+    NTT.get::<F>()
+        .expect("Unsupported NTT field.")
+        .interleaved_encode(messages, masks, codeword_length)
+}
+
 pub fn generator<F: 'static>(codeword_length: usize) -> F {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
@@ -145,17 +182,18 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{random_vector, univariate_evaluate},
+        buffer::BufferOps,
         utils::{chunks_exact_or_empty, zip_strict},
     };
 
-    fn valid_codeword_lengths<F: FftField>(size: usize, count: usize) -> Vec<usize> {
-        let domain = RsDomain::<F>::from_fftfield();
-        iter::successors(domain.next_order(size), |size| domain.next_order(*size + 1))
+    fn valid_codeword_lengths<F: 'static>(size: usize, count: usize) -> Vec<usize> {
+        let ntt = NTT.get::<F>().expect("No NTT engine for field.");
+        iter::successors(ntt.next_order(size), |size| ntt.next_order(*size + 1))
             .take(count)
             .collect()
     }
 
-    fn test<F: FftField>(engine: &NttEngine<F>)
+    fn test<F: Field>(ntt: &dyn ReedSolomon<F>)
     where
         Standard: Distribution<F>,
     {
@@ -188,10 +226,16 @@ mod tests {
                 .map(|_| random_vector(&mut rng, message_length))
                 .collect::<Vec<_>>();
             let masks = random_vector(&mut rng, mask_length * num_messages);
-            let message_refs = messages.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
-            let codeword = engine.interleaved_encode_slices(
-                &message_refs,
-                &masks,
+            let vectors = messages
+                .iter()
+                .map(|message| ActiveBuffer::from_slice(message))
+                .collect::<Vec<_>>();
+            let vector_refs = vectors.iter().collect::<Vec<_>>();
+            let mask_buffer = ActiveBuffer::from_slice(&masks);
+            let rs_messages = Messages::new(&vector_refs, message_length, 1);
+            let codeword = ntt.interleaved_encode(
+                rs_messages,
+                &mask_buffer,
                 codeword_length,
             );
 
@@ -199,7 +243,8 @@ mod tests {
             assert_eq!(codeword.len(), codeword_length * num_messages);
 
             // Output values are polynomial evaluations in the evaluation points.
-            let mut evaluation_points = engine.domain().evaluation_points(message_length + mask_length, codeword_length, &sampled_indices);
+            let mut evaluation_points = ntt.evaluation_points(message_length + mask_length, codeword_length, &sampled_indices);
+            let codeword = codeword.as_slice();
             for (&index, &evaluation_point) in zip_strict(&sampled_indices, &evaluation_points) {
                 let evaluations = &codeword[index * num_messages.. (index + 1) * num_messages];
                 let masks = chunks_exact_or_empty(&masks, mask_length, num_messages);
@@ -223,7 +268,6 @@ mod tests {
 
     #[test]
     fn test_field64_1() {
-        let engine = NttEngine::<fields::Field64>::new_from_fftfield();
-        test::<fields::Field64>(&engine);
+        test::<fields::Field64>(NTT.get().unwrap().as_ref());
     }
 }

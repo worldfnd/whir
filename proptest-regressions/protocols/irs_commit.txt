@@ -1,8 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 33aef60251379abf1e94f5821e0fbd4f69d0b742576f047a92921eeb9438c0f8 # shrinks to seed = 0, config = Config { embedding: Identity { field: FieldInfo { characteristic: [255, 255, 255, 255, 0, 0, 0, 1], extension_degree: 1 } }, num_vectors: 0, vector_size: 1, mask_length: 0, codeword_length: 1, interleaving_depth: 1, matrix_commit: Config { element_type: FieldInfo { characteristic: [255, 255, 255, 255, 0, 0, 0, 1], extension_degree: 1 }, num_cols: 0, leaf_hash_id: 09459020f451874a1b399819d079632cc0f9263b1486c423173c6e15d8e2d61d, merkle_tree: Config { num_leaves: 1, layers: [] } }, johnson_slack: 0.0, in_domain_samples: 0, out_domain_samples: 0, deduplicate_in_domain: false }
-cc 2c8600bcbca6f088a51752815a2baef31e96a3c8ae7e516c28b3a7c407904c3f # shrinks to seed = 0, config = Config { embedding: Basefield { extension: FieldInfo { characteristic: [255, 255, 255, 255, 0, 0, 0, 1], extension_degree: 2 } }, num_vectors: 0, vector_size: 1, mask_length: 0, codeword_length: 1, interleaving_depth: 1, matrix_commit: Config { element_type: FieldInfo { characteristic: [255, 255, 255, 255, 0, 0, 0, 1], extension_degree: 1 }, num_cols: 0, leaf_hash_id: 09459020f451874a1b399819d079632cc0f9263b1486c423173c6e15d8e2d61d, merkle_tree: Config { num_leaves: 1, layers: [] } }, johnson_slack: 0.0, in_domain_samples: 0, out_domain_samples: 0, deduplicate_in_domain: false }

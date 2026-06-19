@@ -20,27 +20,20 @@
 use std::{
     f64::{self, consts::LOG2_10},
     fmt,
-    marker::PhantomData,
     ops::Neg,
 };
 
-use crate::algebra::buffer::{Buffer, BufferRead};
+use crate::buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::{ActiveBuffer, BufferOps},
-        dot,
-        embedding::Embedding,
-        fields::FieldWithSize,
-        lift,
-        linear_form::UnivariateEvaluation,
+        dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
         ntt,
     },
     engines::EngineId,
@@ -108,7 +101,6 @@ where
     pub matrix: ActiveBuffer<F>,
     pub matrix_witness: matrix_commit::Witness,
     pub out_of_domain: Evaluations<G>,
-    source_field: PhantomData<F>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
@@ -323,16 +315,8 @@ impl<M: Embedding> Config<M> {
             prover_state.rng(),
             self.mask_length * self.num_messages(),
         );
-        let matrix = ntt::NTT
-            .get::<M::Source>()
-            .expect("Unsupported NTT field.")
-            .interleaved_encode(
-                vectors,
-                &masks,
-                self.message_length(),
-                self.interleaving_depth,
-                self.codeword_length,
-            );
+        let messages = ntt::Messages::new(vectors, self.message_length(), self.interleaving_depth);
+        let matrix = ntt::interleaved_rs_encode(messages, &masks, self.codeword_length);
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
@@ -360,7 +344,6 @@ impl<M: Embedding> Config<M> {
                 points: oods_points,
                 matrix: oods_matrix,
             },
-            source_field: PhantomData,
         }
     }
 
@@ -523,11 +506,7 @@ impl<G: Field> Commitment<G> {
     }
 }
 
-impl<F, G> Witness<F, G>
-where
-    F: Field,
-    G: Field,
-{
+impl<F: Field, G: Field> Witness<F, G> {
     /// Returns the out-of-domain evaluations.
     pub const fn out_of_domain(&self) -> &Evaluations<G> {
         &self.out_of_domain

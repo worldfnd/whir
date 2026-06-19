@@ -13,11 +13,8 @@ use serde::{Deserialize, Serialize};
 use spongefish::{Decoding, VerificationResult};
 
 use crate::{
-    algebra::{
-        buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead},
-        embedding::Identity,
-        multilinear_extend, scalar_mul_add_new, univariate_evaluate,
-    },
+    algebra::{embedding::Identity, multilinear_extend, scalar_mul_add_new, univariate_evaluate},
+    buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead},
     hash::Hash,
     protocols::{irs_commit, sumcheck},
     transcript::{

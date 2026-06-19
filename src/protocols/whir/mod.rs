@@ -14,10 +14,10 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        buffer::ActiveBuffer,
         embedding::{Embedding, Identity},
         linear_form::LinearForm,
     },
+    buffer::ActiveBuffer,
     hash::Hash,
     protocols::{irs_commit, proof_of_work, sumcheck},
     transcript::{
@@ -77,10 +77,7 @@ impl<F: Field> FinalClaim<F> {
 
 impl<M: Embedding> Config<M> {
     /// Commit to one or more vectors.
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(skip_all, fields(size = vectors.first().unwrap().len()))
-    )]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(size = vectors.first().unwrap().len())))]
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
@@ -131,10 +128,9 @@ mod tests {
     use ark_std::rand::thread_rng;
 
     use super::*;
-    use crate::buffer::BufferOps;
+    use crate::buffer::{ActiveBuffer, BufferOps};
     use crate::{
         algebra::{
-            buffer::ActiveBuffer,
             embedding::Basefield,
             fields::{Field64, Field64_3},
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},

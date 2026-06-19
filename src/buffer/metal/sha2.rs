@@ -1,3 +1,5 @@
+// NOTE: 100% AI GENERATED
+
 use std::{borrow::Cow, sync::OnceLock, time::Instant};
 
 use const_oid::ObjectIdentifier;
@@ -8,7 +10,8 @@ use metal::{
 use sha2::Sha256;
 use zerocopy::IntoBytes;
 
-use super::{metal_profile, Hash, HashEngine, HASH_COUNTER};
+use super::profile;
+use crate::hash::{Hash, HashEngine, HASH_COUNTER};
 
 const USE_SHA256_64_SPECIALIZATION: bool = false;
 const POW_MAX_WINDOW: u32 = 1 << 20;
@@ -301,11 +304,11 @@ struct MetalSha2Runtime {
 }
 
 fn new_shared_buffer(rt: &MetalSha2Runtime, bytes: u64) -> Buffer {
-    metal_profile::record_alloc(bytes);
+    profile::record_alloc(bytes);
     let buffer = rt
         .device
         .new_buffer(bytes, MTLResourceOptions::StorageModeShared);
-    metal_profile::record_device_allocated(rt.device.current_allocated_size());
+    profile::record_device_allocated(rt.device.current_allocated_size());
     buffer
 }
 
@@ -318,9 +321,9 @@ fn new_shared_buffer_with_data(
     let buffer = rt
         .device
         .new_buffer_with_data(data, bytes, MTLResourceOptions::StorageModeShared);
-    metal_profile::record_alloc(bytes);
-    metal_profile::record_upload(bytes, start.elapsed());
-    metal_profile::record_device_allocated(rt.device.current_allocated_size());
+    profile::record_alloc(bytes);
+    profile::record_upload(bytes, start.elapsed());
+    profile::record_device_allocated(rt.device.current_allocated_size());
     buffer
 }
 
@@ -347,7 +350,7 @@ fn wait_for_command_named(command: &metal::CommandBufferRef, label: &str) {
             elapsed.as_secs_f64() * 1_000.0
         );
     }
-    metal_profile::record_command_wait(elapsed);
+    profile::record_command_wait(elapsed);
 }
 
 fn runtime() -> &'static MetalSha2Runtime {
@@ -440,7 +443,7 @@ impl MetalSha2 {
                 )
             };
             let nonce = candidates.iter().copied().min().unwrap_or(u64::MAX);
-            metal_profile::record_readback(candidate_bytes, read_start.elapsed());
+            profile::record_readback(candidate_bytes, read_start.elapsed());
             if nonce != u64::MAX {
                 HASH_COUNTER.add((nonce - start_nonce + 1) as usize);
                 return nonce;
@@ -611,7 +614,7 @@ impl MetalSha2 {
         for (out, bytes) in output.iter_mut().zip(bytes.chunks_exact(32)) {
             out.as_mut_bytes().copy_from_slice(bytes);
         }
-        metal_profile::record_readback(output_bytes, start.elapsed());
+        profile::record_readback(output_bytes, start.elapsed());
     }
 }
 

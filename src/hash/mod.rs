@@ -2,10 +2,6 @@ mod blake3_engine;
 mod copy_engine;
 mod digest_engine;
 mod hash_counter;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub(crate) mod metal_profile;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-mod metal_sha2_engine;
 
 use core::fmt;
 use std::{
@@ -19,12 +15,9 @@ use static_assertions::{assert_impl_all, assert_obj_safe};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-pub use self::metal_profile::{
-    reset_device_peak as metal_reset_device_peak, snapshot as metal_profile_snapshot,
-    MetalProfileSnapshot,
+pub use crate::buffer::metal::{
+    metal_profile_snapshot, metal_reset_device_peak, MetalProfileSnapshot, MetalSha2,
 };
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub use self::metal_sha2_engine::MetalSha2;
 pub use self::{
     blake3_engine::{Blake3, BLAKE3},
     copy_engine::{Copy, COPY},

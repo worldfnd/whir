@@ -10,7 +10,6 @@ use clap::Parser;
 use serde::Serialize;
 use whir::{
     algebra::{
-        buffer::ActiveBuffer,
         embedding::{Basefield, Embedding, Identity},
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
@@ -22,7 +21,7 @@ use whir::{
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
-use whir::buffer::BufferOps;
+use whir::buffer::{ActiveBuffer, BufferOps};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

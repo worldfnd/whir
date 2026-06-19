@@ -1,4 +1,20 @@
+//! Backend-agnostic buffers for protocol data.
+//!
+//! Protocol code uses [`ActiveBuffer`], [`ActiveSlice`], and [`ActiveSliceMut`]
+//! to select the CPU or GPU backend at compile time. Owned buffers manage
+//! storage; slices are zero-copy views into a contiguous range.
+//!
+//! The trait split follows the ownership model. [`BufferOps`] is generic over
+//! any element type and is used for field elements, [`struct@Hash`] digests, and
+//! Merkle nodes. [`BufferRead`] and [`BufferWrite`] provide field operations for
+//! owned buffers and views. [`Buffer`] contains owned-only field operations such
+//! as construction, folding, and zero-padding.
+//!
+//! [`DefaultRs`] selects the Reed-Solomon encoder for the active backend.
+
 pub mod cpu;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod metal;
 use std::ops::RangeBounds;
 
 use ark_ff::Field;
@@ -17,21 +33,56 @@ use crate::{
     protocols::{matrix_commit::Encodable, merkle_tree},
 };
 
+pub use cpu::{CpuBuffer, CpuSlice, CpuSliceMut};
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use metal::{MetalBuffer, MetalRs, MetalSlice, MetalSliceMut};
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub type ActiveBuffer<T> = MetalBuffer<T>;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub type ActiveSlice<'a, T> = MetalSlice<'a, T>;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub type ActiveSliceMut<'a, T> = MetalSliceMut<'a, T>;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub type DefaultRs<T> = MetalRs<T>;
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub type ActiveBuffer<T> = CpuBuffer<T>;
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub type ActiveSlice<'a, T> = CpuSlice<'a, T>;
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub type ActiveSliceMut<'a, T> = CpuSliceMut<'a, T>;
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
+
+/// Owned buffer operations over any element type.
+///
+/// This trait is not field-specific, so it also covers hash buffers and Merkle
+/// node layers. Field arithmetic lives on [`BufferRead`] and [`BufferWrite`].
 pub trait BufferOps<T> {
+    /// Same-backend buffer type used for Merkle tree nodes.
     type Nodes: BufferOps<Hash>;
 
     fn from_vec(source: Vec<T>) -> Self;
     fn from_slice(source: &[T]) -> Self;
     fn as_slice(&self) -> &[T];
+    /// Number of rows when the buffer is laid out with `num_cols` columns.
     fn num_rows(&self, num_cols: usize) -> usize {
         self.len() / num_cols
     }
+    /// Gather full rows `indices[i] * num_cols .. (indices[i] + 1) * num_cols`.
     fn read_rows(&self, num_cols: usize, indices: &[usize]) -> Vec<T>;
     fn at_index(&self, index: usize) -> Option<T>;
+    /// Gather elements at arbitrary indices.
+    fn gather_at_indices(&self, indices: &[usize]) -> Vec<T>
+    where
+        T: Copy;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Hash rows of width `num_cols` and build a Merkle tree.
     fn merklize(
         &self,
         num_cols: usize,
@@ -42,19 +93,12 @@ pub trait BufferOps<T> {
         T: Encodable + Send + Sync;
 }
 
-/// Read-only operations over a contiguous run of field elements — the buffer
-/// analogue of `&[F]`.
+/// Read-only operations over a contiguous run of field elements.
 ///
-/// Implemented by the owned buffers ([`CpuBuffer`]/`MetalBuffer`, as the
-/// full-range case) and by the borrowed read views ([`CpuSlice`]/`MetalSlice`).
-/// Every op here works identically on a whole buffer or any sub-range obtained
-/// via [`Self::slice`]. On `MetalBuffer` a view aliases the parent's GPU
-/// allocation (byte-offset binding), so no data is copied.
+/// Implemented by owned buffers and borrowed views. A view produced by
+/// [`Self::slice`] aliases the original storage.
 pub trait BufferRead<F: Field> {
-    /// A same-backend owned buffer over another field, produced by the
-    /// mixed-field ops (e.g. `mixed_dot` against a target-field buffer). For an
-    /// owned buffer this is the buffer itself over `T`; views report the owning
-    /// buffer type.
+    /// Same-backend owned buffer over another field.
     type TargetBuffer<T: Field>: Buffer<T>;
 
     /// Read-only view type produced by slicing this buffer/view.
@@ -110,19 +154,18 @@ pub trait BufferRead<F: Field> {
 
     /// Borrow `self[range]` as a read-only view (analogous to `&v[range]`).
     fn slice(&self, range: impl RangeBounds<usize>) -> Self::Slice<'_>;
+
+    /// Copy this view into a new owned buffer.
+    fn copy_to_owned(&self) -> Self::TargetBuffer<F>;
 }
 
-/// In-place, length-preserving operations over a contiguous run of field
-/// elements — the buffer analogue of `&mut [F]`.
+/// In-place operations over a contiguous run of field elements.
 ///
-/// Implemented by the owned buffers (full-range) and the borrowed mutable views
-/// ([`CpuSliceMut`]/`MetalSliceMut`). A sub-range obtained via [`Self::slice_mut`]
-/// is the same view type as the whole buffer, so the ops compose just like
-/// slicing a `Vec`.
+/// Implemented by owned buffers and mutable views. A view produced by
+/// [`Self::slice_mut`] aliases the original storage.
 ///
-/// Constructors (`zeros`, `random`, …) and length-changing operations (`fold`,
-/// `zero_pad`) live on [`Buffer`], the owned-buffer trait, because a borrowed
-/// view cannot construct or resize its backing storage.
+/// Construction and length-changing operations live on [`Buffer`], because
+/// borrowed views cannot construct or resize their backing storage.
 pub trait BufferWrite<F: Field>: BufferRead<F> {
     /// Mutable view type produced by slicing this buffer/view.
     type SliceMut<'a>: BufferWrite<F>
@@ -148,13 +191,10 @@ pub trait BufferWrite<F: Field>: BufferRead<F> {
     fn split_at_mut(&mut self, mid: usize) -> (Self::SliceMut<'_>, Self::SliceMut<'_>);
 }
 
-/// Owned field-buffer operations — the `Vec` half of the field API.
+/// Owned field-buffer operations.
 ///
-/// `BufferOps<T>` stays generic over any element type, so hashes and digests can
-/// use it. `BufferRead`/`BufferWrite` are the slice-like field ops implemented
-/// by owners and views. This trait is only for owned field buffers: operations
-/// here construct storage or change its length, so borrowed views cannot
-/// implement them.
+/// This trait contains operations that construct storage or change its length,
+/// so it is implemented only by owned buffers.
 pub trait Buffer<F: Field>: BufferOps<F> + BufferWrite<F> + Clone {
     fn zeros(length: usize) -> Self;
 

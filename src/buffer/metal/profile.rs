@@ -1,3 +1,5 @@
+// NOTE: 100% AI GENERATED
+
 use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -112,7 +114,10 @@ pub fn record_device_allocated(bytes: u64) {
 /// Reset the peak gauge to the current value (e.g. at the start of a
 /// measured phase).
 pub fn reset_device_peak() {
-    DEVICE_PEAK_BYTES.store(DEVICE_CURRENT_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+    DEVICE_PEAK_BYTES.store(
+        DEVICE_CURRENT_BYTES.load(Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
 }
 
 pub fn record_upload(bytes: u64, duration: Duration) {

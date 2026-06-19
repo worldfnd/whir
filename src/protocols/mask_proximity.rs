@@ -45,11 +45,8 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, R
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    algebra::{
-        buffer::{ActiveBuffer, Buffer, BufferOps},
-        embedding::Identity,
-        scalar_mul_add_new, univariate_evaluate,
-    },
+    algebra::{embedding::Identity, univariate_evaluate},
+    buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead},
     hash::Hash,
     protocols::irs_commit::{
         Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness,
@@ -184,7 +181,7 @@ impl<F: Field> Config<F> {
         // Step 2: compute and send combined polynomials + IRS randomness
         let irs_masks_per_vector =
             self.c_zk_commit.mask_length * self.c_zk_commit.interleaving_depth;
-        let irs_masks = witness.mask_witness.masks.as_slice();
+        let irs_masks = &witness.mask_witness.masks;
         assert_eq!(irs_masks.len(), 2 * self.num_masks * irs_masks_per_vector);
         for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()
@@ -193,17 +190,19 @@ impl<F: Field> Config<F> {
             .enumerate()
         {
             // ξ*_i = s_i + γ · ξ_i
-            // TODO: port to buffer backend
-            let combined_msg = scalar_mul_add_new(fresh_msg.as_slice(), gamma, orig_msg.as_slice());
-            prover_state.prover_messages(&combined_msg);
+            let mut combined_msg = fresh_msg.copy_to_owned();
+            orig_msg.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_msg, gamma);
+            prover_state.prover_messages(combined_msg.as_slice());
 
             // r*_i = r'_i + γ · r_i
             if irs_masks_per_vector > 0 {
-                let orig_r = &irs_masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
-                let fresh_r = &irs_masks[(self.num_masks + i) * irs_masks_per_vector
-                    ..(self.num_masks + i + 1) * irs_masks_per_vector];
-                let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
-                prover_state.prover_messages(&combined_r);
+                let base = i * irs_masks_per_vector;
+                let fresh_base = (self.num_masks + i) * irs_masks_per_vector;
+                let orig_r = irs_masks.slice(base..base + irs_masks_per_vector);
+                let fresh_r = irs_masks.slice(fresh_base..fresh_base + irs_masks_per_vector);
+                let mut combined_r = fresh_r.copy_to_owned();
+                orig_r.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_r, gamma);
+                prover_state.prover_messages(combined_r.as_slice());
             }
         }
 
@@ -477,7 +476,7 @@ mod tests {
         let gamma: F = prover_state.verifier_message();
         let irs_masks_per_vector =
             config.c_zk_commit.mask_length * config.c_zk_commit.interleaving_depth;
-        let irs_masks = witness.mask_witness.masks.as_slice();
+        let irs_masks = &witness.mask_witness.masks;
 
         for (i, (orig_msg, fresh_msg)) in original_refs
             .iter()
@@ -485,19 +484,23 @@ mod tests {
             .zip(witness.fresh_msgs.iter())
             .enumerate()
         {
-            let mut combined_msg =
-                scalar_mul_add_new(fresh_msg.as_slice(), gamma, orig_msg.as_slice());
+            let mut combined_msg = fresh_msg.copy_to_owned();
+            orig_msg.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_msg, gamma);
             if i == 0 {
-                combined_msg[0] += F::ONE;
+                let mut tampered = combined_msg.as_slice().to_vec();
+                tampered[0] += F::ONE;
+                combined_msg = ActiveBuffer::from_slice(&tampered);
             }
-            prover_state.prover_messages(&combined_msg);
+            prover_state.prover_messages(combined_msg.as_slice());
 
             if irs_masks_per_vector > 0 {
-                let orig_r = &irs_masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
-                let fresh_r = &irs_masks[(config.num_masks + i) * irs_masks_per_vector
-                    ..(config.num_masks + i + 1) * irs_masks_per_vector];
-                let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
-                prover_state.prover_messages(&combined_r);
+                let base = i * irs_masks_per_vector;
+                let fresh_base = (config.num_masks + i) * irs_masks_per_vector;
+                let orig_r = irs_masks.slice(base..base + irs_masks_per_vector);
+                let fresh_r = irs_masks.slice(fresh_base..fresh_base + irs_masks_per_vector);
+                let mut combined_r = fresh_r.copy_to_owned();
+                orig_r.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_r, gamma);
+                prover_state.prover_messages(combined_r.as_slice());
             }
         }
 

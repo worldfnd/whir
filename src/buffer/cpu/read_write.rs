@@ -65,6 +65,10 @@ macro_rules! impl_cpu_read {
                     data: &data[start..end],
                 }
             }
+
+            fn copy_to_owned(&self) -> CpuBuffer<F> {
+                CpuBuffer::from_slice(&*self.data)
+            }
         }
     };
 }

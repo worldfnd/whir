@@ -149,33 +149,10 @@ impl Config {
         assert_eq!(witness.nodes.len(), self.num_nodes());
         assert!(indices.iter().all(|&i| i < self.num_leaves));
 
-        // Abstract execution of verify algorithm writing required hashes.
-        let mut indices = indices.to_vec();
-        indices.sort_unstable();
-        indices.dedup();
-        let (mut layer, mut remaining) = witness.nodes.split_at(1 << self.layers.len());
-        while layer.len() > 1 {
-            let mut next_indices = Vec::with_capacity(indices.len());
-            let mut iter = indices.iter().copied().peekable();
-            loop {
-                match (iter.next(), iter.peek()) {
-                    (Some(a), Some(&b)) if b == a ^ 1 => {
-                        // Neighboring indices, merging branches.
-                        next_indices.push(a >> 1);
-                        iter.next(); // Skip the next index.
-                    }
-                    (Some(a), _) => {
-                        // Single index, pushing the neighbor hash.
-                        prover_state.prover_hint(&layer[a ^ 1]);
-                        next_indices.push(a >> 1);
-                    }
-                    (None, _) => break,
-                }
-            }
-            indices = next_indices;
-            let (next_layer, next_remaining) = remaining.split_at(layer.len() / 2);
-            layer = next_layer;
-            remaining = next_remaining;
+        let node_indices =
+            opening_sibling_indices(self.num_leaves, self.layers.len(), indices);
+        for &i in &node_indices {
+            prover_state.prover_hint(&witness.nodes[i]);
         }
     }
 
@@ -365,4 +342,42 @@ pub(crate) mod tests {
         assert_eq!(layers_for_size(7), 3);
         assert_eq!(layers_for_size(8), 3);
     }
+}
+
+/// Flat node indices of sibling hashes required to open at `indices`.
+pub fn opening_sibling_indices(
+    num_leaves: usize,
+    layers: usize,
+    indices: &[usize],
+) -> Vec<usize> {
+    debug_assert!(indices.iter().all(|&i| i < num_leaves));
+
+    let mut indices = indices.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+
+    let mut node_indices = Vec::new();
+    let mut layer_offset = 0usize;
+    let mut layer_len = 1usize << layers;
+    while layer_len > 1 {
+        let mut next_indices = Vec::with_capacity(indices.len());
+        let mut iter = indices.iter().copied().peekable();
+        loop {
+            match (iter.next(), iter.peek()) {
+                (Some(a), Some(&b)) if b == a ^ 1 => {
+                    next_indices.push(a >> 1);
+                    iter.next();
+                }
+                (Some(a), _) => {
+                    node_indices.push(layer_offset + (a ^ 1));
+                    next_indices.push(a >> 1);
+                }
+                (None, _) => break,
+            }
+        }
+        indices = next_indices;
+        layer_offset += layer_len;
+        layer_len /= 2;
+    }
+    node_indices
 }
