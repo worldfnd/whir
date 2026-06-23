@@ -7,9 +7,7 @@
 
 use crate::goldilocks::{reduce128, Goldilocks, R2};
 
-/// A 192-bit unsigned accumulator for sums of Goldilocks products.
-///
-/// It covers any realistic vector length before the final reduction.
+/// A 192-bit unsigned accumulator (`lo + hi·2^128`) for sums of Goldilocks products.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct GoldilocksAcc {
     lo: u128,
@@ -23,7 +21,7 @@ impl GoldilocksAcc {
         Self { lo: 0, hi: 0 }
     }
 
-    /// self += a · b, with no reduction.
+    /// `self += a · b`, with no reduction.
     #[inline(always)]
     pub fn mul_add(&mut self, a: Goldilocks, b: Goldilocks) {
         let product = u128::from(a.0) * u128::from(b.0);
@@ -40,10 +38,10 @@ impl GoldilocksAcc {
         self.hi += u64::from(carry);
     }
 
-    /// Reduce the 192-bit sum to a field element
+    /// Reduce the 192-bit sum to a field element — the single reduction.
     ///
-    /// lo + hi·2^128 ≡ reduce128(lo) + reduce128(hi · R2) (mod p), since
-    /// 2^128 ≡ R2 (mod p) and hi · R2 < 2^128 fits a u128.
+    /// `lo + hi·2^128 ≡ reduce128(lo) + reduce128(hi · R2) (mod p)`, since
+    /// `2^128 ≡ R2 (mod p)` and `hi · R2 < 2^128` fits a `u128`.
     #[inline]
     #[must_use]
     pub fn reduce(self) -> Goldilocks {

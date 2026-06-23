@@ -5,9 +5,6 @@ edition = "2021"
 description = "WHIR-owned loose-representation Goldilocks field. Phase 1: scalar, proven in isolation."
 license = "MIT OR Apache-2.0"
 
-# Standalone: this crate is its OWN workspace root, deliberately NOT a member of the
-# WHIR workspace. Phase 1 is built and fuzzed in isolation; WHIR is untouched.
-# (Dependencies are added per subphase, as needed — 1A needs none at runtime.)
 [workspace]
 
 [dev-dependencies]
@@ -16,9 +13,8 @@ proptest = "1"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-# Goldilocks arithmetic is full of intentional wrapping/casts and hot inlines.
 cast_possible_truncation = "allow"
-cast_lossless = "allow"            # branchless carry folds need `bool as u64` in const fn
+cast_lossless = "allow"
 unreadable_literal = "allow"
 must_use_candidate = "allow"
 inline_always = "allow"
