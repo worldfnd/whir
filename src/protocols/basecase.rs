@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use spongefish::{Decoding, VerificationResult};
 
 use crate::{
-    algebra::{embedding::Identity, multilinear_extend, scalar_mul_add_new, univariate_evaluate},
+    algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
     buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead},
     hash::Hash,
     protocols::{irs_commit, sumcheck},
@@ -101,7 +101,7 @@ impl<F: Field> Config<F> {
         let mask = ActiveBuffer::random(prover_state.rng(), vector.len());
 
         // Commit to the masking vector.
-        let mask_witness = self.commit.commit(prover_state, &[&mask]);
+        let mut mask_witness = self.commit.commit(prover_state, &[&mask]);
 
         // Compute and send linear form of mask (μ' in paper).
         let mask_sum = mask.dot(&covector);
@@ -110,17 +110,16 @@ impl<F: Field> Config<F> {
         // RLC the mask with the vector
         let mask_rlc = prover_state.verifier_message::<F>();
         assert!(!mask_rlc.is_zero(), "Proof failed");
-        let mut masked_vector = mask.clone();
+        let mut masked_vector = mask;
         vector.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_vector, mask_rlc);
         prover_state.prover_messages(masked_vector.as_slice());
 
         // Send combined IRS randomness. (r^* in paper)
-        let masked_masks = scalar_mul_add_new(
-            mask_witness.masks.as_slice(),
-            mask_rlc,
-            witness.masks.as_slice(),
-        );
-        prover_state.prover_messages(&masked_masks);
+        let mut masked_masks = std::mem::take(&mut mask_witness.masks);
+        witness
+            .masks
+            .mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_masks, mask_rlc);
+        prover_state.prover_messages(masked_masks.as_slice());
 
         // Open the commitment and mask simultaneously.
         let _ = self.commit.open(prover_state, &[&mask_witness, witness]);
