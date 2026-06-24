@@ -101,7 +101,7 @@ impl<F: Field> Config<F> {
         let mask = ActiveBuffer::random(prover_state.rng(), vector.len());
 
         // Commit to the masking vector.
-        let mut mask_witness = self.commit.commit(prover_state, &[&mask]);
+        let mask_witness = self.commit.commit(prover_state, &[&mask]);
 
         // Compute and send linear form of mask (μ' in paper).
         let mask_sum = mask.dot(&covector);
@@ -115,7 +115,7 @@ impl<F: Field> Config<F> {
         prover_state.prover_messages(masked_vector.as_slice());
 
         // Send combined IRS randomness. (r^* in paper)
-        let mut masked_masks = std::mem::take(&mut mask_witness.masks);
+        let mut masked_masks = mask_witness.masks.clone();
         witness
             .masks
             .mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_masks, mask_rlc);
