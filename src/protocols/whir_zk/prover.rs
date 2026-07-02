@@ -209,13 +209,13 @@ impl<F: Field> Config<F> {
     /// inner witness-side WHIR prover.
     #[allow(clippy::too_many_lines)]
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn prove<'a, H, R>(
+    pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
         vectors: &[&ActiveBuffer<F>],
         witness: Witness<F>,
         linear_forms: Vec<Box<dyn LinearForm<F>>>,
-        evaluations: Cow<'a, [F]>,
+        evaluations: Cow<'_, [F]>,
     ) -> FinalClaim<F>
     where
         Standard: Distribution<F>,
