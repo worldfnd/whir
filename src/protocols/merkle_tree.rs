@@ -81,6 +81,15 @@ impl Config {
     /// Build the full node array from leaf hashes, without touching the transcript.
     ///
     /// The returned vector holds the leaf layer first and the root last (at `num_nodes() - 1`).
+    ///
+    /// # Caller obligation
+    ///
+    /// This does **not** commit to anything: the caller must send the root
+    /// (`nodes[num_nodes() - 1]`) to the transcript before using the tree as
+    /// a commitment. In production this is funneled through
+    /// [`matrix_commit::Config::commit`](crate::protocols::matrix_commit::Config::commit),
+    /// which sends the root returned by `merklize`. A tree whose root was
+    /// never sent is not bound by the proof.
     pub fn build_nodes(&self, leaves: Vec<Hash>) -> Vec<Hash> {
         assert_eq!(
             leaves.len(),
