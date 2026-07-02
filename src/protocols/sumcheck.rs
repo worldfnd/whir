@@ -2,7 +2,6 @@
 
 use std::fmt;
 
-use crate::buffer::{ActiveBuffer, Buffer, BufferOps};
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -11,6 +10,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::univariate_evaluate,
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     protocols::proof_of_work,
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult,
@@ -234,6 +234,15 @@ fn eval_01<F: Field>(coefficients: &[F]) -> F {
 
 #[cfg(test)]
 mod tests {
+    use ark_std::rand::{
+        distributions::{Distribution, Standard},
+        rngs::StdRng,
+        SeedableRng,
+    };
+    use proptest::{prelude::Just, prop_oneof, proptest, strategy::Strategy};
+    #[cfg(feature = "tracing")]
+    use tracing::instrument;
+
     use super::*;
     use crate::{
         algebra::{
@@ -244,14 +253,6 @@ mod tests {
         buffer::ActiveBuffer,
         transcript::DomainSeparator,
     };
-    use ark_std::rand::{
-        distributions::{Distribution, Standard},
-        rngs::StdRng,
-        SeedableRng,
-    };
-    use proptest::{prelude::Just, prop_oneof, proptest, strategy::Strategy};
-    #[cfg(feature = "tracing")]
-    use tracing::instrument;
 
     impl<F: Field + 'static> Config<F>
     where

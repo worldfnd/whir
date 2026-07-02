@@ -12,8 +12,7 @@ use tracing::instrument;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
-    buffer::ActiveBuffer,
-    buffer::BufferOps,
+    buffer::{ActiveBuffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::merkle_tree,

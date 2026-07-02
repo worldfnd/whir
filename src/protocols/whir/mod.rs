@@ -128,7 +128,6 @@ mod tests {
     use ark_std::rand::thread_rng;
 
     use super::*;
-    use crate::buffer::{ActiveBuffer, BufferOps};
     use crate::{
         algebra::{
             embedding::Basefield,
@@ -136,6 +135,7 @@ mod tests {
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
+        buffer::{ActiveBuffer, BufferOps},
         hash,
         parameters::ProtocolParameters,
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},

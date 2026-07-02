@@ -6,9 +6,8 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use tracing::instrument;
 
 use super::{utils::BlindingPolynomials, Config};
-use crate::buffer::BufferOps;
 use crate::{
-    buffer::ActiveBuffer,
+    buffer::{ActiveBuffer, BufferOps},
     hash::Hash,
     protocols::{irs_commit, whir},
     transcript::{

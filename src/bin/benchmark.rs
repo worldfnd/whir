@@ -15,13 +15,12 @@ use whir::{
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
     },
     bits::Bits,
+    buffer::{ActiveBuffer, BufferOps},
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
-
-use whir::buffer::{ActiveBuffer, BufferOps};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

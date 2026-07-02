@@ -23,7 +23,6 @@ use std::{
     ops::Neg,
 };
 
-use crate::buffer::{ActiveBuffer, Buffer, BufferOps};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use ordered_float::OrderedFloat;
@@ -36,6 +35,7 @@ use crate::{
         dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
         ntt,
     },
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     engines::EngineId,
     hash::Hash,
     protocols::{challenge_indices::challenge_indices, matrix_commit},

@@ -16,13 +16,11 @@ use super::{
     utils::{lcm, sqrt_factor},
     Messages, ReedSolomon,
 };
-
-use crate::buffer::{ActiveBuffer, BufferOps};
-
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
     algebra::ntt::utils::divisors,
+    buffer::{ActiveBuffer, BufferOps},
     utils::{chunks_exact_or_empty, zip_strict},
 };
 

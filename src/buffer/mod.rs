@@ -19,6 +19,7 @@ use ark_std::rand::{
     distributions::{Distribution, Standard},
     CryptoRng, RngCore,
 };
+pub use cpu::CpuBuffer;
 
 use crate::{
     algebra::{
@@ -29,8 +30,6 @@ use crate::{
     hash::Hash,
     protocols::{matrix_commit::Encodable, merkle_tree},
 };
-
-pub use cpu::CpuBuffer;
 
 pub type ActiveBuffer<T> = CpuBuffer<T>;
 pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
