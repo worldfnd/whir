@@ -158,8 +158,7 @@ impl Config {
         assert_eq!(witness.nodes.len(), self.num_nodes());
         assert!(indices.iter().all(|&i| i < self.num_leaves));
 
-        let node_indices =
-            opening_sibling_indices(self.num_leaves, self.layers.len(), indices);
+        let node_indices = opening_sibling_indices(self.num_leaves, self.layers.len(), indices);
         for &i in &node_indices {
             prover_state.prover_hint(&witness.nodes[i]);
         }
@@ -284,11 +283,7 @@ fn parallel_hash(engine: &dyn HashEngine, size: usize, input: &[u8], output: &mu
 }
 
 /// Flat node indices of sibling hashes required to open at `indices`.
-pub fn opening_sibling_indices(
-    num_leaves: usize,
-    layers: usize,
-    indices: &[usize],
-) -> Vec<usize> {
+pub fn opening_sibling_indices(num_leaves: usize, layers: usize, indices: &[usize]) -> Vec<usize> {
     debug_assert!(indices.iter().all(|&i| i < num_leaves));
 
     let mut indices = indices.to_vec();
