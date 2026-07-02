@@ -114,11 +114,9 @@ where
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
-pub struct BufferWitness {
+pub struct Witness {
     pub nodes: ActiveBuffer<Hash>,
 }
-
-pub type Witness = BufferWitness;
 
 pub type Commitment = merkle_tree::Commitment;
 
@@ -224,13 +222,12 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
-        ActiveBuffer<T>: BufferOps<T, Nodes = ActiveBuffer<Hash>>,
     {
         assert_eq!(matrix.len(), self.num_rows() * self.num_cols);
 
         let (nodes, root) = matrix.merklize(self.num_cols, self.leaf_hash_id, &self.merkle_tree);
         prover_state.prover_message(&root);
-        BufferWitness { nodes }
+        Witness { nodes }
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]

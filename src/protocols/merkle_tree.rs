@@ -274,6 +274,44 @@ fn parallel_hash(engine: &dyn HashEngine, size: usize, input: &[u8], output: &mu
     }
 }
 
+/// Flat node indices of sibling hashes required to open at `indices`.
+pub fn opening_sibling_indices(
+    num_leaves: usize,
+    layers: usize,
+    indices: &[usize],
+) -> Vec<usize> {
+    debug_assert!(indices.iter().all(|&i| i < num_leaves));
+
+    let mut indices = indices.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+
+    let mut node_indices = Vec::new();
+    let mut layer_offset = 0usize;
+    let mut layer_len = 1usize << layers;
+    while layer_len > 1 {
+        let mut next_indices = Vec::with_capacity(indices.len());
+        let mut iter = indices.iter().copied().peekable();
+        loop {
+            match (iter.next(), iter.peek()) {
+                (Some(a), Some(&b)) if b == a ^ 1 => {
+                    next_indices.push(a >> 1);
+                    iter.next();
+                }
+                (Some(a), _) => {
+                    node_indices.push(layer_offset + (a ^ 1));
+                    next_indices.push(a >> 1);
+                }
+                (None, _) => break,
+            }
+        }
+        indices = next_indices;
+        layer_offset += layer_len;
+        layer_len /= 2;
+    }
+    node_indices
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use proptest::{collection::vec, prelude::Strategy};
@@ -342,42 +380,4 @@ pub(crate) mod tests {
         assert_eq!(layers_for_size(7), 3);
         assert_eq!(layers_for_size(8), 3);
     }
-}
-
-/// Flat node indices of sibling hashes required to open at `indices`.
-pub fn opening_sibling_indices(
-    num_leaves: usize,
-    layers: usize,
-    indices: &[usize],
-) -> Vec<usize> {
-    debug_assert!(indices.iter().all(|&i| i < num_leaves));
-
-    let mut indices = indices.to_vec();
-    indices.sort_unstable();
-    indices.dedup();
-
-    let mut node_indices = Vec::new();
-    let mut layer_offset = 0usize;
-    let mut layer_len = 1usize << layers;
-    while layer_len > 1 {
-        let mut next_indices = Vec::with_capacity(indices.len());
-        let mut iter = indices.iter().copied().peekable();
-        loop {
-            match (iter.next(), iter.peek()) {
-                (Some(a), Some(&b)) if b == a ^ 1 => {
-                    next_indices.push(a >> 1);
-                    iter.next();
-                }
-                (Some(a), _) => {
-                    node_indices.push(layer_offset + (a ^ 1));
-                    next_indices.push(a >> 1);
-                }
-                (None, _) => break,
-            }
-        }
-        indices = next_indices;
-        layer_offset += layer_len;
-        layer_len /= 2;
-    }
-    node_indices
 }

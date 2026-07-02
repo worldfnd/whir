@@ -14,7 +14,7 @@ use spongefish::{Decoding, VerificationResult};
 
 use crate::{
     algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
-    buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead},
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
     protocols::{irs_commit, sumcheck},
     transcript::{
@@ -88,12 +88,12 @@ impl<F: Field> Config<F> {
                 .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
                 .round_challenges;
             assert!(
-                !vector.at_index(0).unwrap_or_else(F::one).is_zero(),
+                !vector.as_slice().first().expect("Proof failed").is_zero(),
                 "Proof failed"
             );
             return Opening {
                 evaluation_points: point,
-                linear_form_evaluation: covector.at_index(0).expect("Proof failed"),
+                linear_form_evaluation: *covector.as_slice().first().expect("Proof failed"),
             };
         }
 
@@ -142,13 +142,17 @@ impl<F: Field> Config<F> {
         // no constraints on l(r) that the verifier can return.
         // This event is cryptographically unlikely as `F` is challenge sized.
         assert!(
-            !masked_vector.at_index(0).unwrap_or_else(F::one).is_zero(),
+            !masked_vector
+                .as_slice()
+                .first()
+                .expect("Proof failed")
+                .is_zero(),
             "Proof failed"
         );
 
         Opening {
             evaluation_points: point,
-            linear_form_evaluation: covector.at_index(0).expect("Proof failed"),
+            linear_form_evaluation: *covector.as_slice().first().expect("Proof failed"),
         }
     }
 
@@ -305,7 +309,7 @@ mod tests {
             sum,
         );
         assert_eq!(
-            covector.mixed_extend(&Identity::<F>::new(), &prover_result.evaluation_points),
+            multilinear_extend(covector.as_slice(), &prover_result.evaluation_points),
             prover_result.linear_form_evaluation
         );
         let proof = prover_state.proof();

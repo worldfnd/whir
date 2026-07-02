@@ -10,10 +10,9 @@ use rayon::prelude::*;
 use tracing::instrument;
 
 use super::{Config, Witness};
-use crate::buffer::BufferOps;
+use crate::buffer::{ActiveBuffer, BufferOps};
 use crate::{
     algebra::{
-        buffer::ActiveBuffer,
         embedding::Identity,
         linear_form::{Covector, Evaluate, LinearForm},
         mixed_dot, scalar_mul_add,

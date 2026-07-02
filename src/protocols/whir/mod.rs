@@ -77,7 +77,7 @@ impl<F: Field> FinalClaim<F> {
 
 impl<M: Embedding> Config<M> {
     /// Commit to one or more vectors.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(size = vectors.first().unwrap().len())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(size = vectors.first().map_or(0, |v| crate::buffer::BufferOps::len(*v)))))]
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,

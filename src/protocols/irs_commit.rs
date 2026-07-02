@@ -23,7 +23,7 @@ use std::{
     ops::Neg,
 };
 
-use crate::buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead};
+use crate::buffer::{ActiveBuffer, Buffer, BufferOps};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use ordered_float::OrderedFloat;

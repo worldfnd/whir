@@ -19,7 +19,7 @@ use crate::{
         linear_form::UnivariateEvaluation,
         mixed_dot,
     },
-    buffer::{ActiveBuffer, BufferOps, BufferRead, BufferWrite},
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
     protocols::{
         geometric_challenge::geometric_challenge,
@@ -246,14 +246,14 @@ impl<M: Embedding> Config<M> {
             covector.accumulate_univariate_evaluations(&all_evaluators, constraint_rlc_coeffs);
         } else {
             // ZK: OOD contributes to full [f; r; s], in-domain only to [f; r].
+            // The in-domain evaluators have size `masked`, so they only
+            // accumulate into that prefix of the covector.
             let ood_evaluators = univariate_evaluators(&ood_points, covector.len());
             covector.accumulate_univariate_evaluations(&ood_evaluators, ood_rlc_coeffs);
 
             let masked = self.source.masked_message_length();
             let in_domain_evaluators = univariate_evaluators(&eval_points, masked);
-            covector
-                .slice_mut(..masked)
-                .accumulate_univariate_evaluations(&in_domain_evaluators, in_domain_rlc_coeffs);
+            covector.accumulate_univariate_evaluations(&in_domain_evaluators, in_domain_rlc_coeffs);
         }
 
         Witness {

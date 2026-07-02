@@ -251,11 +251,11 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
-            buffer::ActiveBuffer,
             fields::Field64,
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
+        buffer::{ActiveBuffer, BufferOps},
         hash,
         parameters::ProtocolParameters,
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},

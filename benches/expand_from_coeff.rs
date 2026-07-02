@@ -1,9 +1,10 @@
 use divan::{black_box, AllocProfiler, Bencher};
-use whir::algebra::{
-    buffer::{ActiveBuffer, BufferOps},
-    fields::Field64,
-    ntt::{Messages, NttEngine, ReedSolomon},
-    random_vector,
+use whir::{
+    algebra::{
+        fields::Field64,
+        ntt::{Messages, NttEngine, ReedSolomon},
+    },
+    buffer::{ActiveBuffer, Buffer, BufferOps},
 };
 
 #[global_allocator]

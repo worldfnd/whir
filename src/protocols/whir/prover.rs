@@ -8,7 +8,7 @@ use tracing::instrument;
 use super::{Config, Witness};
 use crate::{
     algebra::{dot, embedding::Embedding, eq_weights, linear_form::LinearForm, tensor_product},
-    buffer::{ActiveBuffer, Buffer, BufferOps, BufferRead, BufferWrite},
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
     transcript::{
