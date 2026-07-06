@@ -48,7 +48,7 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
         }
     }
 
-    fn as_slice(&self) -> &[T] {
+    fn to_slice(&self) -> &[T] {
         &self.data
     }
 
@@ -228,7 +228,7 @@ mod tests {
         let mut buffer = CpuBuffer::from_vec(values.clone());
         buffer.scalar_mul(weight);
         let expected: Vec<F> = values.iter().map(|&v| v * weight).collect();
-        assert_eq!(buffer.as_slice(), expected.as_slice());
+        assert_eq!(buffer.to_slice(), expected.as_slice());
     }
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
             geometric_accumulate(&mut reference[..size], scalars.clone(), &points);
 
             assert_eq!(
-                buffer.as_slice(),
+                buffer.to_slice(),
                 reference.as_slice(),
                 "accumulate mismatch for evaluator size {size}"
             );

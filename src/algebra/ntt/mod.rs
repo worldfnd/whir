@@ -244,7 +244,7 @@ mod tests {
 
             // Output values are polynomial evaluations in the evaluation points.
             let mut evaluation_points = ntt.evaluation_points(message_length + mask_length, codeword_length, &sampled_indices);
-            let codeword = codeword.as_slice();
+            let codeword = codeword.to_slice();
             for (&index, &evaluation_point) in zip_strict(&sampled_indices, &evaluation_points) {
                 let evaluations = &codeword[index * num_messages.. (index + 1) * num_messages];
                 let masks = chunks_exact_or_empty(&masks, mask_length, num_messages);

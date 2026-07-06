@@ -262,7 +262,7 @@ impl<M: Embedding> Config<M> {
 
         // Directly send the vector to the verifier.
         assert_eq!(vector.len(), self.final_sumcheck.initial_size);
-        for coeff in vector.as_slice() {
+        for coeff in vector.to_slice() {
             prover_state.prover_message(coeff);
         }
 

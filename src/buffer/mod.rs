@@ -3,7 +3,7 @@
 //! Protocol code uses the [`ActiveBuffer`] alias to select the backend at
 //! compile time. Buffers are owned, backend-managed storage: on the CPU
 //! backend they wrap a `Vec`, on an accelerator backend they would own
-//! device memory and only [`BufferOps::as_slice`] (and the other readback
+//! device memory and only [`BufferOps::to_slice`] (and the other readback
 //! methods) force a host copy.
 //!
 //! The trait split follows the element type. [`BufferOps`] is generic over
@@ -45,7 +45,7 @@ pub trait BufferOps<T: Copy> {
     fn from_vec(source: Vec<T>) -> Self;
     fn from_slice(source: &[T]) -> Self;
     /// Read back the buffer contents as a host slice.
-    fn as_slice(&self) -> &[T];
+    fn to_slice(&self) -> &[T];
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
         self.len() == 0

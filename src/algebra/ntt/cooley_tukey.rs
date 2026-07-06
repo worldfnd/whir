@@ -418,7 +418,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         let vectors = messages
             .vectors
             .iter()
-            .map(|v| v.as_slice())
+            .map(|v| v.to_slice())
             .collect::<Vec<_>>();
         let messages = vectors
             .iter()
@@ -462,7 +462,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         let mut result = Vec::with_capacity(num_messages * codeword_length);
         for (message, mask) in zip_strict(
             messages,
-            chunks_exact_or_empty(masks.as_slice(), mask_length, num_messages),
+            chunks_exact_or_empty(masks.to_slice(), mask_length, num_messages),
         ) {
             // FFT[a 0 0 0] = [a a a a], so just replicate input in coset dimension.
             for _ in 0..num_cosets {

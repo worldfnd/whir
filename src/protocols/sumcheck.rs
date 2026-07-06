@@ -316,11 +316,11 @@ mod tests {
         if config.final_size() == 1 {
             assert_eq!(
                 multilinear_extend(&initial_vector, &point),
-                vector.as_slice()[0]
+                vector.to_slice()[0]
             );
             assert_eq!(
                 multilinear_extend(&initial_covector, &point),
-                covector.as_slice()[0]
+                covector.to_slice()[0]
             );
         } else {
             // TODO: Check correct folding.
@@ -333,7 +333,7 @@ mod tests {
                 .sum();
         assert_eq!(
             sum,
-            expected_mask_sum + mask_rlc * dot(vector.as_slice(), covector.as_slice())
+            expected_mask_sum + mask_rlc * dot(vector.to_slice(), covector.to_slice())
         );
 
         let proof = prover_state.proof();

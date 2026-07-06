@@ -495,7 +495,7 @@ mod tests {
         }
         // Lift ι parallel masks (total length source.mask_length × ι) and fold
         // chunks of length source.mask_length down to a single chunk.
-        let raw = lift(config.source.embedding(), source_witness.masks.as_slice());
+        let raw = lift(config.source.embedding(), source_witness.masks.to_slice());
         let mut mask = fold_chunks(&raw, config.source.mask_length, folding_randomness);
         // Append fresh padding s of length message_mask_length - source.mask_length.
         mask.extend(random_vector::<F>(
@@ -611,7 +611,7 @@ mod tests {
         } else {
             ActiveBuffer::from_vec(
                 folded_message
-                    .as_slice()
+                    .to_slice()
                     .iter()
                     .chain(mask_msg.iter())
                     .copied()

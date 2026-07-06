@@ -80,20 +80,20 @@ impl<F: Field> Config<F> {
         // Even more trivial non-zk protocol: send f and r directly.
         if !self.masked {
             // TODO: avoid these big readbacks even though they are transcript-sized
-            prover_state.prover_messages(vector.as_slice());
-            prover_state.prover_messages(witness.masks.as_slice());
+            prover_state.prover_messages(vector.to_slice());
+            prover_state.prover_messages(witness.masks.to_slice());
             let _ = self.commit.open(prover_state, &[witness]);
             let point = self
                 .sumcheck
                 .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
                 .round_challenges;
             assert!(
-                !vector.as_slice().first().expect("Proof failed").is_zero(),
+                !vector.to_slice().first().expect("Proof failed").is_zero(),
                 "Proof failed"
             );
             return Opening {
                 evaluation_points: point,
-                linear_form_evaluation: *covector.as_slice().first().expect("Proof failed"),
+                linear_form_evaluation: *covector.to_slice().first().expect("Proof failed"),
             };
         }
 
@@ -112,14 +112,14 @@ impl<F: Field> Config<F> {
         assert!(!mask_rlc.is_zero(), "Proof failed");
         let mut masked_vector = mask;
         vector.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_vector, mask_rlc);
-        prover_state.prover_messages(masked_vector.as_slice());
+        prover_state.prover_messages(masked_vector.to_slice());
 
         // Send combined IRS randomness. (r^* in paper)
         let mut masked_masks = mask_witness.masks.clone();
         witness
             .masks
             .mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_masks, mask_rlc);
-        prover_state.prover_messages(masked_masks.as_slice());
+        prover_state.prover_messages(masked_masks.to_slice());
 
         // Open the commitment and mask simultaneously.
         let _ = self.commit.open(prover_state, &[&mask_witness, witness]);
@@ -143,7 +143,7 @@ impl<F: Field> Config<F> {
         // This event is cryptographically unlikely as `F` is challenge sized.
         assert!(
             !masked_vector
-                .as_slice()
+                .to_slice()
                 .first()
                 .expect("Proof failed")
                 .is_zero(),
@@ -152,7 +152,7 @@ impl<F: Field> Config<F> {
 
         Opening {
             evaluation_points: point,
-            linear_form_evaluation: *covector.as_slice().first().expect("Proof failed"),
+            linear_form_evaluation: *covector.to_slice().first().expect("Proof failed"),
         }
     }
 
@@ -309,7 +309,7 @@ mod tests {
             sum,
         );
         assert_eq!(
-            multilinear_extend(covector.as_slice(), &prover_result.evaluation_points),
+            multilinear_extend(covector.to_slice(), &prover_result.evaluation_points),
             prover_result.linear_form_evaluation
         );
         let proof = prover_state.proof();

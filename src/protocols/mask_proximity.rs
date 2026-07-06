@@ -192,7 +192,7 @@ impl<F: Field> Config<F> {
             // ξ*_i = s_i + γ · ξ_i
             let mut combined_msg = fresh_msg.clone();
             orig_msg.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_msg, gamma);
-            prover_state.prover_messages(combined_msg.as_slice());
+            prover_state.prover_messages(combined_msg.to_slice());
 
             // r*_i = r'_i + γ · r_i
             // Combined on the host: the result is transcript data anyway, and
@@ -200,7 +200,7 @@ impl<F: Field> Config<F> {
             if irs_masks_per_vector > 0 {
                 let base = i * irs_masks_per_vector;
                 let fresh_base = (self.num_masks + i) * irs_masks_per_vector;
-                let masks = irs_masks.as_slice();
+                let masks = irs_masks.to_slice();
                 let mut combined_r = masks[fresh_base..fresh_base + irs_masks_per_vector].to_vec();
                 scalar_mul_add(
                     &mut combined_r,
@@ -492,16 +492,16 @@ mod tests {
             let mut combined_msg = fresh_msg.clone();
             orig_msg.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_msg, gamma);
             if i == 0 {
-                let mut tampered = combined_msg.as_slice().to_vec();
+                let mut tampered = combined_msg.to_slice().to_vec();
                 tampered[0] += F::ONE;
                 combined_msg = ActiveBuffer::from_slice(&tampered);
             }
-            prover_state.prover_messages(combined_msg.as_slice());
+            prover_state.prover_messages(combined_msg.to_slice());
 
             if irs_masks_per_vector > 0 {
                 let base = i * irs_masks_per_vector;
                 let fresh_base = (config.num_masks + i) * irs_masks_per_vector;
-                let masks = irs_masks.as_slice();
+                let masks = irs_masks.to_slice();
                 let mut combined_r = masks[fresh_base..fresh_base + irs_masks_per_vector].to_vec();
                 scalar_mul_add(
                     &mut combined_r,
