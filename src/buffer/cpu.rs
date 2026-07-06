@@ -123,6 +123,14 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
         crate::algebra::sumcheck::fold(&mut self.data, weight);
     }
 
+    fn fold_pair_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F) {
+        crate::algebra::sumcheck::fold_and_compute_polynomial(
+            &mut self.data,
+            &mut other.data,
+            weight,
+        )
+    }
+
     fn scalar_mul(&mut self, weight: F) {
         crate::algebra::scalar_mul(&mut self.data, weight);
     }
