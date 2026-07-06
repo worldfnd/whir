@@ -112,10 +112,7 @@ where
     pub merkle_tree: merkle_tree::Config,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
-pub struct Witness {
-    pub nodes: ActiveBuffer<Hash>,
-}
+pub type Witness = merkle_tree::Witness;
 
 pub type Commitment = merkle_tree::Commitment;
 
@@ -226,7 +223,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
 
         let (nodes, root) = matrix.merklize(self.num_cols, self.leaf_hash_id, &self.merkle_tree);
         prover_state.prover_message(&root);
-        Witness { nodes }
+        merkle_tree::Witness::new(nodes)
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
@@ -256,14 +253,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
     {
-        let node_indices = merkle_tree::opening_sibling_indices(
-            self.merkle_tree.num_leaves,
-            self.merkle_tree.layers.len(),
-            indices,
-        );
-        for hint in witness.nodes.gather_at_indices(&node_indices) {
-            prover_state.prover_hint(&hint);
-        }
+        self.merkle_tree.open(prover_state, witness, indices);
     }
 
     /// Verifies the commitment at the provided row indices.
