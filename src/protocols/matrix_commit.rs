@@ -304,7 +304,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> fmt::Display for Config<T> {
 }
 
 #[cfg(not(feature = "parallel"))]
-fn hash_rows<T: Encodable + Send + Sync>(
+pub fn hash_rows<T: Encodable + Send + Sync>(
     engine: &dyn hash::HashEngine,
     matrix: &[T],
     out: &mut [Hash],
