@@ -66,7 +66,7 @@ impl<F: Field> Config<F> {
         let num_blinding_variables = self.num_blinding_variables();
         let num_witness_variables = self.num_witness_variables();
         for &poly in polynomials {
-            let poly = poly.as_slice();
+            let poly = poly.to_slice();
             let blinding = BlindingPolynomials::sample(
                 prover_state.rng(),
                 num_blinding_variables,
