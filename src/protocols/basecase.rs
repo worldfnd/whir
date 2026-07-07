@@ -1,3 +1,6 @@
+// NOTE ON BUFFER ABSTRACTION: since verifier is not succinct, full vector readbacks are forced
+// consider alternative approaches here
+
 //! Base Case Linear Opening Protocol
 //!
 //! It support honest verifier zero-knowledge (HVZK), but is not succinct.
@@ -10,10 +13,8 @@ use serde::{Deserialize, Serialize};
 use spongefish::{Decoding, VerificationResult};
 
 use crate::{
-    algebra::{
-        dot, embedding::Identity, multilinear_extend, random_vector, scalar_mul_add_new,
-        univariate_evaluate,
-    },
+    algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
     protocols::{irs_commit, sumcheck},
     transcript::{
@@ -49,9 +50,9 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        mut vector: Vec<F>,
+        mut vector: ActiveBuffer<F>,
         witness: &irs_commit::Witness<F>,
-        mut covector: Vec<F>,
+        mut covector: ActiveBuffer<F>,
         mut sum: F,
     ) -> Opening<F>
     where
@@ -68,7 +69,7 @@ impl<F: Field> Config<F> {
         assert_eq!(self.commit.num_vectors, 1);
         assert_eq!(self.commit.vector_size, self.sumcheck.initial_size);
         assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size));
-        debug_assert_eq!(dot(&vector, &covector), sum);
+        debug_assert_eq!(vector.dot(&covector), sum);
         if self.size() == 0 {
             return Opening {
                 evaluation_points: Vec::new(),
@@ -78,39 +79,47 @@ impl<F: Field> Config<F> {
 
         // Even more trivial non-zk protocol: send f and r directly.
         if !self.masked {
-            prover_state.prover_messages(&vector);
-            prover_state.prover_messages(&witness.masks);
+            // TODO: avoid these big readbacks even though they are transcript-sized
+            prover_state.prover_messages(vector.to_slice());
+            prover_state.prover_messages(witness.masks.to_slice());
             let _ = self.commit.open(prover_state, &[witness]);
             let point = self
                 .sumcheck
                 .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
                 .round_challenges;
-            assert!(!vector[0].is_zero(), "Proof failed");
+            assert!(
+                !vector.to_slice().first().expect("Proof failed").is_zero(),
+                "Proof failed"
+            );
             return Opening {
                 evaluation_points: point,
-                linear_form_evaluation: covector[0],
+                linear_form_evaluation: *covector.to_slice().first().expect("Proof failed"),
             };
         }
 
         // Create masking vector.
-        let mask = random_vector(prover_state.rng(), vector.len());
+        let mask = ActiveBuffer::random(prover_state.rng(), vector.len());
 
         // Commit to the masking vector.
         let mask_witness = self.commit.commit(prover_state, &[&mask]);
 
         // Compute and send linear form of mask (μ' in paper).
-        let mask_sum = dot(&mask, &covector);
+        let mask_sum = mask.dot(&covector);
         prover_state.prover_message(&mask_sum);
 
         // RLC the mask with the vector
         let mask_rlc = prover_state.verifier_message::<F>();
         assert!(!mask_rlc.is_zero(), "Proof failed");
-        let mut masked_vector = scalar_mul_add_new(&mask, mask_rlc, &vector);
-        prover_state.prover_messages(&masked_vector);
+        let mut masked_vector = mask;
+        vector.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_vector, mask_rlc);
+        prover_state.prover_messages(masked_vector.to_slice());
 
         // Send combined IRS randomness. (r^* in paper)
-        let masked_masks = scalar_mul_add_new(&mask_witness.masks, mask_rlc, &witness.masks);
-        prover_state.prover_messages(&masked_masks);
+        let mut masked_masks = mask_witness.masks.clone();
+        witness
+            .masks
+            .mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_masks, mask_rlc);
+        prover_state.prover_messages(masked_masks.to_slice());
 
         // Open the commitment and mask simultaneously.
         let _ = self.commit.open(prover_state, &[&mask_witness, witness]);
@@ -132,11 +141,18 @@ impl<F: Field> Config<F> {
         // Basically the sumcheck equation has degenerated to 0 * l(r) = 0, which provides
         // no constraints on l(r) that the verifier can return.
         // This event is cryptographically unlikely as `F` is challenge sized.
-        assert!(!masked_vector[0].is_zero(), "Proof failed");
+        assert!(
+            !masked_vector
+                .to_slice()
+                .first()
+                .expect("Proof failed")
+                .is_zero(),
+            "Proof failed"
+        );
 
         Opening {
             evaluation_points: point,
-            linear_form_evaluation: covector[0],
+            linear_form_evaluation: *covector.to_slice().first().expect("Proof failed"),
         }
     }
 
@@ -278,9 +294,9 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let vector = random_vector(&mut rng, config.size());
-        let covector = random_vector(&mut rng, config.size());
-        let sum = dot(&vector, &covector);
+        let vector = ActiveBuffer::random(&mut rng, config.size());
+        let covector = ActiveBuffer::random(&mut rng, config.size());
+        let sum = vector.dot(&covector);
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
@@ -293,7 +309,7 @@ mod tests {
             sum,
         );
         assert_eq!(
-            multilinear_extend(&covector, &prover_result.evaluation_points),
+            multilinear_extend(covector.to_slice(), &prover_result.evaluation_points),
             prover_result.linear_form_evaluation
         );
         let proof = prover_state.proof();

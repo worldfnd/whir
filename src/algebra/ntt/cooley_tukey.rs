@@ -14,12 +14,13 @@ use {crate::utils::workload_size, rayon::prelude::*, std::cmp::max};
 use super::{
     transpose,
     utils::{lcm, sqrt_factor},
-    ReedSolomon,
+    Messages, ReedSolomon,
 };
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
     algebra::ntt::utils::divisors,
+    buffer::{ActiveBuffer, BufferOps},
     utils::{chunks_exact_or_empty, zip_strict},
 };
 
@@ -402,17 +403,33 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self, messages, masks), fields(
-        num_messages = messages.len(),
-        message_len = messages.first().map(|c| c.len()),
+        num_messages = messages.vectors.len() * messages.interleaving_depth,
+        message_len = messages.message_length,
         codeword_length = codeword_length,
-        mask_len = masks.len().checked_div(messages.len())
+        mask_len = masks.len().checked_div(messages.vectors.len() * messages.interleaving_depth)
 
     )))]
-    fn interleaved_encode(&self, messages: &[&[F]], masks: &[F], codeword_length: usize) -> Vec<F> {
+    fn interleaved_encode(
+        &self,
+        messages: Messages<'_, F>,
+        masks: &ActiveBuffer<F>,
+        codeword_length: usize,
+    ) -> ActiveBuffer<F> {
+        let vectors = messages
+            .vectors
+            .iter()
+            .map(|v| v.to_slice())
+            .collect::<Vec<_>>();
+        let messages = vectors
+            .iter()
+            .flat_map(|v| {
+                chunks_exact_or_empty(v, messages.message_length, messages.interleaving_depth)
+            })
+            .collect::<Vec<_>>();
         assert!(self.order.is_multiple_of(codeword_length));
         if messages.is_empty() {
             assert!(masks.is_empty());
-            return Vec::new();
+            return ActiveBuffer::from_vec(Vec::new());
         }
         let num_messages = messages.len();
         let message_len = messages[0].len();
@@ -445,7 +462,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         let mut result = Vec::with_capacity(num_messages * codeword_length);
         for (message, mask) in zip_strict(
             messages,
-            chunks_exact_or_empty(masks, mask_length, num_messages),
+            chunks_exact_or_empty(masks.to_slice(), mask_length, num_messages),
         ) {
             // FFT[a 0 0 0] = [a a a a], so just replicate input in coset dimension.
             for _ in 0..num_cosets {
@@ -473,7 +490,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
 
         // Transpose to row-major order with vectors stacked horizontally.
         transpose(&mut result, num_messages, codeword_length);
-        result
+        ActiveBuffer::from_vec(result)
     }
 }
 

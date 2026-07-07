@@ -22,34 +22,35 @@ pub use self::{
 };
 use crate::{
     algebra::fields,
+    buffer::{ActiveBuffer, BufferOps, DefaultRs},
     type_map::{self, TypeMap},
 };
 
 pub static NTT: LazyLock<TypeMap<NttFamily>> = LazyLock::new(|| {
     let map = TypeMap::new();
     map.insert(
-        Arc::new(NttEngine::<fields::Field64>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field64>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field128>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field128>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field192>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field192>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field256>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field256>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field64_2>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
+        Arc::new(DefaultRs::<fields::Field64_2>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field64_3>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
+        Arc::new(DefaultRs::<fields::Field64_3>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
     );
     map.insert(Arc::new(
-        NttEngine::<<fields::Field64_2 as Field>::BasePrimeField>::new_from_fftfield(),
+        DefaultRs::<<fields::Field64_2 as Field>::BasePrimeField>::new_from_fftfield(),
     ) as Arc<dyn ReedSolomon<_>>);
     map.insert(Arc::new(
-        NttEngine::<<fields::Field64_3 as Field>::BasePrimeField>::new_from_fftfield(),
+        DefaultRs::<<fields::Field64_3 as Field>::BasePrimeField>::new_from_fftfield(),
     ) as Arc<dyn ReedSolomon<_>>);
     map
 });
@@ -59,6 +60,37 @@ pub struct NttFamily;
 
 impl type_map::Family for NttFamily {
     type Dyn<F: 'static> = dyn ReedSolomon<F>;
+}
+
+/// Interleaved Reed-Solomon input buffers.
+///
+/// Chunking buffer-backed vectors into per-message views can require backend work. This descriptor
+/// keeps the encoding input compact and lets each backend derive the chunked messages internally.
+///
+/// Each vector stores `interleaving_depth` consecutive messages of `message_length` field
+/// elements.
+#[derive(Clone, Copy)]
+pub struct Messages<'a, F> {
+    pub(crate) vectors: &'a [&'a ActiveBuffer<F>],
+    pub(crate) message_length: usize,
+    pub(crate) interleaving_depth: usize,
+}
+
+impl<'a, F: Field> Messages<'a, F> {
+    pub fn new(
+        vectors: &'a [&'a ActiveBuffer<F>],
+        message_length: usize,
+        interleaving_depth: usize,
+    ) -> Self {
+        assert!(vectors
+            .iter()
+            .all(|vector| vector.len() == message_length * interleaving_depth));
+        Self {
+            vectors,
+            message_length,
+            interleaving_depth,
+        }
+    }
 }
 
 /// Trait for a Reed-Solomon encoder implementation for a given field `F`.
@@ -88,15 +120,20 @@ pub trait ReedSolomon<F>: Debug + Send + Sync {
 
     /// Compute a masked interleaved Reed-Solomon encoding.
     ///
-    /// `messages` are `num_messages` slices of `message_length` elements.
-    /// `masks` is a `num_messages` × `mask_length` matrix of blinding coefficients.
+    /// `messages` contains `num_vectors` buffers, each holding `interleaving_depth` messages of
+    /// `message_length` elements laid out contiguously. `masks` is a
+    /// `(num_vectors * interleaving_depth) × mask_length` matrix of blinding coefficients.
     /// `codeword_length` must be an NTT-smooth number >= `message_length + mask_length`.
-    /// returns an `codeword_length × num_messages` matrix.
+    /// Returns a `codeword_length × (num_vectors * interleaving_depth)` matrix.
     ///
     /// Each output value is the univariate polynomial evaluation in the evaluation point
     /// corresponding with the index of a coefficient list formed by concatenating message and mask.
-    ///
-    fn interleaved_encode(&self, messages: &[&[F]], masks: &[F], codeword_length: usize) -> Vec<F>;
+    fn interleaved_encode(
+        &self,
+        messages: Messages<'_, F>,
+        masks: &ActiveBuffer<F>,
+        codeword_length: usize,
+    ) -> ActiveBuffer<F>;
 }
 
 assert_obj_safe!(ReedSolomon<crate::algebra::fields::Field256>);
@@ -118,10 +155,10 @@ pub fn evaluation_points<F: 'static>(
 }
 
 pub fn interleaved_rs_encode<F: 'static>(
-    messages: &[&[F]],
-    masks: &[F],
+    messages: Messages<'_, F>,
+    masks: &ActiveBuffer<F>,
     codeword_length: usize,
-) -> Vec<F> {
+) -> ActiveBuffer<F> {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
         .interleaved_encode(messages, masks, codeword_length)
@@ -145,6 +182,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{random_vector, univariate_evaluate},
+        buffer::BufferOps,
         utils::{chunks_exact_or_empty, zip_strict},
     };
 
@@ -188,10 +226,16 @@ mod tests {
                 .map(|_| random_vector(&mut rng, message_length))
                 .collect::<Vec<_>>();
             let masks = random_vector(&mut rng, mask_length * num_messages);
-            let message_refs = messages.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+            let vectors = messages
+                .iter()
+                .map(|message| ActiveBuffer::from_slice(message))
+                .collect::<Vec<_>>();
+            let vector_refs = vectors.iter().collect::<Vec<_>>();
+            let mask_buffer = ActiveBuffer::from_slice(&masks);
+            let rs_messages = Messages::new(&vector_refs, message_length, 1);
             let codeword = ntt.interleaved_encode(
-                &message_refs,
-                &masks,
+                rs_messages,
+                &mask_buffer,
                 codeword_length,
             );
 
@@ -200,6 +244,7 @@ mod tests {
 
             // Output values are polynomial evaluations in the evaluation points.
             let mut evaluation_points = ntt.evaluation_points(message_length + mask_length, codeword_length, &sampled_indices);
+            let codeword = codeword.to_slice();
             for (&index, &evaluation_point) in zip_strict(&sampled_indices, &evaluation_points) {
                 let evaluations = &codeword[index * num_messages.. (index + 1) * num_messages];
                 let masks = chunks_exact_or_empty(&masks, mask_length, num_messages);

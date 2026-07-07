@@ -33,8 +33,9 @@ use tracing::instrument;
 use crate::{
     algebra::{
         dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
-        mixed_univariate_evaluate, ntt, random_vector,
+        ntt,
     },
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     engines::EngineId,
     hash::Hash,
     protocols::{challenge_indices::challenge_indices, matrix_commit},
@@ -43,7 +44,7 @@ use crate::{
         VerifierMessage, VerifierState,
     },
     type_info::Typed,
-    utils::{chunks_exact_or_empty, zip_strict},
+    utils::zip_strict,
     verify,
 };
 
@@ -96,8 +97,8 @@ pub struct Witness<F: Field, G = F>
 where
     G: Field,
 {
-    pub masks: Vec<F>,
-    pub matrix: Vec<F>,
+    pub masks: ActiveBuffer<F>,
+    pub matrix: ActiveBuffer<F>,
     pub matrix_witness: matrix_commit::Witness,
     pub out_of_domain: Evaluations<G>,
 }
@@ -292,7 +293,7 @@ impl<M: Embedding> Config<M> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&[M::Source]],
+        vectors: &[&ActiveBuffer<M::Source>],
     ) -> Witness<M::Source, M::Target>
     where
         Standard: Distribution<M::Source>,
@@ -310,15 +311,12 @@ impl<M: Embedding> Config<M> {
         assert_eq!(vectors.len(), self.num_vectors);
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
-        // Generate random mask
-        let masks = random_vector(prover_state.rng(), self.mask_length * self.num_messages());
-
-        // Interleaved RS Encode the vectors
-        let messages = vectors
-            .iter()
-            .flat_map(|v| chunks_exact_or_empty(v, self.message_length(), self.interleaving_depth))
-            .collect::<Vec<_>>();
-        let matrix = ntt::interleaved_rs_encode(&messages, &masks, self.codeword_length);
+        let masks = ActiveBuffer::<M::Source>::random(
+            prover_state.rng(),
+            self.mask_length * self.num_messages(),
+        );
+        let messages = ntt::Messages::new(vectors, self.message_length(), self.interleaving_depth);
+        let matrix = ntt::interleaved_rs_encode(messages, &masks, self.codeword_length);
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
@@ -332,7 +330,7 @@ impl<M: Embedding> Config<M> {
         let mut oods_matrix = Vec::with_capacity(self.out_domain_samples * self.num_vectors);
         for &point in &oods_points {
             for &vector in vectors {
-                let value = mixed_univariate_evaluate(&*self.embedding, vector, point);
+                let value = vector.mixed_univariate_evaluate(&*self.embedding, point);
                 prover_state.prover_message(&value);
                 oods_matrix.push(value);
             }
@@ -409,18 +407,15 @@ impl<M: Embedding> Config<M> {
         // and collect them in the evaluation matrix.
         let stride = witnesses.len() * self.num_cols();
         let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
-        let mut submatrix = Vec::with_capacity(indices.len() * self.num_cols());
         let mut matrix_col_offset = 0;
         for witness in witnesses {
-            submatrix.clear();
-            for (point_index, &code_index) in indices.iter().enumerate() {
-                let row = &witness.matrix
-                    [code_index * self.num_cols()..(code_index + 1) * self.num_cols()];
-                submatrix.extend_from_slice(row);
-
-                let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
-                matrix_row[matrix_col_offset..matrix_col_offset + self.num_cols()]
-                    .copy_from_slice(row);
+            let submatrix = witness.matrix.read_rows(self.num_cols(), &indices);
+            if self.num_cols() != 0 {
+                for (point_index, row) in submatrix.chunks_exact(self.num_cols()).enumerate() {
+                    let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
+                    matrix_row[matrix_col_offset..matrix_col_offset + self.num_cols()]
+                        .copy_from_slice(row);
+                }
             }
             prover_state.prover_hint_ark(&submatrix);
             self.matrix_commit
@@ -642,7 +637,7 @@ pub(crate) mod tests {
     use crate::{
         algebra::{
             embedding::{Basefield, Compose, Frobenius, Identity},
-            fields,
+            fields, mixed_univariate_evaluate,
             ntt::NTT,
             random_vector, univariate_evaluate,
         },
@@ -728,10 +723,12 @@ pub(crate) mod tests {
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit(
-            &mut prover_state,
-            &vectors.iter().map(|p| p.as_slice()).collect::<Vec<_>>(),
-        );
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| ActiveBuffer::from_slice(v))
+            .collect::<Vec<_>>();
+        let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
+        let witness = config.commit(&mut prover_state, &vector_refs);
         assert_eq!(
             witness.out_of_domain().points.len(),
             config.out_domain_samples
