@@ -1,3 +1,5 @@
+// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
+
 use std::borrow::Cow;
 
 use ark_ff::Field;
@@ -14,6 +16,7 @@ use crate::{
         linear_form::{Covector, Evaluate, LinearForm},
         mixed_dot, scalar_mul_add,
     },
+    buffer::{ActiveBuffer, BufferOps},
     hash::Hash,
     protocols::{
         whir::FinalClaim,
@@ -206,13 +209,13 @@ impl<F: Field> Config<F> {
     /// inner witness-side WHIR prover.
     #[allow(clippy::too_many_lines)]
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn prove<'a, H, R>(
+    pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: Vec<Cow<'a, [F]>>,
+        vectors: &[&ActiveBuffer<F>],
         witness: Witness<F>,
         linear_forms: Vec<Box<dyn LinearForm<F>>>,
-        evaluations: Cow<'a, [F]>,
+        evaluations: Cow<'_, [F]>,
     ) -> FinalClaim<F>
     where
         Standard: Distribution<F>,
@@ -266,7 +269,6 @@ impl<F: Field> Config<F> {
         let num_witness_variables = self.num_witness_variables();
         let num_blinding_variables = self.num_blinding_variables();
         let num_witness_variables_plus_1 = num_witness_variables + 1;
-        drop(vectors); // TODO: These are never touched?
 
         // Compute w_folded evaluations of all blinding vectors before rho for binding.
         let (w_folded_weights, m_evals, w_folded_blinding_evals) = {
@@ -397,10 +399,16 @@ impl<F: Field> Config<F> {
         let result = {
             #[cfg(feature = "tracing")]
             let _span = tracing::info_span!("inner_blinded_prove").entered();
+            let f_hat_buffers = f_hat_vectors
+                .iter()
+                .map(|v| ActiveBuffer::from_slice(v))
+                .collect::<Vec<_>>();
+            let f_hat_refs = f_hat_buffers.iter().collect::<Vec<_>>();
+            let f_hat_witness_refs = f_hat_witnesses.iter().collect::<Vec<_>>();
             self.blinded_commitment.prove(
                 prover_state,
-                f_hat_vectors.into_iter().map(Cow::Owned).collect(),
-                f_hat_witnesses.into_iter().map(Cow::Owned).collect(),
+                &f_hat_refs,
+                f_hat_witness_refs,
                 linear_forms,
                 Cow::Owned(modified_evaluations),
             )
@@ -424,10 +432,15 @@ impl<F: Field> Config<F> {
             .concat();
             // Blinding sub-proof result is discarded: the blinding WHIR's
             // evaluation point is not needed by the outer protocol.
+            let blinding_buffers = blinding_vectors
+                .iter()
+                .map(|v| ActiveBuffer::from_slice(v))
+                .collect::<Vec<_>>();
+            let blinding_refs = blinding_buffers.iter().collect::<Vec<_>>();
             let _ = self.blinding_commitment.prove(
                 prover_state,
-                blinding_vectors.into_iter().map(Cow::Owned).collect(),
-                vec![Cow::Owned(blinding_witness)],
+                &blinding_refs,
+                vec![&blinding_witness],
                 blinding_forms,
                 Cow::Owned(all_blinding_claims),
             );

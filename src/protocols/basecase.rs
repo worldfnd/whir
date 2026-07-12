@@ -6,10 +6,8 @@ use serde::{Deserialize, Serialize};
 use spongefish::{Decoding, VerificationResult};
 
 use crate::{
-    algebra::{
-        dot, embedding::Identity, multilinear_extend, random_vector, scalar_mul_add_new,
-        univariate_evaluate,
-    },
+    algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
     protocols::{irs_commit, proof_of_work, sumcheck},
     transcript::{
@@ -99,9 +97,9 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        mut vector: Vec<F>,
+        mut vector: ActiveBuffer<F>,
         witness: &irs_commit::Witness<F>,
-        mut covector: Vec<F>,
+        mut covector: ActiveBuffer<F>,
         mut sum: F,
     ) -> Opening<F>
     where
@@ -118,7 +116,7 @@ impl<F: Field> Config<F> {
         assert_eq!(self.commit.num_vectors(), 1);
         assert_eq!(self.commit.vector_size(), self.sumcheck.initial_size());
         assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size()));
-        debug_assert_eq!(dot(&vector, &covector), sum);
+        debug_assert_eq!(vector.dot(&covector), sum);
         if self.size() == 0 {
             return Opening {
                 evaluation_points: Vec::new(),
@@ -141,11 +139,14 @@ impl<F: Field> Config<F> {
 
         // Negligible event over a challenge-sized field; without it the verifier
         // cannot derive `l(r) = sum / vector_mle(r)`.
-        assert!(!vector[0].is_zero(), "Proof failed");
+        assert!(
+            !vector.to_slice().first().expect("Proof failed").is_zero(),
+            "Proof failed"
+        );
 
         Opening {
             evaluation_points: point,
-            linear_form_evaluation: covector[0],
+            linear_form_evaluation: *covector.to_slice().first().expect("Proof failed"),
         }
     }
 
@@ -155,9 +156,9 @@ impl<F: Field> Config<F> {
     fn maybe_blind_prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vector: &mut Vec<F>,
+        vector: &mut ActiveBuffer<F>,
         witness: &irs_commit::Witness<F>,
-        covector: &[F],
+        covector: &ActiveBuffer<F>,
         sum: &mut F,
     ) -> Option<irs_commit::Witness<F>>
     where
@@ -171,14 +172,14 @@ impl<F: Field> Config<F> {
     {
         match self.mode {
             BasecaseMode::Standard => {
-                prover_state.prover_messages(vector);
-                prover_state.prover_messages(&witness.masks);
+                prover_state.prover_messages(vector.to_slice());
+                prover_state.prover_messages(witness.masks.to_slice());
                 None
             }
             BasecaseMode::ZeroKnowledge => {
-                let blinding_vector = random_vector(prover_state.rng(), vector.len());
+                let mut blinding_vector = ActiveBuffer::random(prover_state.rng(), vector.len());
                 let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
-                let blinding_inner_product = dot(&blinding_vector, covector);
+                let blinding_inner_product = blinding_vector.dot(covector);
                 prover_state.prover_message(&blinding_inner_product);
 
                 // Grind the Theorem 7.1 γ-combination gap before γ is sampled.
@@ -187,15 +188,21 @@ impl<F: Field> Config<F> {
                 let combination_randomness = prover_state.verifier_message::<F>();
                 assert!(!combination_randomness.is_zero(), "Proof failed");
 
-                *vector = scalar_mul_add_new(&blinding_vector, combination_randomness, vector);
-                prover_state.prover_messages(vector);
-
-                let combined_irs_randomness = scalar_mul_add_new(
-                    &blinding_witness.masks,
+                vector.mixed_scalar_mul_add_to(
+                    &Identity::<F>::new(),
+                    &mut blinding_vector,
                     combination_randomness,
-                    &witness.masks,
                 );
-                prover_state.prover_messages(&combined_irs_randomness);
+                *vector = blinding_vector;
+                prover_state.prover_messages(vector.to_slice());
+
+                let mut combined_irs_randomness = blinding_witness.masks.clone();
+                witness.masks.mixed_scalar_mul_add_to(
+                    &Identity::<F>::new(),
+                    &mut combined_irs_randomness,
+                    combination_randomness,
+                );
+                prover_state.prover_messages(combined_irs_randomness.to_slice());
 
                 *sum = blinding_inner_product + combination_randomness * *sum;
                 Some(blinding_witness)
@@ -338,9 +345,9 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let vector = random_vector(&mut rng, config.size());
-        let covector = random_vector(&mut rng, config.size());
-        let sum = dot(&vector, &covector);
+        let vector = ActiveBuffer::random(&mut rng, config.size());
+        let covector = ActiveBuffer::random(&mut rng, config.size());
+        let sum = vector.dot(&covector);
 
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit.commit(&mut prover_state, &[&vector]);
@@ -352,7 +359,7 @@ mod tests {
             sum,
         );
         assert_eq!(
-            multilinear_extend(&covector, &prover_result.evaluation_points),
+            multilinear_extend(covector.to_slice(), &prover_result.evaluation_points),
             prover_result.linear_form_evaluation
         );
         let proof = prover_state.proof();
