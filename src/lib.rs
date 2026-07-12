@@ -1,6 +1,7 @@
 pub mod algebra;
 pub mod ark_serde;
 pub mod bits;
+pub mod buffer;
 pub mod cmdline_utils;
 pub mod engines;
 pub mod hash;
