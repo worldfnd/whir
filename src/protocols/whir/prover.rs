@@ -86,7 +86,7 @@ impl<M: Embedding> Config<M> {
                 debug_assert_eq!(
                     vector.mixed_dot(
                         self.embedding(),
-                        &ActiveBuffer::from_slice(covector.vector.as_slice())
+                        &ActiveBuffer::from(covector.vector.as_slice())
                     ),
                     *evaluation
                 );

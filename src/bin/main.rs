@@ -11,7 +11,7 @@ use whir::{
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
     },
     bits::Bits,
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::ActiveBuffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
@@ -149,7 +149,7 @@ where
     }
 
     let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
-    let vector_buffer = ActiveBuffer::from_slice(&vector);
+    let vector_buffer = ActiveBuffer::from(vector.as_slice());
 
     let whir_commit_time = Instant::now();
     let witness = params.commit(&mut prover_state, &[&vector_buffer]);
@@ -316,7 +316,7 @@ where
     }
 
     let whir_commit_time = Instant::now();
-    let vector_buffer = ActiveBuffer::from_slice(&vector);
+    let vector_buffer = ActiveBuffer::from(vector.as_slice());
     let witness = params.commit(&mut prover_state, &[&vector_buffer]);
     let whir_commit_time = whir_commit_time.elapsed();
 

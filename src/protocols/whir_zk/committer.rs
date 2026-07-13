@@ -90,7 +90,7 @@ impl<F: Field> Config<F> {
                 .zip(mask.iter().cycle())
                 .map(|(&coeff, &m)| coeff + m)
                 .collect::<Vec<_>>();
-            let f_hat_buffer = ActiveBuffer::from_slice(&f_hat_vec);
+            let f_hat_buffer = ActiveBuffer::from(f_hat_vec.as_slice());
             let witness = self
                 .blinded_commitment
                 .commit(prover_state, &[&f_hat_buffer]);
@@ -117,7 +117,7 @@ impl<F: Field> Config<F> {
         }
         let blinding_buffers = blinding_vectors
             .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from(v.as_slice()))
             .collect::<Vec<_>>();
         let blinding_vector_refs = blinding_buffers.iter().collect::<Vec<_>>();
         let blinding_witness = self

@@ -351,7 +351,7 @@ mod tests {
             .collect();
         let original_buffers = original_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from_slice(msg))
+            .map(|msg| ActiveBuffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
@@ -430,7 +430,7 @@ mod tests {
             .collect();
         let original_buffers = original_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from_slice(msg))
+            .map(|msg| ActiveBuffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
@@ -441,7 +441,7 @@ mod tests {
         tampered_msgs[0][0] += F::ONE;
         let tampered_buffers = tampered_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from_slice(msg))
+            .map(|msg| ActiveBuffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let tampered_refs = tampered_buffers.iter().collect::<Vec<_>>();
         config.prove(&mut prover_state, &witness, &tampered_refs);
@@ -471,7 +471,7 @@ mod tests {
             .collect();
         let original_buffers = original_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from_slice(msg))
+            .map(|msg| ActiveBuffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
@@ -494,7 +494,7 @@ mod tests {
             if i == 0 {
                 let mut tampered = combined_msg.to_slice().to_vec();
                 tampered[0] += F::ONE;
-                combined_msg = ActiveBuffer::from_slice(&tampered);
+                combined_msg = ActiveBuffer::from(tampered.as_slice());
             }
             prover_state.prover_messages(combined_msg.to_slice());
 

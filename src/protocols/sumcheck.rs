@@ -297,8 +297,8 @@ mod tests {
         let masks = random_vector(&mut rng, config.mask_length * config.num_rounds);
 
         // Prover
-        let mut vector = ActiveBuffer::from_slice(&initial_vector);
-        let mut covector = ActiveBuffer::from_slice(&initial_covector);
+        let mut vector = ActiveBuffer::from(initial_vector.as_slice());
+        let mut covector = ActiveBuffer::from(initial_covector.as_slice());
         let mut sum = initial_sum;
         let mut prover_state = ProverState::new_std(&ds);
         let SumcheckOpening {

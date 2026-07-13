@@ -424,7 +424,7 @@ pub(crate) mod tests {
 
         // Instance
         let matrix: ActiveBuffer<T> =
-            ActiveBuffer::from_vec((0..config.size()).map(|_| rng.gen()).collect());
+            ActiveBuffer::from((0..config.size()).map(|_| rng.gen()).collect::<Vec<_>>());
         let submatrix: Vec<T> = matrix.read_rows(num_cols, indices);
 
         // Prover

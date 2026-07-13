@@ -42,8 +42,6 @@ pub trait BufferOps<T: Copy> {
     /// Same-backend buffer type used for Merkle tree nodes.
     type Nodes: BufferOps<Hash>;
 
-    fn from_vec(source: Vec<T>) -> Self;
-    fn from_slice(source: &[T]) -> Self;
     /// Read back the buffer contents as a host slice.
     fn to_slice(&self) -> &[T];
     fn len(&self) -> usize;

@@ -35,18 +35,22 @@ pub struct CpuBuffer<T> {
     data: Vec<T>,
 }
 
-impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
-    type Nodes = CpuBuffer<Hash>;
-
-    fn from_vec(source: Vec<T>) -> Self {
+impl<T> From<Vec<T>> for CpuBuffer<T> {
+    fn from(source: Vec<T>) -> Self {
         Self { data: source }
     }
+}
 
-    fn from_slice(source: &[T]) -> Self {
+impl<T: Clone> From<&[T]> for CpuBuffer<T> {
+    fn from(source: &[T]) -> Self {
         Self {
             data: source.to_vec(),
         }
     }
+}
+
+impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
+    type Nodes = CpuBuffer<Hash>;
 
     fn to_slice(&self) -> &[T] {
         &self.data
@@ -225,7 +229,7 @@ mod tests {
     fn scalar_mul_multiplies_in_place() {
         let values = vec![F::from(1u64), F::from(2u64), F::from(3u64), F::from(4u64)];
         let weight = F::from(5u64);
-        let mut buffer = CpuBuffer::from_vec(values.clone());
+        let mut buffer = CpuBuffer::from(values.clone());
         buffer.scalar_mul(weight);
         let expected: Vec<F> = values.iter().map(|&v| v * weight).collect();
         assert_eq!(buffer.to_slice(), expected.as_slice());
@@ -239,7 +243,7 @@ mod tests {
 
         // Full-length and prefix accumulation.
         for size in [len, 5] {
-            let mut buffer = CpuBuffer::from_vec(vec![F::ZERO; len]);
+            let mut buffer = CpuBuffer::from(vec![F::ZERO; len]);
             let evaluators: Vec<_> = points
                 .iter()
                 .map(|&point| UnivariateEvaluation::new(point, size))

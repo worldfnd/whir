@@ -429,7 +429,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         assert!(self.order.is_multiple_of(codeword_length));
         if messages.is_empty() {
             assert!(masks.is_empty());
-            return ActiveBuffer::from_vec(Vec::new());
+            return ActiveBuffer::from(Vec::new());
         }
         let num_messages = messages.len();
         let message_len = messages[0].len();
@@ -490,7 +490,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
 
         // Transpose to row-major order with vectors stacked horizontally.
         transpose(&mut result, num_messages, codeword_length);
-        ActiveBuffer::from_vec(result)
+        ActiveBuffer::from(result)
     }
 }
 

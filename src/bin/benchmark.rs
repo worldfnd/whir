@@ -15,7 +15,7 @@ use whir::{
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
     },
     bits::Bits,
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::ActiveBuffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
@@ -162,7 +162,7 @@ where
 
         HASH_COUNTER.reset();
 
-        let vector_buffer = ActiveBuffer::from_slice(&vector);
+        let vector_buffer = ActiveBuffer::from(vector.as_slice());
         let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let _ = params.prove(
@@ -240,7 +240,7 @@ where
         HASH_COUNTER.reset();
         let whir_prover_time = Instant::now();
 
-        let vector_buffer = ActiveBuffer::from_slice(&vector);
+        let vector_buffer = ActiveBuffer::from(vector.as_slice());
         let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let prove_linear_forms: Vec<Box<dyn LinearForm<M::Target>>> = points

@@ -43,7 +43,7 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
         .bench_values(|(engine, coeffs, expansion)| {
             let coeffs_refs = coeffs.iter().collect::<Vec<_>>();
             let messages = Messages::new(&coeffs_refs, coeffs[0].len(), 1);
-            let masks = ActiveBuffer::from_slice(&[]);
+            let masks = ActiveBuffer::from([].as_slice());
             black_box(engine.interleaved_encode(messages, &masks, coeffs[0].len() * expansion))
         });
 }

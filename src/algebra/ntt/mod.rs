@@ -228,10 +228,10 @@ mod tests {
             let masks = random_vector(&mut rng, mask_length * num_messages);
             let vectors = messages
                 .iter()
-                .map(|message| ActiveBuffer::from_slice(message))
+                .map(|message| ActiveBuffer::from(message.as_slice()))
                 .collect::<Vec<_>>();
             let vector_refs = vectors.iter().collect::<Vec<_>>();
-            let mask_buffer = ActiveBuffer::from_slice(&masks);
+            let mask_buffer = ActiveBuffer::from(masks.as_slice());
             let rs_messages = Messages::new(&vector_refs, message_length, 1);
             let codeword = ntt.interleaved_encode(
                 rs_messages,

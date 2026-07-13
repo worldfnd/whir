@@ -725,7 +725,7 @@ pub(crate) mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from(v.as_slice()))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = config.commit(&mut prover_state, &vector_refs);

@@ -355,7 +355,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from(v.as_slice()))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -449,7 +449,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from(v.as_slice()))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -505,7 +505,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
+            .map(|v| ActiveBuffer::from(v.as_slice()))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -566,7 +566,7 @@ mod tests {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut prover_state = ProverState::new_std(&ds);
-            let vector_buffer = ActiveBuffer::from_slice(&vector);
+            let vector_buffer = ActiveBuffer::from(vector.as_slice());
             let witness = params.commit(&mut prover_state, &[&vector_buffer]);
             let _ = params.prove(
                 &mut prover_state,

@@ -400,7 +400,7 @@ impl<F: Field> Config<F> {
             let _span = tracing::info_span!("inner_blinded_prove").entered();
             let f_hat_buffers = f_hat_vectors
                 .iter()
-                .map(|v| ActiveBuffer::from_slice(v))
+                .map(|v| ActiveBuffer::from(v.as_slice()))
                 .collect::<Vec<_>>();
             let f_hat_refs = f_hat_buffers.iter().collect::<Vec<_>>();
             let f_hat_witness_refs = f_hat_witnesses.iter().collect::<Vec<_>>();
@@ -433,7 +433,7 @@ impl<F: Field> Config<F> {
             // evaluation point is not needed by the outer protocol.
             let blinding_buffers = blinding_vectors
                 .iter()
-                .map(|v| ActiveBuffer::from_slice(v))
+                .map(|v| ActiveBuffer::from(v.as_slice()))
                 .collect::<Vec<_>>();
             let blinding_refs = blinding_buffers.iter().collect::<Vec<_>>();
             let _ = self.blinding_commitment.prove(

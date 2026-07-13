@@ -361,7 +361,7 @@ pub(crate) mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let nodes = config.build_nodes(leaves);
         prover_state.prover_message(&nodes[config.num_nodes() - 1]);
-        let witness = Witness::new(ActiveBuffer::from_vec(nodes));
+        let witness = Witness::new(ActiveBuffer::from(nodes));
         config.open(&mut prover_state, &witness, &[13, 42]);
         let proof = prover_state.proof();
 
