@@ -6,9 +6,9 @@
 //! device memory and only [`BufferOps::to_slice`] (and the other readback
 //! methods) force a host copy.
 //!
-//! The trait split follows the operation. [`BufferOps`] is generic over any
-//! element and covers host-to-backend and backend-to-host communication,
-//! while [`Buffer`] adds field arithmetic used by the protocols.
+//! [`BufferOps`] covers host-to-backend and backend-to-host communication,
+//! while [`Buffer`] provides backend-specific field arithmetic. The traits
+//! are independent so callers can require only the capabilities they use.
 //!
 //! [`DefaultRs`] selects the Reed-Solomon encoder for the active backend.
 
@@ -32,7 +32,7 @@ pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
 /// Host communication for owned buffers over any copyable element type.
 ///
 /// Construction uses the standard [`From`] implementations of each backend.
-/// Field arithmetic lives on [`Buffer`].
+/// Field arithmetic lives independently on [`Buffer`].
 pub trait BufferOps<T: Copy> {
     /// Read back the buffer contents as a host slice.
     fn to_slice(&self) -> &[T];
@@ -47,7 +47,7 @@ pub trait BufferOps<T: Copy> {
 }
 
 /// Field operations on owned buffers.
-pub trait Buffer<F: Field>: BufferOps<F> + Clone {
+pub trait Buffer<F: Field>: Clone {
     /// Same-backend owned buffer over another field.
     ///
     /// Used by the `mixed_*` operations that lift base-field data into an
