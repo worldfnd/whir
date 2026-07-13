@@ -6,9 +6,9 @@
 //! device memory and only [`BufferOps::to_slice`] (and the other readback
 //! methods) force a host copy.
 //!
-//! The trait split follows the element type. [`BufferOps`] is generic over
-//! any element and also covers [`struct@Hash`] buffers for Merkle tree
-//! nodes. [`Buffer`] adds field arithmetic used by the protocols.
+//! The trait split follows the operation. [`BufferOps`] is generic over any
+//! element and covers host-to-backend and backend-to-host communication,
+//! while [`Buffer`] adds field arithmetic used by the protocols.
 //!
 //! [`DefaultRs`] selects the Reed-Solomon encoder for the active backend.
 
@@ -21,27 +21,19 @@ use ark_std::rand::{
 };
 pub use cpu::CpuBuffer;
 
-use crate::{
-    algebra::{
-        embedding::Embedding,
-        linear_form::{LinearForm, UnivariateEvaluation},
-    },
-    engines::EngineId,
-    hash::Hash,
-    protocols::{matrix_commit::Encodable, merkle_tree},
+use crate::algebra::{
+    embedding::Embedding,
+    linear_form::{LinearForm, UnivariateEvaluation},
 };
 
 pub type ActiveBuffer<T> = CpuBuffer<T>;
 pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
 
-/// Owned buffer operations over any element type.
+/// Host communication for owned buffers over any copyable element type.
 ///
-/// This trait is not field-specific, so it also covers hash buffers and
-/// Merkle node layers. Field arithmetic lives on [`Buffer`].
+/// Construction uses the standard [`From`] implementations of each backend.
+/// Field arithmetic lives on [`Buffer`].
 pub trait BufferOps<T: Copy> {
-    /// Same-backend buffer type used for Merkle tree nodes.
-    type Nodes: BufferOps<Hash>;
-
     /// Read back the buffer contents as a host slice.
     fn to_slice(&self) -> &[T];
     fn len(&self) -> usize;
@@ -52,15 +44,6 @@ pub trait BufferOps<T: Copy> {
     fn read_rows(&self, num_cols: usize, indices: &[usize]) -> Vec<T>;
     /// Gather elements at arbitrary indices.
     fn gather_at_indices(&self, indices: &[usize]) -> Vec<T>;
-    /// Hash rows of width `num_cols` and build a Merkle tree.
-    fn merklize(
-        &self,
-        num_cols: usize,
-        leaf_hash: EngineId,
-        merkle: &merkle_tree::Config,
-    ) -> (Self::Nodes, Hash)
-    where
-        T: Encodable + Send + Sync;
 }
 
 /// Field operations on owned buffers.

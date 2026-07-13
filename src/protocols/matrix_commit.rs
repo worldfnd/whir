@@ -37,6 +37,20 @@ pub trait Encodable {
     fn encoder() -> Box<dyn Encoder<Self>>;
 }
 
+/// Backend-specific construction of a Merkle tree from matrix rows.
+pub trait Merklize<T> {
+    /// Buffer type used to store the resulting Merkle tree nodes.
+    type Nodes;
+
+    /// Hash rows of width `num_cols` and build a Merkle tree.
+    fn merklize(
+        &self,
+        num_cols: usize,
+        leaf_hash: EngineId,
+        merkle: &merkle_tree::Config,
+    ) -> (Self::Nodes, Hash);
+}
+
 /// Object-safe encoder for types that implement [`Encodable`].
 pub trait Encoder<T> {
     /// Returns true if the encoder uses an internal buffer.

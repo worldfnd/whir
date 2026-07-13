@@ -14,7 +14,7 @@ use crate::{
     engines::EngineId,
     hash::{self, Hash},
     protocols::{
-        matrix_commit::{hash_rows, Encodable},
+        matrix_commit::{hash_rows, Encodable, Merklize},
         merkle_tree,
     },
 };
@@ -50,8 +50,6 @@ impl<T: Clone> From<&[T]> for CpuBuffer<T> {
 }
 
 impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
-    type Nodes = CpuBuffer<Hash>;
-
     fn to_slice(&self) -> &[T] {
         &self.data
     }
@@ -71,16 +69,17 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
     fn gather_at_indices(&self, indices: &[usize]) -> Vec<T> {
         indices.iter().map(|&i| self.data[i]).collect()
     }
+}
+
+impl<T: Encodable + Copy + Send + Sync> Merklize<T> for CpuBuffer<T> {
+    type Nodes = CpuBuffer<Hash>;
 
     fn merklize(
         &self,
         num_cols: usize,
         leaf_hash: EngineId,
         merkle: &merkle_tree::Config,
-    ) -> (Self::Nodes, Hash)
-    where
-        T: Encodable + Send + Sync,
-    {
+    ) -> (Self::Nodes, Hash) {
         assert_eq!(self.len(), num_cols * merkle.num_leaves);
         let engine = hash::ENGINES
             .retrieve(leaf_hash)
