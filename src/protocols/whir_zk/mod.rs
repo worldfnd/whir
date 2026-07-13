@@ -255,7 +255,7 @@ mod tests {
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
-        buffer::{ActiveBuffer, BufferOps},
+        buffer::ActiveBuffer,
         hash,
         parameters::ProtocolParameters,
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
@@ -355,7 +355,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| ActiveBuffer::from(v.as_slice()))
+            .map(|v| ActiveBuffer::from(*v))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -449,7 +449,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| ActiveBuffer::from(v.as_slice()))
+            .map(|v| ActiveBuffer::from(*v))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
@@ -505,7 +505,7 @@ mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let vector_buffers = vectors
             .iter()
-            .map(|v| ActiveBuffer::from(v.as_slice()))
+            .map(|v| ActiveBuffer::from(*v))
             .collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);

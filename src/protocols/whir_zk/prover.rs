@@ -16,7 +16,7 @@ use crate::{
         linear_form::{Covector, Evaluate, LinearForm},
         mixed_dot, scalar_mul_add,
     },
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::ActiveBuffer,
     hash::Hash,
     protocols::{
         whir::FinalClaim,
