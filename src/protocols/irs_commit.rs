@@ -119,7 +119,7 @@ pub struct Evaluations<F> {
     pub points: Vec<F>,
 
     /// Matrix of codewords for each row.
-    pub matrix: Vec<F>,
+    pub matrix: ActiveBuffer<F>,
 }
 
 impl<M: Embedding> Config<M> {
@@ -342,7 +342,7 @@ impl<M: Embedding> Config<M> {
             matrix_witness,
             out_of_domain: Evaluations {
                 points: oods_points,
-                matrix: oods_matrix,
+                matrix: ActiveBuffer::from(oods_matrix),
             },
         }
     }
@@ -367,7 +367,7 @@ impl<M: Embedding> Config<M> {
             matrix_commitment,
             out_of_domain: Evaluations {
                 points: oods_points,
-                matrix: oods_matrix,
+                matrix: ActiveBuffer::from(oods_matrix),
             },
         })
     }
@@ -423,7 +423,10 @@ impl<M: Embedding> Config<M> {
             matrix_col_offset += self.num_cols();
         }
 
-        Evaluations { points, matrix }
+        Evaluations {
+            points,
+            matrix: ActiveBuffer::from(matrix),
+        }
     }
 
     /// Verifies one or more openings and returns the in-domain evaluations.
@@ -475,7 +478,10 @@ impl<M: Embedding> Config<M> {
             }
             matrix_col_offset += self.num_cols();
         }
-        Ok(Evaluations { points, matrix })
+        Ok(Evaluations {
+            points,
+            matrix: ActiveBuffer::from(matrix),
+        })
     }
 
     fn in_domain_challenges<T>(&self, transcript: &mut T) -> (Vec<usize>, Vec<M::Source>)
@@ -531,7 +537,8 @@ impl<F: Field> Evaluations<F> {
 
     pub fn rows(&self) -> impl Iterator<Item = &[F]> {
         let cols = self.num_columns();
-        (0..self.num_points()).map(move |i| &self.matrix[i * cols..(i + 1) * cols])
+        let matrix = self.matrix.to_slice();
+        (0..self.num_points()).map(move |i| &matrix[i * cols..(i + 1) * cols])
     }
 
     pub fn lift<M>(&self, embedding: &M) -> Evaluations<M::Target>
@@ -540,7 +547,7 @@ impl<F: Field> Evaluations<F> {
     {
         Evaluations {
             points: lift(embedding, &self.points),
-            matrix: lift(embedding, &self.matrix),
+            matrix: ActiveBuffer::from(lift(embedding, self.matrix.to_slice())),
         }
     }
 
@@ -550,8 +557,21 @@ impl<F: Field> Evaluations<F> {
             .map(move |&point| UnivariateEvaluation::new(point, size))
     }
 
+    /// Reduce each row against host `weights`, yielding one value per point.
+    /// Host-side; used by the verifiers.
     pub fn values<'a>(&'a self, weights: &'a [F]) -> impl 'a + Iterator<Item = F> {
         self.rows().map(|row| dot(weights, row))
+    }
+
+    /// Buffer-native [`values`](Self::values): a matrix-vector product on the
+    /// backend, returning one value per point. Both the matrix and the weights
+    /// stay on-device, so no readback of the (potentially large) weights is
+    /// forced. Used by the prover.
+    pub fn values_buffer(&self, weights: &ActiveBuffer<F>) -> ActiveBuffer<F> {
+        if weights.is_empty() {
+            return ActiveBuffer::zeros(self.num_points());
+        }
+        self.matrix.mat_vec(weights)
     }
 }
 
@@ -743,6 +763,7 @@ pub(crate) mod tests {
                 witness
                     .out_of_domain()
                     .matrix
+                    .to_slice()
                     .chunks_exact(config.num_vectors),
             ) {
                 for (vector, expected) in zip_strict(vectors.iter(), evals.iter()) {
@@ -776,6 +797,7 @@ pub(crate) mod tests {
                 &in_domain_evals.points,
                 in_domain_evals
                     .matrix
+                    .to_slice()
                     .chunks_exact(config.num_vectors * config.interleaving_depth),
             ) {
                 let expected_iter = vectors.iter().flat_map(|poly| {

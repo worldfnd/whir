@@ -22,7 +22,7 @@ use crate::{
     buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
     protocols::{
-        geometric_challenge::geometric_challenge,
+        geometric_challenge::{geometric_challenge, geometric_challenge_groups},
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
     },
     transcript::{
@@ -230,30 +230,38 @@ impl<M: Embedding> Config<M> {
         // Step 4.1: batching — Construction 9.7 Step 4, p.55
         let num_ood = self.out_domain_samples;
         let num_in_domain = source_evaluations.points.len();
-        let batching_coeffs =
-            geometric_challenge::<_, M::Target>(prover_state, 1 + num_ood + num_in_domain);
-        let (&original_sl_coeff, constraint_rlc_coeffs) = batching_coeffs.split_first().unwrap();
-        let (ood_rlc_coeffs, in_domain_rlc_coeffs) = constraint_rlc_coeffs.split_at(num_ood);
+        // The batching challenge [1, x, x², …] splits into the `sl'` scalar,
+        // the OODS run, and the in-domain run (the verifier splits the same
+        // sequence identically).
+        let mut groups = geometric_challenge_groups::<_, M::Target>(
+            prover_state,
+            &[1, num_ood, num_in_domain],
+        )
+        .into_iter();
+        let original_sl_coeff = *groups.next().unwrap().get(0).unwrap();
+        let ood_rlc_coeffs = groups.next().unwrap();
+        let in_domain_rlc_coeffs = groups.next().unwrap();
 
         // Covector update — sl' from Completeness proof (p.55-56).
         covector.scalar_mul(original_sl_coeff);
         let eval_points = lift(self.source.embedding(), &source_evaluations.points);
         if self.message_mask_length == 0 {
-            // Non-ZK: single accumulate over all points. Scalars are the
-            // contiguous challenge tail (ood ‖ in-domain), so no copy is needed.
+            // Non-ZK: single accumulate over all points. OODS and in-domain
+            // share one contiguous run of coefficients.
             let mut all_evaluators = univariate_evaluators(&ood_points, covector.len());
             all_evaluators.extend(univariate_evaluators(&eval_points, covector.len()));
-            covector.accumulate_univariate_evaluations(&all_evaluators, constraint_rlc_coeffs);
+            let constraint_rlc_coeffs = ood_rlc_coeffs.concat(&in_domain_rlc_coeffs);
+            covector.accumulate_univariate_evaluations(&all_evaluators, &constraint_rlc_coeffs);
         } else {
             // ZK: OOD contributes to full [f; r; s], in-domain only to [f; r].
             // The in-domain evaluators have size `masked`, so they only
             // accumulate into that prefix of the covector.
             let ood_evaluators = univariate_evaluators(&ood_points, covector.len());
-            covector.accumulate_univariate_evaluations(&ood_evaluators, ood_rlc_coeffs);
+            covector.accumulate_univariate_evaluations(&ood_evaluators, &ood_rlc_coeffs);
 
             let masked = self.source.masked_message_length();
             let in_domain_evaluators = univariate_evaluators(&eval_points, masked);
-            covector.accumulate_univariate_evaluations(&in_domain_evaluators, in_domain_rlc_coeffs);
+            covector.accumulate_univariate_evaluations(&in_domain_evaluators, &in_domain_rlc_coeffs);
         }
 
         Witness {
@@ -323,6 +331,7 @@ impl<M: Embedding> Config<M> {
         let source_evaluations = self.source.verify(verifier_state, &[commitment])?;
         let collapsed_values: Vec<M::Target> = source_evaluations
             .matrix
+            .to_slice()
             .chunks_exact(self.source.interleaving_depth)
             .map(|row| mixed_dot(self.source.embedding(), &collapse_weights, row))
             .collect();

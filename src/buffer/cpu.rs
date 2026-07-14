@@ -10,7 +10,7 @@ use crate::{
         embedding::Embedding,
         linear_form::{Covector, LinearForm, UnivariateEvaluation},
     },
-    buffer::{Buffer, BufferOps},
+    buffer::{ActiveBuffer, Buffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::{
@@ -69,6 +69,10 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
     fn gather_at_indices(&self, indices: &[usize]) -> Vec<T> {
         indices.iter().map(|&i| self.data[i]).collect()
     }
+
+    fn get(&self, index: usize) -> Option<&T> {
+        self.data.get(index)
+    }
 }
 
 impl<T: Encodable + Copy + Send + Sync> Merklize<T> for CpuBuffer<T> {
@@ -104,6 +108,12 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
         }
     }
 
+    fn ones(length: usize) -> Self {
+        Self {
+            data: vec![F::ONE; length],
+        }
+    }
+
     fn random<R>(rng: &mut R, length: usize) -> Self
     where
         R: RngCore + CryptoRng,
@@ -116,6 +126,41 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
 
     fn dot(&self, other: &Self) -> F {
         crate::algebra::dot(&self.data, &other.data)
+    }
+
+    fn bilinear_form(&self, rows: &Self, cols: &Self) -> F {
+        crate::utils::zip_strict(&rows.data, self.data.chunks_exact(cols.len()))
+            .map(|(r, row)| *r * crate::algebra::dot(&cols.data, row))
+            .sum()
+    }
+
+    fn tensor_product(&self, other: &Self) -> Self {
+        Self {
+            data: crate::algebra::tensor_product(&self.data, &other.data),
+        }
+    }
+
+    fn mat_vec(&self, vector: &Self) -> Self {
+        Self {
+            data: self
+                .data
+                .chunks_exact(vector.data.len())
+                .map(|row| crate::algebra::dot(&vector.data, row))
+                .collect(),
+        }
+    }
+
+    fn concat(&self, other: &Self) -> Self {
+        let mut data = Vec::with_capacity(self.data.len() + other.data.len());
+        data.extend_from_slice(&self.data);
+        data.extend_from_slice(&other.data);
+        Self { data }
+    }
+
+    fn eq_weights(point: &[F]) -> Self {
+        Self {
+            data: crate::algebra::eq_weights(point),
+        }
     }
 
     fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
@@ -141,12 +186,16 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
     fn accumulate_univariate_evaluations(
         &mut self,
         evaluators: &[UnivariateEvaluation<F>],
-        scalars: &[F],
+        scalars: &Self,
     ) {
         let Some(size) = evaluators.first().map(|e| e.size) else {
             return;
         };
-        UnivariateEvaluation::accumulate_many(evaluators, &mut self.data[..size], scalars);
+        UnivariateEvaluation::accumulate_many(
+            evaluators,
+            &mut self.data[..size],
+            scalars.to_slice(),
+        );
     }
 
     fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
@@ -174,12 +223,19 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
         crate::algebra::mixed_scalar_mul_add(embedding, &mut accumulator.data, weight, &self.data);
     }
 
+    fn geometric_challenge<G: Field>(current: G, base: G, length: usize) -> Self::TargetBuffer<G> {
+        CpuBuffer {
+            data: crate::algebra::geometric_sequence(current, base, length),
+        }
+    }
+
     fn linear_forms_rlc(
         size: usize,
         linear_forms: &mut [Box<dyn LinearForm<F>>],
-        rlc_coeffs: &[F],
+        rlc_coeffs: &ActiveBuffer<F>,
     ) -> Self {
         assert_eq!(linear_forms.len(), rlc_coeffs.len());
+        let rlc_coeffs = rlc_coeffs.to_slice();
         let mut covector = vec![F::ZERO; size];
         if let Some((first, linear_forms)) = linear_forms.split_first_mut() {
             debug_assert_eq!(rlc_coeffs[0], F::ONE);
@@ -200,8 +256,9 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
     fn mixed_linear_combination<M: Embedding<Source = F>>(
         embedding: &M,
         vectors: &[&Self],
-        coeffs: &[M::Target],
+        coeffs: &Self::TargetBuffer<M::Target>,
     ) -> CpuBuffer<M::Target> {
+        let coeffs = coeffs.to_slice();
         assert_eq!(vectors.len(), coeffs.len());
         let Some((first, vectors)) = vectors.split_first() else {
             return CpuBuffer { data: Vec::new() };
@@ -247,7 +304,8 @@ mod tests {
                 .iter()
                 .map(|&point| UnivariateEvaluation::new(point, size))
                 .collect();
-            buffer.accumulate_univariate_evaluations(&evaluators, &scalars);
+            buffer
+                .accumulate_univariate_evaluations(&evaluators, &CpuBuffer::from(scalars.clone()));
 
             // Reference: accumulate Σ_j scalars[j]·points[j]^i into the prefix
             // of a plain vector.

@@ -252,7 +252,7 @@ impl<F: Field> Config<F> {
         // Step 4: spot-check γ-combination at each opened position
         let num_cols = self.c_zk_commit.num_cols();
         for (row, &point) in zip_strict(
-            evaluations.matrix.chunks_exact(num_cols),
+            evaluations.matrix.to_slice().chunks_exact(num_cols),
             &evaluations.points,
         ) {
             let shift = combined_rs.as_ref().map(|_| point.pow([msg_len as u64]));

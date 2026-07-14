@@ -7,10 +7,14 @@ use tracing::instrument;
 
 use super::{Config, Witness};
 use crate::{
-    algebra::{dot, embedding::Embedding, eq_weights, linear_form::LinearForm, tensor_product},
+    algebra::{embedding::Embedding, linear_form::LinearForm},
     buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
-    protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
+    protocols::{
+        geometric_challenge::{geometric_challenge_buffer, geometric_challenge_groups},
+        irs_commit,
+        whir::FinalClaim,
+    },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerifierMessage,
@@ -132,8 +136,7 @@ impl<M: Embedding> Config<M> {
         };
 
         // Random linear combination of the vectors.
-        let mut vector_rlc_coeffs: Vec<M::Target> = geometric_challenge(prover_state, num_vectors);
-        assert_eq!(vector_rlc_coeffs[0], M::Target::ONE);
+        let mut vector_rlc_coeffs = geometric_challenge_buffer(prover_state, num_vectors);
         let mut vector = ActiveBuffer::<M::Source>::mixed_linear_combination(
             self.embedding(),
             vectors,
@@ -142,40 +145,40 @@ impl<M: Embedding> Config<M> {
 
         let mut prev_witness: RoundWitness<'a, M::Target, M> = RoundWitness::Initial(witnesses);
 
-        // Random linear combination of the constraints.
-        let constraint_rlc_coeffs: Vec<M::Target> =
-            geometric_challenge(prover_state, linear_forms.len() + oods_evals.len());
-        let has_constraints = !constraint_rlc_coeffs.is_empty();
-        let (initial_forms_rlc_coeffs, oods_rlc_coeffs) =
-            constraint_rlc_coeffs.split_at(linear_forms.len());
+        // Random linear combination of the constraints. Split the geometric
+        // challenge into a run for the linear forms followed by a contiguous
+        // run for the OODS constraints; the verifier splits the same sequence.
+        let total_constraints = linear_forms.len() + oods_evals.len();
+        let has_constraints = total_constraints > 0;
+        let mut rlc_groups =
+            geometric_challenge_groups::<_, M::Target>(prover_state, &[linear_forms.len(), oods_evals.len()])
+                .into_iter();
+        let initial_forms_rlc_coeffs = rlc_groups.next().unwrap();
+        let oods_rlc_coeffs = rlc_groups.next().unwrap();
+
         let mut linear_forms = linear_forms;
         let mut covector = if has_constraints {
             ActiveBuffer::<M::Target>::linear_forms_rlc(
                 self.initial_size(),
                 &mut linear_forms,
-                initial_forms_rlc_coeffs,
+                &initial_forms_rlc_coeffs,
             )
         } else {
             ActiveBuffer::<M::Target>::zeros(0)
         };
         drop(linear_forms);
 
-        // Compute "The Sum"
-        let mut the_sum: M::Target = zip_strict(
-            initial_forms_rlc_coeffs,
-            evaluations.chunks_exact(num_vectors),
-        )
-        .map(|(poly_coeff, row)| *poly_coeff * dot(&vector_rlc_coeffs, row))
-        .sum();
+        // Compute "The Sum": initial_forms_rlc_coeffsᵀ · evaluations · vector_rlc_coeffs
+        let evaluations = ActiveBuffer::from(evaluations.into_owned());
+        let mut the_sum = evaluations.bilinear_form(&initial_forms_rlc_coeffs, &vector_rlc_coeffs);
         drop(evaluations);
 
         debug_assert!(!has_constraints || vector.dot(&covector) == the_sum);
 
         // Add OODS constraints
-        covector.accumulate_univariate_evaluations(&oods_evals, oods_rlc_coeffs);
-        the_sum += zip_strict(oods_rlc_coeffs, oods_matrix.chunks_exact(num_vectors))
-            .map(|(poly_coeff, row)| *poly_coeff * dot(&vector_rlc_coeffs, row))
-            .sum::<M::Target>();
+        covector.accumulate_univariate_evaluations(&oods_evals, &oods_rlc_coeffs);
+        let oods_matrix = ActiveBuffer::from(oods_matrix);
+        the_sum += oods_matrix.bilinear_form(&oods_rlc_coeffs, &vector_rlc_coeffs);
         drop(oods_evals);
         drop(oods_matrix);
 
@@ -234,17 +237,17 @@ impl<M: Embedding> Config<M> {
                 .evaluators(round_config.initial_size())
                 .chain(in_domain.evaluators(round_config.initial_size()))
                 .collect::<Vec<_>>();
+            // Weights for the in-domain rows: vector_rlc_coeffs ⊗ eq(folding_randomness),
+            // built directly on the backend so no readback is needed.
+            let stir_weights =
+                vector_rlc_coeffs.tensor_product(&ActiveBuffer::eq_weights(&folding_randomness));
             let stir_evaluations = new_witness
                 .out_of_domain()
-                .values(&[M::Target::ONE])
-                .chain(in_domain.values(&tensor_product(
-                    &vector_rlc_coeffs,
-                    &eq_weights(&folding_randomness),
-                )))
-                .collect::<Vec<_>>();
-            let stir_rlc_coeffs = geometric_challenge(prover_state, stir_challenges.len());
+                .values_buffer(&ActiveBuffer::ones(1))
+                .concat(&in_domain.values_buffer(&stir_weights));
+            let stir_rlc_coeffs = geometric_challenge_buffer(prover_state, stir_challenges.len());
             covector.accumulate_univariate_evaluations(&stir_challenges, &stir_rlc_coeffs);
-            the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
+            the_sum += stir_rlc_coeffs.dot(&stir_evaluations);
             debug_assert_eq!(vector.dot(&covector), the_sum);
 
             // Run sumcheck for this round
@@ -257,7 +260,7 @@ impl<M: Embedding> Config<M> {
             debug_assert_eq!(vector.dot(&covector), the_sum);
 
             prev_witness = RoundWitness::Round(new_witness);
-            vector_rlc_coeffs = vec![M::Target::ONE];
+            vector_rlc_coeffs = ActiveBuffer::ones(1);
         }
 
         // Directly send the vector to the verifier.
@@ -291,7 +294,7 @@ impl<M: Embedding> Config<M> {
 
         FinalClaim {
             evaluation_point,
-            rlc_coefficients: initial_forms_rlc_coeffs.to_vec(),
+            rlc_coefficients: initial_forms_rlc_coeffs.to_slice().to_vec(),
             linear_form_rlc: M::Target::ZERO,
         }
     }
