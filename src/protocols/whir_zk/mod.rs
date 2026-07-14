@@ -200,7 +200,7 @@ impl<F: Field> Config<F> {
     /// Precomputed sub-domain powers [1, ω_sub, ω_sub², ..., ω_sub^(num_rows-1)].
     pub(crate) fn omega_powers(&self) -> Vec<F> {
         let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
-        crate::algebra::geometric_sequence(self.omega_sub(), codeword_length)
+        crate::algebra::geometric_sequence(F::ONE, self.omega_sub(), codeword_length)
     }
 
     /// Find the index of `alpha_base` in the sub-domain powers.
@@ -216,7 +216,8 @@ impl<F: Field> Config<F> {
         let omega_powers = self.omega_powers();
         let interleaving_depth = self.interleaving_depth();
         let omega_full = self.omega_full();
-        let zeta_powers = crate::algebra::geometric_sequence(self.zeta(), interleaving_depth);
+        let zeta_powers =
+            crate::algebra::geometric_sequence(F::ONE, self.zeta(), interleaving_depth);
         let embedding = self.blinded_commitment.embedding();
 
         let mut gammas = Vec::with_capacity(query_points.len() * interleaving_depth);

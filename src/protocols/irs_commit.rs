@@ -568,8 +568,24 @@ impl<F: Field> Evaluations<F> {
     /// stay on-device, so no readback of the (potentially large) weights is
     /// forced. Used by the prover.
     pub fn values_buffer(&self, weights: &ActiveBuffer<F>) -> ActiveBuffer<F> {
-        if weights.is_empty() {
-            return ActiveBuffer::zeros(self.num_points());
+        let num_points = self.num_points();
+        if num_points == 0 {
+            assert!(self.matrix.is_empty(), "evaluation matrix has no points");
+            return ActiveBuffer::zeros(num_points);
+        }
+        assert_eq!(
+            self.matrix.len() % num_points,
+            0,
+            "evaluation matrix dimensions mismatch"
+        );
+        let num_columns = self.matrix.len() / num_points;
+        assert_eq!(
+            weights.len(),
+            num_columns,
+            "evaluation weights must match matrix columns"
+        );
+        if num_columns == 0 {
+            return ActiveBuffer::zeros(num_points);
         }
         self.matrix.mat_vec(weights)
     }

@@ -129,6 +129,15 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
     }
 
     fn bilinear_form(&self, rows: &Self, cols: &Self) -> F {
+        let expected = rows
+            .data
+            .len()
+            .checked_mul(cols.data.len())
+            .expect("matrix dimensions overflow");
+        assert_eq!(self.data.len(), expected, "matrix dimensions mismatch");
+        if cols.data.is_empty() {
+            return F::ZERO;
+        }
         crate::utils::zip_strict(&rows.data, self.data.chunks_exact(cols.len()))
             .map(|(r, row)| *r * crate::algebra::dot(&cols.data, row))
             .sum()
@@ -141,6 +150,15 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
     }
 
     fn mat_vec(&self, vector: &Self) -> Self {
+        assert!(
+            !vector.data.is_empty(),
+            "matrix-vector product requires a non-empty vector"
+        );
+        assert_eq!(
+            self.data.len() % vector.data.len(),
+            0,
+            "matrix-vector dimensions mismatch"
+        );
         Self {
             data: self
                 .data
