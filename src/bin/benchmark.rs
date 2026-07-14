@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     fs::OpenOptions,
     io::Write,
     time::{Duration, Instant},

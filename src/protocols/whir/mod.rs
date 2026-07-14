@@ -122,8 +122,6 @@ impl<M: Embedding> Config<M> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use ark_ff::Field;
     use ark_std::rand::thread_rng;
 

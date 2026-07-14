@@ -82,15 +82,18 @@ pub trait Buffer<F: Field>: Clone {
 
     /// Tensor (outer) product `self ⊗ other`, row-major: length
     /// `self.len() · other.len()` with entry `[i · other.len() + j] = self[i] · other[j]`.
+    #[must_use]
     fn tensor_product(&self, other: &Self) -> Self;
 
     /// Matrix-vector product. `self` is a row-major matrix with `vector.len()`
     /// columns; returns a buffer of length `self.len() / vector.len()` where
     /// `out[i] = dot(row_i, vector)`. `vector` must be non-empty.
+    #[must_use]
     fn mat_vec(&self, vector: &Self) -> Self;
 
     /// Concatenation `[self, other]` into a single buffer of length
     /// `self.len() + other.len()`.
+    #[must_use]
     fn concat(&self, other: &Self) -> Self;
 
     /// Equality-polynomial weights `eq(point, ·)` over the Boolean hypercube

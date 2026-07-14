@@ -409,7 +409,7 @@ impl<F: Field> Config<F> {
                 &f_hat_refs,
                 f_hat_witness_refs,
                 linear_forms,
-                Cow::Owned(modified_evaluations),
+                ActiveBuffer::from(modified_evaluations),
             )
         };
 
@@ -441,7 +441,7 @@ impl<F: Field> Config<F> {
                 &blinding_refs,
                 vec![&blinding_witness],
                 blinding_forms,
-                Cow::Owned(all_blinding_claims),
+                ActiveBuffer::from(all_blinding_claims),
             );
         }
 

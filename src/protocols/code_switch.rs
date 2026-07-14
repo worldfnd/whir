@@ -233,11 +233,9 @@ impl<M: Embedding> Config<M> {
         // The batching challenge [1, x, x², …] splits into the `sl'` scalar,
         // the OODS run, and the in-domain run (the verifier splits the same
         // sequence identically).
-        let mut groups = geometric_challenge_groups::<_, M::Target>(
-            prover_state,
-            &[1, num_ood, num_in_domain],
-        )
-        .into_iter();
+        let mut groups =
+            geometric_challenge_groups::<_, M::Target>(prover_state, &[1, num_ood, num_in_domain])
+                .into_iter();
         let original_sl_coeff = *groups.next().unwrap().get(0).unwrap();
         let ood_rlc_coeffs = groups.next().unwrap();
         let in_domain_rlc_coeffs = groups.next().unwrap();
@@ -261,7 +259,8 @@ impl<M: Embedding> Config<M> {
 
             let masked = self.source.masked_message_length();
             let in_domain_evaluators = univariate_evaluators(&eval_points, masked);
-            covector.accumulate_univariate_evaluations(&in_domain_evaluators, &in_domain_rlc_coeffs);
+            covector
+                .accumulate_univariate_evaluations(&in_domain_evaluators, &in_domain_rlc_coeffs);
         }
 
         Witness {

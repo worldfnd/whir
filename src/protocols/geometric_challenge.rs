@@ -40,9 +40,10 @@ where
         .unwrap()
 }
 
-/// Sample a single geometric challenge base `x` and split the sequence
-/// `[1, x, x², …]` into consecutive groups of the given `lengths`, each
-/// returned as its own on-device buffer. Group `k` starts at
+/// Sample a single geometric challenge base `x`.
+///
+/// Split the sequence `[1, x, x², …]` into consecutive groups of the given
+/// `lengths`, each returned as its own on-device buffer. Group `k` starts at
 /// `x^(lengths[0] + … + lengths[k-1])`.
 ///
 /// This is the buffer-native equivalent of drawing one

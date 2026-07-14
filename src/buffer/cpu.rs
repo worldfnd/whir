@@ -10,7 +10,7 @@ use crate::{
         embedding::Embedding,
         linear_form::{Covector, LinearForm, UnivariateEvaluation},
     },
-    buffer::{ActiveBuffer, Buffer, BufferOps},
+    buffer::{Buffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::{
@@ -250,7 +250,7 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
     fn linear_forms_rlc(
         size: usize,
         linear_forms: &mut [Box<dyn LinearForm<F>>],
-        rlc_coeffs: &ActiveBuffer<F>,
+        rlc_coeffs: &Self,
     ) -> Self {
         assert_eq!(linear_forms.len(), rlc_coeffs.len());
         let rlc_coeffs = rlc_coeffs.to_slice();

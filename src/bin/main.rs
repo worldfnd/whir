@@ -1,4 +1,6 @@
-use std::{borrow::Cow, time::Instant};
+#[cfg(feature = "rs_in_order")]
+use std::borrow::Cow;
+use std::time::Instant;
 
 #[cfg(feature = "rs_in_order")]
 use ark_ff::Field;
