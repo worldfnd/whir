@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
@@ -54,7 +52,7 @@ impl<M: Embedding> Config<M> {
         vectors: &[&ActiveBuffer<M::Source>],
         witnesses: Vec<&'a Witness<M::Target, M>>,
         linear_forms: Vec<Box<dyn LinearForm<M::Target>>>,
-        evaluations: Cow<'a, [M::Target]>,
+        evaluations: ActiveBuffer<M::Target>,
     ) -> FinalClaim<M::Target>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
@@ -81,9 +79,10 @@ impl<M: Embedding> Config<M> {
             assert_eq!(linear_form.size(), self.initial_size());
         }
         #[cfg(debug_assertions)]
-        for (linear_form, evaluations) in
-            zip_strict(linear_forms.iter(), evaluations.chunks_exact(num_vectors))
-        {
+        for (linear_form, evaluations) in zip_strict(
+            linear_forms.iter(),
+            evaluations.to_slice().chunks_exact(num_vectors),
+        ) {
             use crate::algebra::linear_form::Covector;
             let covector = Covector::from(&**linear_form);
             for (vector, evaluation) in zip_strict(vectors, evaluations) {
@@ -150,9 +149,11 @@ impl<M: Embedding> Config<M> {
         // run for the OODS constraints; the verifier splits the same sequence.
         let total_constraints = linear_forms.len() + oods_evals.len();
         let has_constraints = total_constraints > 0;
-        let mut rlc_groups =
-            geometric_challenge_groups::<_, M::Target>(prover_state, &[linear_forms.len(), oods_evals.len()])
-                .into_iter();
+        let mut rlc_groups = geometric_challenge_groups::<_, M::Target>(
+            prover_state,
+            &[linear_forms.len(), oods_evals.len()],
+        )
+        .into_iter();
         let initial_forms_rlc_coeffs = rlc_groups.next().unwrap();
         let oods_rlc_coeffs = rlc_groups.next().unwrap();
 
@@ -169,7 +170,6 @@ impl<M: Embedding> Config<M> {
         drop(linear_forms);
 
         // Compute "The Sum": initial_forms_rlc_coeffsᵀ · evaluations · vector_rlc_coeffs
-        let evaluations = ActiveBuffer::from(evaluations.into_owned());
         let mut the_sum = evaluations.bilinear_form(&initial_forms_rlc_coeffs, &vector_rlc_coeffs);
         drop(evaluations);
 

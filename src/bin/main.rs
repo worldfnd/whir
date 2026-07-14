@@ -188,7 +188,7 @@ where
         &[&vector_buffer],
         vec![&witness],
         prove_linear_forms,
-        Cow::Borrowed(evaluations.as_slice()),
+        ActiveBuffer::from(evaluations.as_slice()),
     );
     let whir_prove_time = whir_prove_time.elapsed();
 

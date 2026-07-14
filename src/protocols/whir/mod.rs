@@ -253,7 +253,7 @@ mod tests {
             &[&vector_buffer],
             vec![&witness],
             prove_linear_forms,
-            Cow::Borrowed(evaluations.as_slice()),
+            ActiveBuffer::from(evaluations.as_slice()),
         );
 
         // Reconstruct verifier's view of the transcript
@@ -434,7 +434,7 @@ mod tests {
             &vector_buffers.iter().collect::<Vec<_>>(),
             witnesses.iter().collect(),
             prove_linear_forms,
-            Cow::Borrowed(evaluations.as_slice()),
+            ActiveBuffer::from(evaluations.as_slice()),
         );
 
         // Reconstruct verifier's transcript view
@@ -588,7 +588,7 @@ mod tests {
             &[&vec1_buffer, &vec_wrong_buffer],
             vec![&witness1, &witness2],
             prove_linear_forms,
-            Cow::Borrowed(evaluations.as_slice()),
+            ActiveBuffer::from(evaluations.as_slice()),
         );
 
         // Verification should fail because the cross-terms don't match the commitment
@@ -710,7 +710,7 @@ mod tests {
             &vector_buffers.iter().collect::<Vec<_>>(),
             witnesses.iter().collect(),
             prove_linear_forms,
-            Cow::Borrowed(evaluations.as_slice()),
+            ActiveBuffer::from(evaluations.as_slice()),
         );
 
         // Verify
@@ -857,7 +857,7 @@ mod tests {
             &buffer_refs,
             vec![&batched_witness],
             prove_linear_forms,
-            Cow::Borrowed(values.as_slice()),
+            ActiveBuffer::from(values.as_slice()),
         );
 
         // Reconstruct verifier's view of the transcript using the IOPattern and prover's data

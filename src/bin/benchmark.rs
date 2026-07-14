@@ -170,7 +170,7 @@ where
             &[&vector_buffer],
             vec![&witness],
             vec![],
-            Cow::Owned(vec![]),
+            ActiveBuffer::from(vec![]),
         );
 
         let whir_ldt_prover_time = whir_ldt_prover_time.elapsed();
@@ -255,7 +255,7 @@ where
             &[&vector_buffer],
             vec![&witness],
             prove_linear_forms,
-            Cow::Borrowed(evaluations.as_slice()),
+            ActiveBuffer::from(evaluations.as_slice()),
         );
 
         let whir_prover_time = whir_prover_time.elapsed();
