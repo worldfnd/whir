@@ -3,15 +3,18 @@ use std::borrow::Cow;
 use ark_std::rand::distributions::{Distribution, Standard};
 use divan::{black_box, AllocProfiler, Bencher};
 use spongefish::Codec;
-use whir::algebra::embedding::{Basefield, Embedding};
-use whir::algebra::fields::Field64_3;
-use whir::algebra::linear_form::LinearForm;
-use whir::buffer::{ActiveBuffer, BufferOps};
-use whir::cmdline_utils::AvailableHash::Blake3;
-use whir::parameters::ProtocolParameters;
-use whir::protocols::whir::Config;
-use whir::transcript::codecs::Empty;
-use whir::transcript::{DomainSeparator, ProverState};
+use whir::{
+    algebra::{
+        embedding::{Basefield, Embedding},
+        fields::Field64_3,
+        linear_form::LinearForm,
+    },
+    buffer::{ActiveBuffer, BufferOps},
+    cmdline_utils::AvailableHash::Blake3,
+    parameters::ProtocolParameters,
+    protocols::whir::Config,
+    transcript::{codecs::Empty, DomainSeparator, ProverState},
+};
 
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
@@ -42,28 +45,28 @@ fn whir_ldt(bencher: Bencher, size: u64) {
             (input, params)
         })
         .bench_values(|(input, params)| {
-            run_whir::<WhirEmbedding>(input, params, vec![], Cow::Borrowed(&vec![]));
+            run_whir::<WhirEmbedding>(&input, &params, vec![], Cow::Borrowed(&[]));
         });
 }
 
-fn run_whir<'a, M: Embedding + Default>(
-    input: ActiveBuffer<M::Source>,
-    params: ProtocolParameters,
+fn run_whir<M: Embedding + Default>(
+    input: &ActiveBuffer<M::Source>,
+    params: &ProtocolParameters,
     linear_forms: Vec<Box<dyn LinearForm<M::Target>>>,
-    evaluations: Cow<'a, [M::Target]>,
+    evaluations: Cow<'_, [M::Target]>,
 ) where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     M::Target: Codec,
 {
-    let config = Config::<M>::new(input.len(), &params);
+    let config = Config::<M>::new(input.len(), params);
     let ds = DomainSeparator::protocol(&config)
-        .session(&format!("Benchmark"))
+        .session(&"Benchmark".to_string())
         .instance(&Empty);
     let mut prover_state = ProverState::new_std(&ds);
-    let witness = config.commit(&mut prover_state, &[&input]);
+    let witness = config.commit(&mut prover_state, &[input]);
     let result = config.prove(
         &mut prover_state,
-        &[&input],
+        &[input],
         vec![&witness],
         linear_forms,
         evaluations,
