@@ -16,7 +16,7 @@ use whir::transcript::{DomainSeparator, ProverState};
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
 
-const SIZES: &[u64] = &[1 << 16, 1 << 18, 1 << 20];
+const SIZES: &[u64] = &[1 << 16, 1 << 18, 1 << 20, 1 << 21];
 
 type WhirEmbedding = Basefield<Field64_3>;
 
