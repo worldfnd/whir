@@ -26,8 +26,20 @@ pub struct Config {
     pub threshold: u64,
 }
 
+/// Failure modes for [`Config::grind_to`].
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum PowError {
+    /// `target − analytic_error` exceeds what a single grind slot can deliver
+    /// (`MAX_DIFFICULTY = 60` bits, matching the grinding engine's capacity).
+    #[error("required {required} bits exceeds the {max} grind cap")]
+    GapExceedsGrindCap { required: Bits, max: Bits },
+}
+
+/// Largest gap a single grind slot can close (in bits).
+pub const MAX_DIFFICULTY: f64 = 60.0;
+
 pub fn threshold(difficulty: Bits) -> u64 {
-    assert!((0.0..=60.0).contains(&difficulty.into()));
+    assert!((0.0..=MAX_DIFFICULTY).contains(&difficulty.into()));
 
     let threshold = (64.0 - f64::from(difficulty)).exp2().ceil();
     #[allow(clippy::cast_sign_loss)]
@@ -62,6 +74,34 @@ impl Config {
 
     pub fn difficulty(&self) -> Bits {
         difficulty(self.threshold)
+    }
+
+    /// Build a PoW config whose difficulty closes the gap `target - analytic_error`,
+    /// clamped at zero.
+    ///
+    /// Used by parameter solvers: each PoW slot independently lifts its own
+    /// soundness up to `target`. The caller is responsible for ensuring
+    /// `analytic_error` is computed from the local protocol step (see e.g.
+    /// `params::sumcheck`).
+    ///
+    /// Returns [`PowError::GapExceedsGrindCap`] if the required difficulty
+    /// exceeds [`MAX_DIFFICULTY`] — the spec is too tight for any single slot.
+    pub fn grind_to(
+        target: Bits,
+        analytic_error: Bits,
+        hash_id: EngineId,
+    ) -> Result<Self, PowError> {
+        let gap = (f64::from(target) - f64::from(analytic_error)).max(0.0);
+        if gap > MAX_DIFFICULTY {
+            return Err(PowError::GapExceedsGrindCap {
+                required: Bits::new(gap),
+                max: Bits::new(MAX_DIFFICULTY),
+            });
+        }
+        Ok(Self {
+            hash_id,
+            threshold: threshold(Bits::new(gap)),
+        })
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(engine)))]

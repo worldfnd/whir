@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 104921a4117ed8255308c1ea5d3e12c72356ef72ef0d93fc0f24ed29f93fdd3a # shrinks to tuning = TuningSpec { vector_size: 32, starting_log_inv_rate: 3, folding_factor: Constant(1) }

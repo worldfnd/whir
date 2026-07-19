@@ -7,9 +7,10 @@ use tracing::instrument;
 
 use super::{utils::BlindingPolynomials, Config};
 use crate::{
+    algebra::embedding::Identity,
     buffer::{ActiveBuffer, BufferOps},
     hash::Hash,
-    protocols::{irs_commit, whir},
+    protocols::whir,
     transcript::{
         Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,
     },
@@ -29,10 +30,10 @@ pub struct Commitment<F: Field> {
 #[derive(Clone, Debug)]
 pub struct Witness<F: Field> {
     pub f_hat_vectors: Vec<Vec<F>>,
-    pub f_hat_witnesses: Vec<irs_commit::Witness<F, F>>,
+    pub f_hat_witnesses: Vec<whir::Witness<F, Identity<F>>>,
     pub blinding_polynomials: Vec<BlindingPolynomials<F>>,
     pub blinding_vectors: Vec<Vec<F>>,
-    pub blinding_witness: irs_commit::Witness<F, F>,
+    pub blinding_witness: whir::Witness<F, Identity<F>>,
 }
 
 impl<F: Field> Config<F> {
@@ -56,7 +57,8 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(
-            self.blinded_commitment.initial_committer.num_vectors, 1,
+            self.blinded_commitment.initial_committer.num_vectors(),
+            1,
             "zkWHIR currently expects one vector per commitment"
         );
 
@@ -99,7 +101,7 @@ impl<F: Field> Config<F> {
             blinding_polynomials.push(blinding);
         }
 
-        let blinding_num_vectors = self.blinding_commitment.initial_committer.num_vectors;
+        let blinding_num_vectors = self.blinding_commitment.initial_committer.num_vectors();
         assert_eq!(
             blinding_num_vectors,
             polynomials.len() * (num_witness_variables + 1),

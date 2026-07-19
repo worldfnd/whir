@@ -228,7 +228,8 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(
-            self.blinded_commitment.initial_committer.num_vectors, 1,
+            self.blinded_commitment.initial_committer.num_vectors(),
+            1,
             "zkWHIR currently expects one vector per commitment"
         );
         assert_eq!(
@@ -243,7 +244,7 @@ impl<F: Field> Config<F> {
         );
         assert_eq!(
             witness.blinding_vectors.len(),
-            self.blinding_commitment.initial_committer.num_vectors,
+            self.blinding_commitment.initial_committer.num_vectors(),
             "blinding vectors/witness mismatch"
         );
         assert_eq!(
@@ -322,7 +323,7 @@ impl<F: Field> Config<F> {
         let initial_in_domain = {
             #[cfg(feature = "tracing")]
             let _span = tracing::info_span!("open_f_hat").entered();
-            let witness_refs: Vec<_> = f_hat_witnesses.iter().collect();
+            let witness_refs: Vec<_> = f_hat_witnesses.iter().map(|w| &w.irs).collect();
             self.blinded_commitment
                 .initial_committer
                 .open(prover_state, &witness_refs)

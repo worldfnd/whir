@@ -16,6 +16,7 @@ pub mod irs_commit;
 pub mod mask_proximity;
 pub mod matrix_commit;
 pub mod merkle_tree;
+pub mod params;
 pub mod proof_of_work;
 pub mod sumcheck;
 pub mod whir;

@@ -2,13 +2,13 @@ use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
 
-use crate::engines::EngineId;
+use crate::{engines::EngineId, protocols::params::DecodingRegime};
 
 /// Configuration parameters for WHIR proofs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolParameters {
-    /// Whether to require unique decoding.
-    pub unique_decoding: bool,
+    /// Reed–Solomon decoding regime: `Unique` or `Johnson` (list-decoding).
+    pub decoding_regime: DecodingRegime,
     /// The logarithmic inverse rate for sampling.
     pub starting_log_inv_rate: usize,
     /// Folding factor for the initial round.
@@ -30,13 +30,7 @@ impl Display for ProtocolParameters {
         writeln!(
             f,
             "Targeting {}-bits of security with {}-bits of PoW using {} decoding",
-            self.security_level,
-            self.pow_bits,
-            if self.unique_decoding {
-                "unique"
-            } else {
-                "list"
-            }
+            self.security_level, self.pow_bits, self.decoding_regime,
         )?;
         writeln!(
             f,

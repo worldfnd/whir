@@ -1,11 +1,4 @@
-// NOTE ON BUFFER ABSTRACTION: since verifier is not succinct, full vector readbacks are forced
-// consider alternative approaches here
-
-//! Base Case Linear Opening Protocol
-//!
-//! It support honest verifier zero-knowledge (HVZK), but is not succinct.
-//!
-//! <https://eprint.iacr.org/2026/391.pdf> § 7.
+//! Non-succinct linear opening (Construction 7.2, p.43). HVZK in ZK mode.
 
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
@@ -16,7 +9,7 @@ use crate::{
     algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
     buffer::{ActiveBuffer, Buffer, BufferOps},
     hash::Hash,
-    protocols::{irs_commit, sumcheck},
+    protocols::{irs_commit, proof_of_work, sumcheck},
     transcript::{
         codecs::U64, Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage,
         VerifierState,
@@ -25,26 +18,80 @@ use crate::{
     verify,
 };
 
-/// Output from the base case protocol (shared by prover and verifier).
 #[must_use]
 pub struct Opening<F: Field> {
     pub evaluation_points: Vec<F>,
     pub linear_form_evaluation: F,
 }
 
+/// Standard / ZeroKnowledge selector for basecase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BasecaseMode {
+    Standard,
+    ZeroKnowledge,
+}
+
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<F: Field> {
-    pub commit: irs_commit::Config<Identity<F>>,
-    pub sumcheck: sumcheck::Config<F>,
-
-    /// Whether to mask the vectors, which adds HVZK.
-    pub masked: bool,
+    commit: irs_commit::Config<Identity<F>>,
+    sumcheck: sumcheck::Config<F>,
+    mode: BasecaseMode,
+    pow: proof_of_work::Config,
 }
 
 impl<F: Field> Config<F> {
+    /// Standard basecase has no γ challenge — PoW must be `none()`. ZK
+    /// basecase has a γ-combination slot (Lemma 7.4) and may or may not need
+    /// PoW depending on whether the analytic floor already clears the target
+    /// (under unique decoding it often does).
+    pub fn new(
+        commit: irs_commit::Config<Identity<F>>,
+        sumcheck: sumcheck::Config<F>,
+        mode: BasecaseMode,
+        pow: proof_of_work::Config,
+    ) -> Self {
+        let has_pow = pow != proof_of_work::Config::none();
+        debug_assert!(
+            !matches!(mode, BasecaseMode::Standard) || !has_pow,
+            "Standard basecase has no γ challenge — pow must be none()",
+        );
+        Self {
+            commit,
+            sumcheck,
+            mode,
+            pow,
+        }
+    }
+
+    pub const fn commit(&self) -> &irs_commit::Config<Identity<F>> {
+        &self.commit
+    }
+
+    pub const fn sumcheck(&self) -> &sumcheck::Config<F> {
+        &self.sumcheck
+    }
+
+    pub const fn mode(&self) -> BasecaseMode {
+        self.mode
+    }
+
+    pub const fn pow(&self) -> proof_of_work::Config {
+        self.pow
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn set_pow_for_test(&mut self, pow: proof_of_work::Config) {
+        self.pow = pow;
+    }
+
     pub const fn size(&self) -> usize {
-        self.sumcheck.initial_size
+        self.sumcheck.initial_size()
+    }
+
+    pub const fn is_zk(&self) -> bool {
+        matches!(self.mode, BasecaseMode::ZeroKnowledge)
     }
 
     pub fn prove<H, R>(
@@ -65,10 +112,10 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
         Standard: Distribution<F>,
     {
-        assert_eq!(self.commit.interleaving_depth, 1);
-        assert_eq!(self.commit.num_vectors, 1);
-        assert_eq!(self.commit.vector_size, self.sumcheck.initial_size);
-        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size));
+        assert_eq!(self.commit.interleaving_depth(), 1);
+        assert_eq!(self.commit.num_vectors(), 1);
+        assert_eq!(self.commit.vector_size(), self.sumcheck.initial_size());
+        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size()));
         debug_assert_eq!(vector.dot(&covector), sum);
         if self.size() == 0 {
             return Opening {
@@ -77,76 +124,23 @@ impl<F: Field> Config<F> {
             };
         }
 
-        // Even more trivial non-zk protocol: send f and r directly.
-        if !self.masked {
-            // TODO: avoid these big readbacks even though they are transcript-sized
-            prover_state.prover_messages(vector.to_slice());
-            prover_state.prover_messages(witness.masks.to_slice());
-            let _ = self.commit.open(prover_state, &[witness]);
-            let point = self
-                .sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
-                .round_challenges;
-            assert!(
-                !vector.to_slice().first().expect("Proof failed").is_zero(),
-                "Proof failed"
-            );
-            return Opening {
-                evaluation_points: point,
-                linear_form_evaluation: *covector.to_slice().first().expect("Proof failed"),
-            };
-        }
+        let blinding_witness =
+            self.maybe_blind_prove(prover_state, &mut vector, witness, &covector, &mut sum);
 
-        // Create masking vector.
-        let mask = ActiveBuffer::random(prover_state.rng(), vector.len());
+        let witnesses: Vec<&irs_commit::Witness<F>> = blinding_witness
+            .as_ref()
+            .map_or_else(|| vec![witness], |b| vec![b, witness]);
+        let _ = self.commit.open(prover_state, &witnesses);
 
-        // Commit to the masking vector.
-        let mask_witness = self.commit.commit(prover_state, &[&mask]);
-
-        // Compute and send linear form of mask (μ' in paper).
-        let mask_sum = mask.dot(&covector);
-        prover_state.prover_message(&mask_sum);
-
-        // RLC the mask with the vector
-        let mask_rlc = prover_state.verifier_message::<F>();
-        assert!(!mask_rlc.is_zero(), "Proof failed");
-        let mut masked_vector = mask;
-        vector.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_vector, mask_rlc);
-        prover_state.prover_messages(masked_vector.to_slice());
-
-        // Send combined IRS randomness. (r^* in paper)
-        let mut masked_masks = mask_witness.masks.clone();
-        witness
-            .masks
-            .mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut masked_masks, mask_rlc);
-        prover_state.prover_messages(masked_masks.to_slice());
-
-        // Open the commitment and mask simultaneously.
-        let _ = self.commit.open(prover_state, &[&mask_witness, witness]);
-
-        // Run sumcheck to reduce linear form claim
-        let mut masked_sum = mask_sum + mask_rlc * sum;
         let point = self
             .sumcheck
-            .prove(
-                prover_state,
-                &mut masked_vector,
-                &mut covector,
-                &mut masked_sum,
-                &[],
-            )
+            .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
             .round_challenges;
 
-        // If the MLE of `masked_vector` evaluates to zero, the verifier can not proceed.
-        // Basically the sumcheck equation has degenerated to 0 * l(r) = 0, which provides
-        // no constraints on l(r) that the verifier can return.
-        // This event is cryptographically unlikely as `F` is challenge sized.
+        // Negligible event over a challenge-sized field; without it the verifier
+        // cannot derive `l(r) = sum / vector_mle(r)`.
         assert!(
-            !masked_vector
-                .to_slice()
-                .first()
-                .expect("Proof failed")
-                .is_zero(),
+            !vector.to_slice().first().expect("Proof failed").is_zero(),
             "Proof failed"
         );
 
@@ -156,10 +150,70 @@ impl<F: Field> Config<F> {
         }
     }
 
+    /// ZK: commits a blinding codeword, runs the RLC, mutates `vector`/`sum` to
+    /// the combined values, sends them cleartext. Standard: sends `vector` and
+    /// `witness.masks` cleartext (no ZK).
+    fn maybe_blind_prove<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        vector: &mut ActiveBuffer<F>,
+        witness: &irs_commit::Witness<F>,
+        covector: &ActiveBuffer<F>,
+        sum: &mut F,
+    ) -> Option<irs_commit::Witness<F>>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        F: Codec<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+        Standard: Distribution<F>,
+    {
+        match self.mode {
+            BasecaseMode::Standard => {
+                prover_state.prover_messages(vector.to_slice());
+                prover_state.prover_messages(witness.masks.to_slice());
+                None
+            }
+            BasecaseMode::ZeroKnowledge => {
+                let mut blinding_vector = ActiveBuffer::random(prover_state.rng(), vector.len());
+                let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
+                let blinding_inner_product = blinding_vector.dot(covector);
+                prover_state.prover_message(&blinding_inner_product);
+
+                // Grind the Theorem 7.1 γ-combination gap before γ is sampled.
+                self.pow.prove(prover_state);
+
+                let combination_randomness = prover_state.verifier_message::<F>();
+                assert!(!combination_randomness.is_zero(), "Proof failed");
+
+                vector.mixed_scalar_mul_add_to(
+                    &Identity::<F>::new(),
+                    &mut blinding_vector,
+                    combination_randomness,
+                );
+                *vector = blinding_vector;
+                prover_state.prover_messages(vector.to_slice());
+
+                let mut combined_irs_randomness = blinding_witness.masks.clone();
+                witness.masks.mixed_scalar_mul_add_to(
+                    &Identity::<F>::new(),
+                    &mut combined_irs_randomness,
+                    combination_randomness,
+                );
+                prover_state.prover_messages(combined_irs_randomness.to_slice());
+
+                *sum = blinding_inner_product + combination_randomness * *sum;
+                Some(blinding_witness)
+            }
+        }
+    }
+
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-        commitment: &irs_commit::Commitment<F>,
+        commitment: &irs_commit::Commitment,
         mut sum: F,
     ) -> VerificationResult<Opening<F>>
     where
@@ -170,10 +224,10 @@ impl<F: Field> Config<F> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        assert_eq!(self.commit.interleaving_depth, 1);
-        assert_eq!(self.commit.num_vectors, 1);
-        assert_eq!(self.commit.vector_size, self.sumcheck.initial_size);
-        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size));
+        assert_eq!(self.commit.interleaving_depth(), 1);
+        assert_eq!(self.commit.num_vectors(), 1);
+        assert_eq!(self.commit.vector_size(), self.sumcheck.initial_size());
+        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size()));
         if self.size() == 0 {
             return Ok(Opening {
                 evaluation_points: Vec::new(),
@@ -181,71 +235,70 @@ impl<F: Field> Config<F> {
             });
         }
 
-        // Unmasked protocol
-        if !self.masked {
-            let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
-            let masks = verifier_state
-                .prover_messages_vec(self.commit.mask_length * self.commit.num_messages())?;
-            let evals = self.commit.verify(verifier_state, &[commitment])?;
-            let point = self
-                .sumcheck
-                .verify(verifier_state, &mut sum)?
-                .round_challenges;
+        let blind = self.maybe_receive_blind(verifier_state, &mut sum)?;
 
-            for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE])) {
-                // We expected `f(x) + x^l · g(x)` where l = deg(f) + 1, f is the message and g the mask.
-                let expected = univariate_evaluate(&vector, point)
-                    + point.pow([self.commit.message_length() as u64])
-                        * univariate_evaluate(&masks, point);
-                verify!(value == expected);
-            }
-            let mle = multilinear_extend(&vector, &point);
-            verify!(!mle.is_zero());
-            let linear_mle = sum / mle;
-            return Ok(Opening {
-                evaluation_points: point,
-                linear_form_evaluation: linear_mle,
-            });
-        }
+        let vector = verifier_state.prover_messages_vec(self.commit.vector_size())?;
+        let irs_randomness = verifier_state
+            .prover_messages_vec(self.commit.mask_length() * self.commit.num_messages())?;
 
-        let mask_commitment = self.commit.receive_commitment(verifier_state)?;
-        let mask_sum: F = verifier_state.prover_message()?;
-        let mask_rlc: F = verifier_state.verifier_message();
-        verify!(!mask_rlc.is_zero());
-        let masked_vector: Vec<F> = verifier_state.prover_messages_vec(self.commit.vector_size)?;
-        let masked_masks: Vec<F> = verifier_state.prover_messages_vec(self.commit.mask_length)?;
+        let (commitments, weights): (Vec<&irs_commit::Commitment>, Vec<F>) = match &blind {
+            Some((b, gamma)) => (vec![b, commitment], vec![F::ONE, *gamma]),
+            None => (vec![commitment], vec![F::ONE]),
+        };
+        let evals = self.commit.verify(verifier_state, &commitments)?;
 
-        // Open the commitment and mask simultaneously.
-        let evals = self
-            .commit
-            .verify(verifier_state, &[&mask_commitment, commitment])?;
-
-        // Spot check evaluations.
-        for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE, mask_rlc])) {
-            // We expected `f(x) + x^l · g(x)` where l = deg(f) + 1, f is the message and g the mask.
-            let expected = univariate_evaluate(&masked_vector, point)
+        // Spot-check: Enc_C(vector, irs_randomness)(x) = Σ weights · opened_row(x).
+        for (&point, value) in zip_strict(&evals.points, evals.values(&weights)) {
+            let expected = univariate_evaluate(&vector, point)
                 + point.pow([self.commit.message_length() as u64])
-                    * univariate_evaluate(&masked_masks, point);
+                    * univariate_evaluate(&irs_randomness, point);
             verify!(value == expected);
         }
 
-        // Sumcheck on masked inner product
-        let mut masked_sum = mask_sum + mask_rlc * sum;
         let point = self
             .sumcheck
-            .verify(verifier_state, &mut masked_sum)?
+            .verify(verifier_state, &mut sum)?
             .round_challenges;
 
-        // Compute implied MLE of the linear form
-        // f*(r) · l(r) = sum  =>  l(r) = sum / f*(r)
-        let masked_mle = multilinear_extend(&masked_vector, &point);
-        verify!(!masked_mle.is_zero());
-        let linear_mle = masked_sum / masked_mle;
+        // l(r) = sum / vector_mle(r), where l is the implicit linear form.
+        let mle = multilinear_extend(&vector, &point);
+        verify!(!mle.is_zero());
+        let linear_mle = sum / mle;
 
         Ok(Opening {
             evaluation_points: point,
             linear_form_evaluation: linear_mle,
         })
+    }
+
+    /// ZK: reads the blinding commitment + μ' + γ, mutates `sum` to the
+    /// combined value, returns `(commitment, γ)`. Standard: no-op.
+    fn maybe_receive_blind<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        sum: &mut F,
+    ) -> VerificationResult<Option<(irs_commit::Commitment, F)>>
+    where
+        H: DuplexSpongeInterface,
+        F: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        match self.mode {
+            BasecaseMode::Standard => Ok(None),
+            BasecaseMode::ZeroKnowledge => {
+                let blinding_commitment = self.commit.receive_commitment(verifier_state)?;
+                let blinding_inner_product: F = verifier_state.prover_message()?;
+                // Grind the Theorem 7.1 γ-combination gap before γ is sampled.
+                self.pow.verify(verifier_state)?;
+                let combination_randomness: F = verifier_state.verifier_message();
+                verify!(!combination_randomness.is_zero());
+                *sum = blinding_inner_product + combination_randomness * *sum;
+                Ok(Some((blinding_commitment, combination_randomness)))
+            }
+        }
     }
 }
 
@@ -257,27 +310,26 @@ mod tests {
     use tracing::instrument;
 
     use super::*;
-    use crate::{
-        algebra::fields, protocols::proof_of_work, transcript::DomainSeparator, type_info::Type,
-    };
+    use crate::{algebra::fields, protocols::proof_of_work, transcript::DomainSeparator};
 
     impl<F: Field> Config<F> {
         pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
             let commit =
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
-            (commit, bool::weighted(0.8)).prop_map(move |(commit, masked)| Self {
-                commit: irs_commit::Config {
-                    out_domain_samples: 0,
-                    ..commit
+            (commit, bool::weighted(0.8)).prop_map(move |(commit, is_zk)| Self {
+                commit,
+                sumcheck: sumcheck::Config::new(
+                    size,
+                    proof_of_work::Config::none(),
+                    size.next_power_of_two().trailing_zeros() as usize,
+                    sumcheck::SumcheckMode::Standard,
+                ),
+                mode: if is_zk {
+                    BasecaseMode::ZeroKnowledge
+                } else {
+                    BasecaseMode::Standard
                 },
-                sumcheck: sumcheck::Config {
-                    field: Type::new(),
-                    initial_size: size,
-                    round_pow: proof_of_work::Config::none(),
-                    num_rounds: size.next_power_of_two().trailing_zeros() as usize,
-                    mask_length: 0,
-                },
-                masked,
+                pow: proof_of_work::Config::none(),
             })
         }
     }
@@ -288,7 +340,6 @@ mod tests {
         F: Field + Codec,
         Standard: Distribution<F>,
     {
-        // Pseudo-random Instance
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
             .session(&format!("Test at {}:{}", file!(), line!()))
@@ -298,7 +349,6 @@ mod tests {
         let covector = ActiveBuffer::random(&mut rng, config.size());
         let sum = vector.dot(&covector);
 
-        // Prover
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit.commit(&mut prover_state, &[&vector]);
         let prover_result = config.prove(
@@ -314,7 +364,6 @@ mod tests {
         );
         let proof = prover_state.proof();
 
-        // Verifier
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let commitment = config
             .commit

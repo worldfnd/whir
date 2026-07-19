@@ -19,6 +19,7 @@ use whir::{
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
+    protocols::params::DecodingRegime,
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -49,8 +50,8 @@ struct Args {
     #[arg(short = 'k', long = "fold", default_value = "4")]
     folding_factor: usize,
 
-    #[arg(long = "unique-decoding", default_value_t = false)]
-    unique_decoding: bool,
+    #[arg(long = "decoding-regime", default_value = "Johnson")]
+    decoding_regime: DecodingRegime,
 
     #[arg(short = 'f', long = "field", default_value = "Goldilocks3")]
     field: AvailableFields,
@@ -68,7 +69,7 @@ struct BenchmarkOutput {
     repetitions: usize,
     initial_folding_factor: usize,
     folding_factor: usize,
-    unique_decoding: bool,
+    decoding_regime: DecodingRegime,
     field: AvailableFields,
     hash: AvailableHash,
 
@@ -118,7 +119,7 @@ where
     let reps = args.verifier_repetitions;
     let folding_factor = args.folding_factor;
     let first_round_folding_factor = args.first_round_folding_factor;
-    let unique_decoding = args.unique_decoding;
+    let decoding_regime = args.decoding_regime;
 
     std::fs::create_dir_all("outputs").unwrap();
 
@@ -129,7 +130,7 @@ where
         pow_bits,
         initial_folding_factor: first_round_folding_factor,
         folding_factor,
-        unique_decoding,
+        decoding_regime,
         starting_log_inv_rate: starting_rate,
         batch_size: 1,
         hash_id: args.hash.hash_id(),
@@ -301,7 +302,7 @@ where
         repetitions: reps,
         initial_folding_factor: first_round_folding_factor,
         folding_factor,
-        unique_decoding,
+        decoding_regime,
         field: args.field,
         hash: args.hash,
 
