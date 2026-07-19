@@ -3,7 +3,7 @@
 //! Reduces a proximity claim about oracle f (source code C) to a proximity
 //! claim about oracle g (target code C'). Supports optional ZK via mask oracle.
 
-use std::fmt;
+use std::{fmt, num::NonZeroUsize};
 
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
@@ -24,22 +24,32 @@ use crate::{
     protocols::{
         geometric_challenge::{geometric_challenge, geometric_challenge_groups},
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
+        proof_of_work,
     },
     transcript::{
-        Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     verify,
 };
 
+/// Standard / ZeroKnowledge selector for code-switch.
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+pub enum CodeSwitchMode {
+    Standard,
+    ZeroKnowledge { message_mask_length: NonZeroUsize },
+}
+
 /// Code-switching IOR config with optional ZK.
+#[must_use]
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {
-    pub source: IrsConfig<M>,
-    pub target: IrsConfig<Identity<M::Target>>,
-    pub message_mask_length: usize, // l_zk
-    pub out_domain_samples: usize,
+    source: IrsConfig<M>,
+    target: IrsConfig<Identity<M::Target>>,
+    mode: CodeSwitchMode,
+    out_domain_samples: usize,
+    pow: proof_of_work::Config,
 }
 
 /// Prover output from the code-switch.
@@ -51,14 +61,7 @@ pub struct Witness<F: Field> {
 }
 
 /// Verifier output from the code-switch.
-pub type Commitment<F> = IrsCommitment<F>;
-
-/// Mask input for the code-switch prover.
-// TODO : This may be removed after parameter selection PR
-pub enum MaskInput<F> {
-    Disabled,
-    Enabled(ActiveBuffer<F>),
-}
+pub type Commitment = IrsCommitment;
 
 #[inline]
 fn univariate_evaluators<F: Field>(points: &[F], size: usize) -> Vec<UnivariateEvaluation<F>> {
@@ -70,74 +73,128 @@ fn univariate_evaluators<F: Field>(points: &[F], size: usize) -> Vec<UnivariateE
 
 impl<M: Embedding> Config<M> {
     /// Create a code-switch config.
-    ///
-    /// The orchestrator is responsible for:
-    /// - Setting `target_config.mask_length` for ZK mode before passing it in.
-    /// - Computing `out_domain_samples` from the security budget.
-    /// - Setting `message_mask_length` = mask oracle message length (0 for non-ZK).
     pub fn new(
         source_config: IrsConfig<M>,
         target_config: IrsConfig<Identity<M::Target>>,
         out_domain_samples: usize,
-        message_mask_length: usize,
+        mode: CodeSwitchMode,
+        pow: proof_of_work::Config,
     ) -> Self {
         assert_eq!(
-            source_config.num_vectors, 1,
+            source_config.num_vectors(),
+            1,
             "code-switch requires a single source vector"
         );
         assert_eq!(
-            target_config.num_vectors, 1,
+            target_config.num_vectors(),
+            1,
             "code-switch requires a single target vector"
+        );
+        // Construction 9.7 needs at least one OOD challenge; unique-decoding
+        // Standard mode (`t_ood = 0`) is incompatible with code-switch.
+        assert!(
+            out_domain_samples > 0,
+            "code-switch requires t_ood ≥ 1 (Construction 9.7)",
         );
         // Target encodes one polynomial of length ℓ = source.message_length()
         // under C' = D^{ι_t}. The IRS splits the input of length ℓ into ι_t
         // parallel slices of length ℓ/ι_t, each encoded under D.
         assert_eq!(
-            target_config.vector_size,
+            target_config.vector_size(),
             source_config.message_length(),
             "target vector_size must equal source message_length (target encodes one polynomial of length ℓ)"
         );
         assert!(
-            target_config.interleaving_depth.is_power_of_two(),
+            target_config.interleaving_depth().is_power_of_two(),
             "target.interleaving_depth must be a power of 2"
         );
-        // Theorem 9.6: ℓ_zk ≥ r (mask oracle must cover source randomness).
-        if message_mask_length > 0 {
-            assert!(
-                message_mask_length >= source_config.mask_length,
-                "message_mask_length ({message_mask_length}) must be >= source randomness length ({})",
-                source_config.mask_length,
-            );
-            assert!(
-                message_mask_length - source_config.mask_length >= out_domain_samples,
-                "the sampled randomness (s) length must be covering all the out of domain sample requests"
-            );
-            assert!(
-                target_config.mask_length
-                    >= target_config.in_domain_samples + target_config.out_domain_samples,
-                "target encoder violates: t' > r', number of queries should be covered by random mask"
-            );
-        }
         assert!(
-            source_config.mask_length == 0 || message_mask_length > 0,
-            "source with mask_length > 0 (IRS randomness) requires ZK mode (message_mask_length > 0)"
-        );
-        assert!(
-            source_config.interleaving_depth.is_power_of_two(),
+            source_config.interleaving_depth().is_power_of_two(),
             "source.interleaving_depth must be a power of 2"
         );
+        if let CodeSwitchMode::ZeroKnowledge {
+            message_mask_length,
+        } = &mode
+        {
+            let l_zk = message_mask_length.get();
+            // Theorem 9.6: ℓ_zk ≥ r (mask oracle must cover source randomness).
+            assert!(
+                l_zk >= source_config.mask_length(),
+                "message_mask_length ({l_zk}) must be >= source randomness length ({})",
+                source_config.mask_length(),
+            );
+            assert!(
+                l_zk - source_config.mask_length() >= out_domain_samples,
+                "sampled randomness (s) length must cover all out-of-domain sample requests"
+            );
+            // t' = target in-domain queries + OOD queries (Construction 9.7 step 4).
+            // Definition 3.16: a t'-query ZK encoding requires r' ≥ t'; here
+            // r' = target.mask_length.
+            assert!(
+                target_config.mask_length()
+                    >= target_config.in_domain_samples() + out_domain_samples,
+                "target encoder violates t' ≤ r': queries must be covered by target mask"
+            );
+        } else {
+            assert_eq!(
+                source_config.mask_length(),
+                0,
+                "source with IRS randomness requires ZK mode",
+            );
+        }
 
         Self {
             source: source_config,
             target: target_config,
-            message_mask_length,
+            mode,
             out_domain_samples,
+            pow,
         }
+    }
+
+    pub const fn source(&self) -> &IrsConfig<M> {
+        &self.source
+    }
+
+    pub const fn target(&self) -> &IrsConfig<Identity<M::Target>> {
+        &self.target
+    }
+
+    pub const fn mode(&self) -> &CodeSwitchMode {
+        &self.mode
+    }
+
+    pub const fn out_domain_samples(&self) -> usize {
+        self.out_domain_samples
+    }
+
+    pub const fn pow(&self) -> proof_of_work::Config {
+        self.pow
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn target_mut_for_test(&mut self) -> &mut IrsConfig<Identity<M::Target>> {
+        &mut self.target
+    }
+
+    /// Mask oracle length `ℓ_zk`. Returns 0 in Standard mode.
+    pub const fn message_mask_length(&self) -> usize {
+        match &self.mode {
+            CodeSwitchMode::Standard => 0,
+            CodeSwitchMode::ZeroKnowledge {
+                message_mask_length,
+            } => message_mask_length.get(),
+        }
+    }
+
+    /// `true` iff the protocol is configured for ZK.
+    pub const fn is_zk(&self) -> bool {
+        matches!(&self.mode, CodeSwitchMode::ZeroKnowledge { .. })
     }
 
     /// Length of the covector for this code-switch.
     pub fn covector_length(&self) -> usize {
-        self.source.message_length() + self.message_mask_length
+        self.source.message_length() + self.message_mask_length()
     }
 
     /// Prove the code-switch.
@@ -157,18 +214,18 @@ impl<M: Embedding> Config<M> {
     /// `message` is `Fold(f, γ)`, the post-sumcheck polynomial of length
     /// `source.message_length()`.
     ///
-    /// `mask_input` is `(r || s)` from the orchestrator's shared mask tree
-    /// (see Construction 9.7 Step 1, p.55). Must be `None` when
-    /// `message_mask_length == 0`.
+    /// `mask` is `(r || s)` from the orchestrator's shared mask tree
+    /// (see Construction 9.7 Step 1, p.55). Length must equal
+    /// `self.message_mask_length()` — pass an empty slice in Standard mode.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
         message: ActiveBuffer<M::Target>,
-        witness: &IrsWitness<M::Source, M::Target>,
+        witness: &IrsWitness<M::Source>,
         covector: &mut ActiveBuffer<M::Target>,
-        folding_randomness: &ActiveBuffer<M::Target>,
-        mask_input: &MaskInput<M::Target>,
+        folding_randomness: &[M::Target],
+        mask: &ActiveBuffer<M::Target>,
     ) -> Witness<M::Target>
     where
         H: DuplexSpongeInterface,
@@ -176,53 +233,29 @@ impl<M: Embedding> Config<M> {
         Standard: Distribution<M::Target>,
         M::Target: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(message.len(), self.source.message_length());
         assert_eq!(covector.len(), self.covector_length());
+        assert_eq!(mask.len(), self.message_mask_length());
         assert_eq!(
             1 << folding_randomness.len(),
-            self.source.interleaving_depth,
+            self.source.interleaving_depth(),
             "folding_randomness must have length log2(source.interleaving_depth) ({} != log2({}))",
             folding_randomness.len(),
-            self.source.interleaving_depth,
+            self.source.interleaving_depth(),
         );
-        let mask_msg: Option<&ActiveBuffer<M::Target>> = match &mask_input {
-            MaskInput::Disabled => {
-                assert_eq!(
-                    self.message_mask_length, 0,
-                    "MaskInput::Disabled requires message_mask_length == 0"
-                );
-                None
-            }
-            MaskInput::Enabled(mask) => {
-                assert_eq!(
-                    mask.len(),
-                    self.message_mask_length,
-                    "mask_msg length must equal message_mask_length"
-                );
-                Some(mask)
-            }
-        };
-
         // Step 1: g := Enc_{C'}(f, r') — Construction 9.7 Step 1, p.55
         let target_witness = self.target.commit(prover_state, &[&message]);
 
+        // Grind Lemma 9.9 OOD gap before α is sampled.
+        self.pow.prove(prover_state);
+
         // Step 2-3: OOD challenge + answers — Construction 9.7 Steps 2-3, p.55
-        // y := ze_ood(ρ) · [f; r; s] = f(α) + α^ℓ · (r,s)(α)
         let ood_points: Vec<M::Target> = prover_state.verifier_message_vec(self.out_domain_samples);
-        let msg_len = message.len();
-        for &point in &ood_points {
-            let f_eval = message.mixed_univariate_evaluate(&Identity::<M::Target>::new(), point);
-            if let Some(mask) = mask_msg {
-                let mask_eval =
-                    mask.mixed_univariate_evaluate(&Identity::<M::Target>::new(), point);
-                let shift = point.pow([msg_len as u64]);
-                prover_state.prover_message(&(f_eval + shift * mask_eval));
-            } else {
-                prover_state.prover_message(&f_eval);
-            }
-        }
+        self.maybe_send_ood_answers(prover_state, &message, mask, &ood_points);
 
         // Step 4: in-domain queries — Construction 9.7 Step 4, p.55
         let source_evaluations = self.source.open(prover_state, &[witness]);
@@ -243,29 +276,75 @@ impl<M: Embedding> Config<M> {
         // Covector update — sl' from Completeness proof (p.55-56).
         covector.scalar_mul(original_sl_coeff);
         let eval_points = lift(self.source.embedding(), &source_evaluations.points);
-        if self.message_mask_length == 0 {
-            // Non-ZK: single accumulate over all points. OODS and in-domain
-            // share one contiguous run of coefficients.
-            let mut all_evaluators = univariate_evaluators(&ood_points, covector.len());
-            all_evaluators.extend(univariate_evaluators(&eval_points, covector.len()));
-            let constraint_rlc_coeffs = ood_rlc_coeffs.concat(&in_domain_rlc_coeffs);
-            covector.accumulate_univariate_evaluations(&all_evaluators, &constraint_rlc_coeffs);
-        } else {
-            // ZK: OOD contributes to full [f; r; s], in-domain only to [f; r].
-            // The in-domain evaluators have size `masked`, so they only
-            // accumulate into that prefix of the covector.
-            let ood_evaluators = univariate_evaluators(&ood_points, covector.len());
-            covector.accumulate_univariate_evaluations(&ood_evaluators, &ood_rlc_coeffs);
-
-            let masked = self.source.masked_message_length();
-            let in_domain_evaluators = univariate_evaluators(&eval_points, masked);
-            covector
-                .accumulate_univariate_evaluations(&in_domain_evaluators, &in_domain_rlc_coeffs);
-        }
+        self.update_covector(
+            covector,
+            &ood_rlc_coeffs,
+            &ood_points,
+            &in_domain_rlc_coeffs,
+            &eval_points,
+        );
 
         Witness {
             message,
             target_witness,
+        }
+    }
+
+    /// Send OOD answers `y_i = f(α_i) [+ α_i^ℓ · (r ‖ s)(α_i)]`.
+    /// In Standard mode the bracketed term is omitted.
+    fn maybe_send_ood_answers<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        message: &ActiveBuffer<M::Target>,
+        mask: &ActiveBuffer<M::Target>,
+        ood_points: &[M::Target],
+    ) where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        M::Target: Codec<[H::U]>,
+    {
+        let msg_len = message.len();
+        for &point in ood_points {
+            let f_eval = message.mixed_univariate_evaluate(&Identity::<M::Target>::new(), point);
+            let answer = match &self.mode {
+                CodeSwitchMode::Standard => f_eval,
+                CodeSwitchMode::ZeroKnowledge { .. } => {
+                    let mask_eval =
+                        mask.mixed_univariate_evaluate(&Identity::<M::Target>::new(), point);
+                    let shift = point.pow([msg_len as u64]);
+                    f_eval + shift * mask_eval
+                }
+            };
+            prover_state.prover_message(&answer);
+        }
+    }
+
+    /// Accumulate OOD and in-domain weights into the covector.
+    /// Standard mode treats all points uniformly; ZK mode applies OOD over
+    /// the full `[f; r; s]` and in-domain over the `[f; r]` prefix only.
+    fn update_covector(
+        &self,
+        covector: &mut ActiveBuffer<M::Target>,
+        ood_rlc_coeffs: &ActiveBuffer<M::Target>,
+        ood_points: &[M::Target],
+        in_domain_rlc_coeffs: &ActiveBuffer<M::Target>,
+        in_domain_points: &[M::Target],
+    ) {
+        match &self.mode {
+            CodeSwitchMode::Standard => {
+                let mut evaluators = univariate_evaluators(ood_points, covector.len());
+                evaluators.extend(univariate_evaluators(in_domain_points, covector.len()));
+                let scalars = ood_rlc_coeffs.concat(in_domain_rlc_coeffs);
+                covector.accumulate_univariate_evaluations(&evaluators, &scalars);
+            }
+            CodeSwitchMode::ZeroKnowledge { .. } => {
+                let ood_evaluators = univariate_evaluators(ood_points, covector.len());
+                covector.accumulate_univariate_evaluations(&ood_evaluators, ood_rlc_coeffs);
+                let in_domain_evaluators =
+                    univariate_evaluators(in_domain_points, self.source.masked_message_length());
+                covector
+                    .accumulate_univariate_evaluations(&in_domain_evaluators, in_domain_rlc_coeffs);
+            }
         }
     }
 
@@ -301,22 +380,27 @@ impl<M: Embedding> Config<M> {
         verifier_state: &mut VerifierState<H>,
         sum: &mut M::Target,
         folding_randomness: &[M::Target],
-        commitment: &IrsCommitment<M::Target>,
-    ) -> VerificationResult<Commitment<M::Target>>
+        commitment: &IrsCommitment,
+    ) -> VerificationResult<Commitment>
     where
         H: DuplexSpongeInterface,
         Standard: Distribution<M::Target>,
         M::Target: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        verify!(1 << folding_randomness.len() == self.source.interleaving_depth);
+        verify!(1 << folding_randomness.len() == self.source.interleaving_depth());
 
         let collapse_weights = eq_weights(folding_randomness);
 
         // Step 1: target commitment — Construction 9.7 Step 1, p.55
         // Mask oracle is committed in the shared mask tree by the orchestrator.
         let target_commitment = self.target.receive_commitment(verifier_state)?;
+
+        // Grind Lemma 9.9 OOD gap before α is sampled.
+        self.pow.verify(verifier_state)?;
 
         // Step 2-3: OOD — Construction 9.7 Steps 2-3, p.55
         // In ZK mode, ood_answers = f(α) + α^ℓ · (r,s)(α) where (r,s) is
@@ -331,7 +415,7 @@ impl<M: Embedding> Config<M> {
         let collapsed_values: Vec<M::Target> = source_evaluations
             .matrix
             .to_slice()
-            .chunks_exact(self.source.interleaving_depth)
+            .chunks_exact(self.source.interleaving_depth())
             .map(|row| mixed_dot(self.source.embedding(), &collapse_weights, row))
             .collect();
 
@@ -358,7 +442,7 @@ impl<M: Embedding> fmt::Display for Config<M> {
             self.source,
             self.target,
             self.out_domain_samples,
-            self.message_mask_length != 0,
+            self.is_zk(),
         )
     }
 }
@@ -391,27 +475,25 @@ mod tests {
                 select(valid_sizes),
                 0_usize..=3, // src_mask_len (source IRS randomness, post-fold)
                 bool::ANY,   // zk
-                0_usize..=5, // ood (= code-switch t_ood)
+                1_usize..=5, // ood (= code-switch t_ood; ≥ 1 per Construction 9.7)
                 0_usize..=5, // fresh_s_len (≥ ood for assumption (c))
                 select(vec![1_usize, 2, 4]), // ι_s (source interleaving)
                 0_usize..=10, // target.in_domain_samples (t'_in)
-                0_usize..=10, // target.out_domain_samples (t'_out)
             );
 
             scalars.prop_flat_map(
-                move |(size, src_mask_len, zk, ood, fresh_s_len, iota_s, t_in, t_out)| {
+                move |(size, src_mask_len, zk, ood, fresh_s_len, iota_s, t_in)| {
                     // Bound 3 assumption (c): ℓ_zk - r ≥ t_ood ⇒ fresh_s_len ≥ ood.
+                    // Also enforce `ℓ_zk = r + fresh_s_len > 0` so NonZeroUsize
+                    // construction below is total in ZK mode.
                     let fresh_s_len = if zk {
-                        fresh_s_len.max(ood)
+                        let min_fresh = usize::from(src_mask_len == 0);
+                        fresh_s_len.max(ood).max(min_fresh)
                     } else {
                         fresh_s_len
                     };
-                    // Bound 4 assumption (a): target.mask_length ≥ t' = t_in + t_out.
-                    let target_mask = if zk { t_in + t_out } else { 0 };
-                    // ZK with source.mask_length = 0 is valid: the assert
-                    // `source.mask_length == 0 || message_mask_length > 0`
-                    // is trivially satisfied. Allows testing the corner
-                    // where the mask oracle has only fresh randomness.
+                    // Bound 4 assumption (a): target.mask_length ≥ t' = t_in + ood.
+                    let target_mask = if zk { t_in + ood } else { 0 };
                     let source_mask = if zk { src_mask_len } else { 0 };
 
                     IrsConfig::arbitrary(embedding.clone(), 1, size, source_mask, iota_s)
@@ -435,19 +517,31 @@ mod tests {
                                 );
                                 let source = source.clone();
                                 target.prop_map(move |mut target| {
-                                    // IrsConfig::arbitrary samples query counts in
-                                    // [0,10] independently of mask_length; pin them
-                                    // to the values target_mask was sized for so
+                                    // IrsConfig::arbitrary samples in_domain_samples
+                                    // in [0,10] independently of mask_length; pin it
+                                    // to the value target_mask was sized for so
                                     // assumption (a) holds.
                                     if zk {
-                                        target.in_domain_samples = t_in;
-                                        target.out_domain_samples = t_out;
+                                        target.set_in_domain_samples_for_test(t_in);
                                     }
                                     // r = post-fold randomness length (ι_s parallel
                                     // masks fold to a single length-mask_length chunk).
-                                    let r = source.mask_length;
-                                    let message_mask_length = if zk { r + fresh_s_len } else { 0 };
-                                    Self::new(source.clone(), target, ood, message_mask_length)
+                                    let r = source.mask_length();
+                                    let mode = if zk {
+                                        CodeSwitchMode::ZeroKnowledge {
+                                            message_mask_length: NonZeroUsize::new(r + fresh_s_len)
+                                                .expect("ZK ⇒ r + fresh_s_len > 0"),
+                                        }
+                                    } else {
+                                        CodeSwitchMode::Standard
+                                    };
+                                    Self::new(
+                                        source.clone(),
+                                        target,
+                                        ood,
+                                        mode,
+                                        proof_of_work::Config::none(),
+                                    )
                                 })
                             })
                         })
@@ -483,7 +577,7 @@ mod tests {
     where
         Standard: Distribution<F>,
     {
-        let log_iota = config.source.interleaving_depth.trailing_zeros() as usize;
+        let log_iota = config.source.interleaving_depth().trailing_zeros() as usize;
         random_vector(rng, log_iota)
     }
 
@@ -498,27 +592,19 @@ mod tests {
     where
         Standard: Distribution<F>,
     {
-        if config.message_mask_length == 0 {
+        if !config.is_zk() {
             return Vec::new();
         }
         // Lift ι parallel masks (total length source.mask_length × ι) and fold
         // chunks of length source.mask_length down to a single chunk.
         let raw = lift(config.source.embedding(), source_witness.masks.to_slice());
-        let mut mask = fold_chunks(&raw, config.source.mask_length, folding_randomness);
+        let mut mask = fold_chunks(&raw, config.source.mask_length(), folding_randomness);
         // Append fresh padding s of length message_mask_length - source.mask_length.
         mask.extend(random_vector::<F>(
             rng,
-            config.message_mask_length - mask.len(),
+            config.message_mask_length() - mask.len(),
         ));
         mask
-    }
-
-    fn mask_input<F: Copy>(mask_msg: ActiveBuffer<F>) -> MaskInput<F> {
-        if mask_msg.is_empty() {
-            MaskInput::Disabled
-        } else {
-            MaskInput::Enabled(mask_msg)
-        }
     }
 
     fn test_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<Identity<F>>)
@@ -529,7 +615,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         // Commit the full pre-fold vector of length source.vector_size
         // (= ι · message_length), which IRS encodes as ι parallel codewords.
-        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size);
+        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size());
         let initial_sum: F = rng.gen();
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
@@ -559,8 +645,8 @@ mod tests {
             folded_message.clone(),
             &source_witness,
             &mut covector,
-            &ActiveBuffer::from(folding_randomness.clone()),
-            &mask_input(ActiveBuffer::from(mask_msg)),
+            &folding_randomness,
+            &ActiveBuffer::from(mask_msg.as_slice()),
         );
         let proof = prover_state.proof();
 
@@ -588,7 +674,7 @@ mod tests {
         Hash: ProverMessage<[u8]>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
-        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size);
+        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size());
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
@@ -633,8 +719,8 @@ mod tests {
             folded_message,
             &source_witness,
             &mut covector,
-            &ActiveBuffer::from(folding_randomness.clone()),
-            &mask_input(ActiveBuffer::from(mask_msg)),
+            &folding_randomness,
+            &ActiveBuffer::from(mask_msg.as_slice()),
         );
         let proof = prover_state.proof();
 
@@ -667,7 +753,7 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size);
+        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size());
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
@@ -694,8 +780,8 @@ mod tests {
             tampered,
             &source_witness,
             &mut covector,
-            &ActiveBuffer::from(folding_randomness.clone()),
-            &MaskInput::Disabled,
+            &folding_randomness,
+            &ActiveBuffer::from([].as_slice()),
         );
         let proof = prover_state.proof();
 
@@ -771,7 +857,7 @@ mod tests {
         crate::tests::init();
         let configs = Config::arbitrary(Identity::<fields::Field64>::new());
         proptest!(|(seed: u64, config in configs)| {
-            prop_assume!(config.source.in_domain_samples > 0);
+            prop_assume!(config.source.in_domain_samples() > 0);
             test_ior_identity_config(seed, &config);
         });
     }
@@ -779,14 +865,10 @@ mod tests {
     #[test]
     fn test_tampered_ood() {
         crate::tests::init();
-        let configs = Config::arbitrary(Identity::<fields::Field64>::new()).prop_filter(
-            "non-ZK with ood > 0",
-            |config| {
-                config.message_mask_length == 0
-                    && config.source.mask_length == 0
-                    && config.out_domain_samples > 0
-            },
-        );
+        let configs = Config::arbitrary(Identity::<fields::Field64>::new())
+            .prop_filter("non-ZK", |config| {
+                !config.is_zk() && config.source.mask_length() == 0
+            });
         proptest!(|(seed: u64, config in configs)| {
             test_tampered_ood_config(seed, &config);
         });

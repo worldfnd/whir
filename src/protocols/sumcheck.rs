@@ -27,20 +27,102 @@ pub struct SumcheckOpening<F: Field> {
     pub mask_rlc: F,
 }
 
+/// ZK sumcheck mask polynomial dimension.
+///
+/// Validated at construction to be at least `MIN = 3` — the round polynomial
+/// has 3 coefficients (degree-2), so the mask must have at least as many to
+/// hide it. Lemma 6.4 itself only requires `ℓ_zk ≥ 2`; the `3` floor is a
+/// WHIR design choice tied to the degree-2 round polynomial (see
+/// `params::sumcheck::zk_mask_length`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SumcheckMaskLen(usize);
+
+impl SumcheckMaskLen {
+    pub const MIN: usize = 3;
+
+    pub const fn new(n: usize) -> Self {
+        assert!(n >= Self::MIN);
+        Self(n)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SumcheckMode {
+    Standard,
+    ZeroKnowledge { mask_length: SumcheckMaskLen },
+}
+
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<F>
 where
     F: Field,
 {
-    pub field: Type<F>,
-    pub initial_size: usize,
-    pub round_pow: proof_of_work::Config,
-    pub num_rounds: usize,
-    pub mask_length: usize,
+    field: Type<F>,
+    initial_size: usize,
+    round_pow: proof_of_work::Config,
+    num_rounds: usize,
+    mode: SumcheckMode,
 }
 
 impl<F: Field> Config<F> {
+    pub fn new(
+        initial_size: usize,
+        round_pow: proof_of_work::Config,
+        num_rounds: usize,
+        mode: SumcheckMode,
+    ) -> Self {
+        assert!(num_rounds == 0 || initial_size.next_power_of_two() >= 1 << num_rounds);
+        // `SumcheckMaskLen::new` already enforces the ≥ 3 floor at construction;
+        // here we only need the field-characteristic precondition from Lemma 6.4.
+        if matches!(mode, SumcheckMode::ZeroKnowledge { .. }) {
+            assert!(
+                !F::ONE.double().is_zero(),
+                "ZK sumcheck requires char(F) ≠ 2"
+            );
+        }
+        Self {
+            field: Type::new(),
+            initial_size,
+            round_pow,
+            num_rounds,
+            mode,
+        }
+    }
+
+    pub const fn initial_size(&self) -> usize {
+        self.initial_size
+    }
+
+    pub const fn round_pow(&self) -> proof_of_work::Config {
+        self.round_pow
+    }
+
+    pub const fn num_rounds(&self) -> usize {
+        self.num_rounds
+    }
+
+    pub const fn mode(&self) -> &SumcheckMode {
+        &self.mode
+    }
+
+    const fn mask_length(&self) -> usize {
+        match &self.mode {
+            SumcheckMode::Standard => 0,
+            SumcheckMode::ZeroKnowledge { mask_length } => mask_length.get(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn override_round_pow_for_test(&mut self, round_pow: proof_of_work::Config) {
+        self.round_pow = round_pow;
+    }
+
     pub fn final_size(&self) -> usize {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
@@ -81,29 +163,20 @@ impl<F: Field> Config<F> {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
         );
-        // Mask must cover all 3 sumcheck polynomial coefficients (c0, c1, c2)
-        assert!(self.mask_length == 0 || self.mask_length >= 3);
         assert_eq!(a.len(), self.initial_size);
         assert_eq!(b.len(), self.initial_size);
         debug_assert_eq!(a.dot(b), *sum);
-        assert_eq!(masks.len(), self.num_rounds * self.mask_length);
+        assert_eq!(masks.len(), self.num_rounds * self.mask_length());
         let half = F::from(2).inverse().unwrap();
+        let polynomial_len = self.mask_length().max(3);
 
-        let mut mask_sum = F::ZERO;
-        let mut mask_rlc = F::ONE;
-        if self.mask_length > 0 && self.num_rounds > 0 {
-            let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(1));
-            mask_sum = masks.chunks_exact(self.mask_length).map(eval_01).sum::<F>() * sum_multiple;
-            prover_state.prover_message(&mask_sum);
-            mask_rlc = prover_state.verifier_message();
-        }
+        let (mut mask_sum, mask_rlc) = self.maybe_send_initial_mask_sum(prover_state, masks);
 
-        // We do a staggered Sumcheck loop so we can merge the inner fold+compute loops.
-        let mut univariate = Vec::new();
+        let mut univariate = Vec::with_capacity(polynomial_len);
         let mut round_challenges = Vec::with_capacity(self.num_rounds);
         let mut prev_round_challenge = None;
         for (round, mask) in
-            chunks_exact_or_empty(masks, self.mask_length, self.num_rounds).enumerate()
+            chunks_exact_or_empty(masks, self.mask_length(), self.num_rounds).enumerate()
         {
             // Fold and compute sumcheck polynomial in one pass.
             let (c0, c2) = if let Some(w) = prev_round_challenge {
@@ -113,40 +186,33 @@ impl<F: Field> Config<F> {
             };
             let c1 = *sum - c0.double() - c2;
 
-            // Optionally mask with univariate
-            if mask.is_empty() {
-                prover_state.prover_messages(&[c0, c2]);
-            } else {
-                // Initialize to round masking univariate polynomial.
-                univariate.clear();
-                let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(round + 1));
-                univariate.extend(mask.iter().map(|m| sum_multiple * *m));
-
-                // Add constant term from previous and future masks.
-                univariate[0] += (mask_sum - sum_multiple * eval_01(mask)) * half;
-
-                // Add plain sumcheck polynomial
-                univariate[0] += mask_rlc * c0;
-                univariate[1] += mask_rlc * c1;
-                univariate[2] += mask_rlc * c2;
-
-                prover_state.prover_message(&univariate[0]);
-                prover_state.prover_messages(&univariate[2..]);
+            // Build round polynomial. In Standard (`mask = []`, `mask_rlc = 1`,
+            // `mask_sum = 0`) this collapses to `[c0, c1, c2]`.
+            univariate.clear();
+            univariate.resize(polynomial_len, F::ZERO);
+            let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(round + 1));
+            for (u, m) in univariate.iter_mut().zip(mask.iter()) {
+                *u = sum_multiple * *m;
             }
+            univariate[0] += (mask_sum - sum_multiple * eval_01(mask)) * half;
+            univariate[0] += mask_rlc * c0;
+            univariate[1] += mask_rlc * c1;
+            univariate[2] += mask_rlc * c2;
 
-            // Receive the random evaluation point and update the sum
+            prover_state.prover_message(&univariate[0]);
+            prover_state.prover_messages(&univariate[2..]);
+
+            // Receive the random evaluation point and update the sum.
             self.round_pow.prove(prover_state);
             let r = prover_state.verifier_message::<F>();
             round_challenges.push(r);
             *sum = (c2 * r + c1) * r + c0;
-            if self.mask_length > 0 && self.num_rounds > 0 {
-                let masked_sum = univariate_evaluate(&univariate, r);
-                mask_sum = masked_sum - mask_rlc * *sum;
-            }
+
+            mask_sum = univariate_evaluate(&univariate, r) - mask_rlc * *sum;
             prev_round_challenge = Some(r);
         }
         if let Some(w) = prev_round_challenge {
-            // Final fold of the inputs (no polynomial computation)
+            // Final fold of the inputs (no polynomial computation).
             a.fold_pair(b, w);
         }
 
@@ -154,6 +220,35 @@ impl<F: Field> Config<F> {
         SumcheckOpening {
             round_challenges,
             mask_rlc,
+        }
+    }
+
+    fn maybe_send_initial_mask_sum<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        masks: &[F],
+    ) -> (F, F)
+    where
+        H: DuplexSpongeInterface,
+        R: CryptoRng + RngCore,
+        F: Codec<[H::U]>,
+    {
+        match &self.mode {
+            SumcheckMode::Standard => (F::ZERO, F::ONE),
+            SumcheckMode::ZeroKnowledge { mask_length } => {
+                if self.num_rounds == 0 {
+                    return (F::ZERO, F::ONE);
+                }
+                let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(1));
+                let mask_sum = masks
+                    .chunks_exact(mask_length.get())
+                    .map(eval_01)
+                    .sum::<F>()
+                    * sum_multiple;
+                prover_state.prover_message(&mask_sum);
+                let mask_rlc = prover_state.verifier_message();
+                (mask_sum, mask_rlc)
+            }
         }
     }
 
@@ -172,17 +267,10 @@ impl<F: Field> Config<F> {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
         );
-        // Mask must cover all 3 sumcheck polynomial coefficients (c0, c1, c2)
-        assert!(self.mask_length == 0 || self.mask_length >= 3);
 
-        let mut mask_rlc = F::ONE;
-        if self.mask_length > 0 && self.num_rounds > 0 {
-            let mask_sum: F = verifier_state.prover_message()?;
-            mask_rlc = verifier_state.verifier_message();
-            *sum = mask_sum + mask_rlc * *sum;
-        }
+        let mask_rlc = self.maybe_receive_initial_mask_sum(verifier_state, sum)?;
 
-        let mut univariate = vec![F::ZERO; self.mask_length.max(3)];
+        let mut univariate = vec![F::ZERO; self.mask_length().max(3)];
         let mut round_challenges = Vec::with_capacity(self.num_rounds);
         for _ in 0..self.num_rounds {
             // Receive all but linear coefficient.
@@ -191,17 +279,17 @@ impl<F: Field> Config<F> {
                 *c = verifier_state.prover_message()?;
             }
 
-            // Derive linear coefficient from relation `univariate(0) + univariate(1) = sum`
+            // Derive linear coefficient from relation `univariate(0) + univariate(1) = sum`.
             univariate[1] = *sum - univariate[0].double() - univariate[2..].iter().sum::<F>();
 
-            // Check proof of work (if any)
+            // Check proof of work (if any).
             self.round_pow.verify(verifier_state)?;
 
-            // Receive the random evaluation point
+            // Receive the random evaluation point.
             let round_challenge = verifier_state.verifier_message::<F>();
             round_challenges.push(round_challenge);
 
-            // Update the sum
+            // Update the sum.
             *sum = univariate_evaluate(&univariate, round_challenge);
         }
         Ok(SumcheckOpening {
@@ -209,17 +297,46 @@ impl<F: Field> Config<F> {
             mask_rlc,
         })
     }
+
+    fn maybe_receive_initial_mask_sum<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        sum: &mut F,
+    ) -> VerificationResult<F>
+    where
+        H: DuplexSpongeInterface,
+        F: Codec<[H::U]>,
+    {
+        match &self.mode {
+            SumcheckMode::Standard => Ok(F::ONE),
+            SumcheckMode::ZeroKnowledge { .. } => {
+                if self.num_rounds == 0 {
+                    return Ok(F::ONE);
+                }
+                let mask_sum: F = verifier_state.prover_message()?;
+                let mask_rlc = verifier_state.verifier_message();
+                *sum = mask_sum + mask_rlc * *sum;
+                Ok(mask_rlc)
+            }
+        }
+    }
 }
 
 impl<F: Field> fmt::Display for Config<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mode_str = match &self.mode {
+            SumcheckMode::Standard => "standard".to_string(),
+            SumcheckMode::ZeroKnowledge { mask_length } => {
+                format!("zk ℓ_zk={}", mask_length.get())
+            }
+        };
         write!(
             f,
-            "size {} rounds {} pow {:.2} ℓ_zk {}",
+            "size {} rounds {} pow {:.2} {}",
             self.initial_size,
             self.num_rounds,
             self.round_pow.difficulty(),
-            self.mask_length
+            mode_str,
         )
     }
 }
@@ -259,21 +376,22 @@ mod tests {
         Standard: Distribution<F>,
     {
         pub fn arbitrary() -> impl Strategy<Value = Self> {
-            let mask_length = prop_oneof![
-                3 => Just(0_usize),
-                7 => 3_usize..20,
+            let mode_strategy = prop_oneof![
+                3 => Just(SumcheckMode::Standard),
+                7 => (3_usize..20).prop_map(|n| SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(n),
+                }),
             ];
-            (0_usize..(1 << 12), 0_usize..12, mask_length).prop_map(
-                |(initial_size, num_rounds, mask_length)| {
+            (0_usize..(1 << 12), 0_usize..12, mode_strategy).prop_map(
+                |(initial_size, num_rounds, mode)| {
                     let num_rounds =
                         num_rounds.min(initial_size.next_power_of_two().trailing_zeros() as usize);
-                    Self {
-                        field: Type::new(),
+                    Self::new(
                         initial_size,
+                        proof_of_work::Config::none(),
                         num_rounds,
-                        round_pow: proof_of_work::Config::none(),
-                        mask_length,
-                    }
+                        mode,
+                    )
                 },
             )
         }
@@ -294,7 +412,7 @@ mod tests {
         let initial_vector = random_vector(&mut rng, config.initial_size);
         let initial_covector = random_vector(&mut rng, config.initial_size);
         let initial_sum = dot(&initial_vector, &initial_covector);
-        let masks = random_vector(&mut rng, config.mask_length * config.num_rounds);
+        let masks = random_vector(&mut rng, config.mask_length() * config.num_rounds);
 
         // Prover
         let mut vector = ActiveBuffer::from(initial_vector.as_slice());
@@ -327,7 +445,7 @@ mod tests {
         }
 
         let expected_mask_sum: F =
-            chunks_exact_or_empty(&masks, config.mask_length, config.num_rounds)
+            chunks_exact_or_empty(&masks, config.mask_length(), config.num_rounds)
                 .zip(&point)
                 .map(|(m, x)| univariate_evaluate(m, *x))
                 .sum();
@@ -352,8 +470,8 @@ mod tests {
         assert_eq!(verifier_sum, sum);
         verifier_state.check_eof().unwrap();
 
-        // Non-ZK path: mask_rlc defaults to ONE (no combination randomness sampled)
-        if config.mask_length == 0 || config.num_rounds == 0 {
+        // Standard path: mask_rlc defaults to ONE (no combination randomness sampled).
+        if matches!(config.mode, SumcheckMode::Standard) || config.num_rounds == 0 {
             assert_eq!(mask_rlc, F::ONE);
         }
     }
@@ -372,13 +490,14 @@ mod tests {
     fn test_single_round() {
         test_config(
             0,
-            &Config::<Field64> {
-                field: Type::new(),
-                initial_size: 2,
-                round_pow: proof_of_work::Config::none(),
-                num_rounds: 1,
-                mask_length: 3,
-            },
+            &Config::<Field64>::new(
+                2,
+                proof_of_work::Config::none(),
+                1,
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
+            ),
         );
     }
 
@@ -386,13 +505,14 @@ mod tests {
     fn test_two_rounds() {
         test_config(
             0,
-            &Config::<Field64> {
-                field: Type::new(),
-                initial_size: 3,
-                round_pow: proof_of_work::Config::none(),
-                num_rounds: 2,
-                mask_length: 3,
-            },
+            &Config::<Field64>::new(
+                3,
+                proof_of_work::Config::none(),
+                2,
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
+            ),
         );
     }
 
@@ -400,13 +520,14 @@ mod tests {
     fn test_three_rounds() {
         test_config(
             0,
-            &Config::<Field64> {
-                field: Type::new(),
-                initial_size: 5,
-                round_pow: proof_of_work::Config::none(),
-                num_rounds: 3,
-                mask_length: 3,
-            },
+            &Config::<Field64>::new(
+                5,
+                proof_of_work::Config::none(),
+                3,
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
+            ),
         );
     }
 
