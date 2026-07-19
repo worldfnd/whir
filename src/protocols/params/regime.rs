@@ -3,10 +3,20 @@
 //!
 //! # References
 //!
-//! - Johnson proximity-gap error follows the BCSS25 improvement
+//! - Johnson proximity-gap error follows the BCHKS25 improvement
 //!   (`O(n/η^5)`, m=10 at canonical slack) over BCIKS '20.
 //! - Capacity bound follows STIR Conjecture 5.6: `(1 − ρ − η, d/(ρ·η))`-list
 //!   decodability for RS codes.
+//!
+//! - `BCHKS25`: Ben-Sasson, Carmon, Haböck, Kopparty, Saraf, *On Proximity
+//!   Gaps for Reed–Solomon Codes*, IACR ePrint 2025/2055 (Theorem 1.5).
+//!   <https://eprint.iacr.org/2025/2055>
+//! - `BCIKS '20`: Ben-Sasson, Carmon, Ishai, Kopparty, Saraf, *Proximity Gaps
+//!   for Reed–Solomon Codes*, FOCS 2020, IACR ePrint 2020/654.
+//!   <https://eprint.iacr.org/2020/654>
+//! - `STIR`: Arnon, Chiesa, Fenzi, Yogev, *STIR: Reed–Solomon Proximity Testing
+//!   with Fewer Queries*, CRYPTO 2024, IACR ePrint 2024/390 (Conjecture 5.6).
+//!   <https://eprint.iacr.org/2024/390>
 
 use std::f64::consts::LOG2_10;
 
@@ -102,7 +112,7 @@ impl DecodingRegimeParams {
     /// `log₂ ε_mca(C, δ)` for the per-step proximity-gaps error.
     ///
     /// - Unique: `(k − 1) / |F|`, log = `log k − |F|` (with `+ log ρ⁻¹`).
-    /// - Johnson: BCSS25 Theorem 1.5 at canonical `η = √ρ/20`, `m = 10`:
+    /// - Johnson: BCHKS25 Theorem 1.5 at canonical `η = √ρ/20`, `m = 10`:
     ///   `ε ≈ (2·10.5⁵/3) · n · ρ^{−3/2} / |F|`.
     /// - Capacity: STIR Conj 5.6, `ε ≈ d / (η · ρ²) / |F|`.
     pub fn eps_mca_log2(self, log_inv_rate: f64, message_length: usize, field_bits: f64) -> f64 {
@@ -110,15 +120,28 @@ impl DecodingRegimeParams {
         let error = match self {
             Self::Unique => log_k + log_inv_rate,
             Self::Johnson { slack } => {
-                debug_assert!(
-                    slack.into_inner().log2() >= -(0.5 * log_inv_rate + LOG2_10 + 1.0) - 1e-6
+                // η lower bound from BCHKS25; below it the closed form understates
+                // ε_mca. Hard assert (not debug): the variants are `pub`, so an
+                // external caller can pick η, and an over-optimistic soundness
+                // bound must not survive into release builds. Cold path, two
+                // float ops.
+                assert!(
+                    slack.into_inner().log2() >= -(0.5 * log_inv_rate + LOG2_10 + 1.0) - 1e-6,
+                    "Johnson slack η below BCHKS25 lower bound; ε_mca would be over-optimistic",
                 );
-                // BCSS25 with m = 10: log_2(2·10.5⁵/3) + log n + 1.5·log ρ⁻¹.
-                let bcss25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
-                bcss25_const + log_k + 2.5 * log_inv_rate
+                // BCHKS25 with m = 10: log_2(2·10.5⁵/3) + log n + 1.5·log ρ⁻¹.
+                // Substituting n = k/ρ (codeword length) gives the `log_k`
+                // (message length) + 2.5·log ρ⁻¹ form below.
+                let bchks25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
+                bchks25_const + log_k + 2.5 * log_inv_rate
             }
             Self::Capacity { slack } => {
-                debug_assert!(slack.into_inner().log2() >= -(log_inv_rate + LOG2_10 + 1.0) - 1e-6);
+                // η lower bound from STIR Conj 5.6; see the Johnson arm for why
+                // this is a hard assert rather than debug_assert.
+                assert!(
+                    slack.into_inner().log2() >= -(log_inv_rate + LOG2_10 + 1.0) - 1e-6,
+                    "Capacity slack η below STIR Conj 5.6 lower bound; ε_mca would be over-optimistic",
+                );
                 // d / (η · ρ²) at canonical η = ρ/20: log d + log 20 + 3·log ρ⁻¹.
                 log_k + 3.0 * log_inv_rate + LOG2_10 + 1.0
             }
@@ -307,7 +330,7 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// MCA error, Johnson (BCSS25): `log₂(2·10.5⁵/3) + log k + 2.5·log_inv_rate − field_bits`.
+    /// MCA error, Johnson (BCHKS25): `log₂(2·10.5⁵/3) + log k + 2.5·log_inv_rate − field_bits`.
     #[test]
     fn eps_mca_log2_johnson_formula() {
         let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE).sqrt() / 20.0;
@@ -317,8 +340,8 @@ mod tests {
             MCA_MESSAGE_LENGTH,
             MCA_FIELD_BITS,
         );
-        let bcss25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
-        let expected = bcss25_const + (MCA_MESSAGE_LENGTH as f64).log2() + 2.5 * MCA_LOG_INV_RATE
+        let bchks25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
+        let expected = bchks25_const + (MCA_MESSAGE_LENGTH as f64).log2() + 2.5 * MCA_LOG_INV_RATE
             - MCA_FIELD_BITS;
         assert_close(got, expected);
     }
@@ -337,6 +360,56 @@ mod tests {
         let expected = (MCA_MESSAGE_LENGTH as f64).log2() + 3.0 * MCA_LOG_INV_RATE + LOG2_10 + 1.0
             - MCA_FIELD_BITS;
         assert_close(got, expected);
+    }
+
+    // --- Theorem anchors -----------------------------------------------------
+    //
+    // The `*_formula` tests above re-evaluate the same expression as the
+    // implementation, so a wrong constant or exponent updates both sides and
+    // the test stays green. The tests below instead assert against literals
+    // hand-derived from the theorem statements (independently of the collapsed
+    // implementation form), so a transcription error in `eps_mca_log2` is
+    // caught. Fixed inputs: k = 16 (log k = 4), ρ = 1/4 (log ρ⁻¹ = 2), |F| = 2⁶⁴.
+
+    /// Unique: ε ≈ k/|F| · ρ⁻¹ ⇒ log₂ε = log₂16 + 2 − 64 = 4 + 2 − 64 = −58.
+    #[test]
+    fn eps_mca_log2_unique_theorem_anchor() {
+        let got = DecodingRegimeParams::Unique.eps_mca_log2(
+            MCA_LOG_INV_RATE,
+            MCA_MESSAGE_LENGTH,
+            MCA_FIELD_BITS,
+        );
+        assert_close(got, -58.0);
+    }
+
+    /// Johnson (BCHKS25 Thm 1.5, η = √ρ/20, m = 10):
+    /// `ε = (2·10.5⁵/3) · n · ρ^{−3/2} / |F|` with codeword length n = k/ρ = 64.
+    /// log₂ε = log₂(2·10.5⁵/3) + log₂64 + log₂(ρ^{−3/2}) − 64
+    ///       = 16.376624613… + 6 + 3 − 64 = −38.623375386…
+    #[test]
+    fn eps_mca_log2_johnson_theorem_anchor() {
+        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE).sqrt() / 20.0;
+        let got = johnson(canonical_slack).eps_mca_log2(
+            MCA_LOG_INV_RATE,
+            MCA_MESSAGE_LENGTH,
+            MCA_FIELD_BITS,
+        );
+        assert_close(got, -38.623_375_386_827_36);
+    }
+
+    /// Capacity (STIR Conj 5.6, η = ρ/20): `ε = d / (η · ρ²) / |F|` with d = k = 16,
+    /// η = ρ/20 = 1/80, ρ² = 1/16.
+    /// log₂ε = log₂(16 / ((1/80)·(1/16))) − 64 = log₂(16·1280) − 64
+    ///       = log₂20480 − 64 = 14.321928094… − 64 = −49.678071905…
+    #[test]
+    fn eps_mca_log2_capacity_theorem_anchor() {
+        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE) / 20.0;
+        let got = capacity(canonical_slack).eps_mca_log2(
+            MCA_LOG_INV_RATE,
+            MCA_MESSAGE_LENGTH,
+            MCA_FIELD_BITS,
+        );
+        assert_close(got, -49.678_071_905_112_64);
     }
 
     /// `from_policy` dispatches to the canonical constructor for each regime.

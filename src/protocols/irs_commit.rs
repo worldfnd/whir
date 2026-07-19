@@ -641,6 +641,17 @@ pub(crate) fn num_in_domain_queries(
     let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
     // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
     let log_one_minus_delta = regime.one_minus_distance_log2(-rate.log2());
+    // Query soundness requires a positive decoding distance (1 − δ < 1). At
+    // rate == 1 (and beyond the decoding radius generally) `1 − δ ≥ 1`, so
+    // `log_one_minus_delta ≥ 0` and the division below is by a non-positive
+    // number: `ceil() as usize` then saturates to 0 and the `NonZeroUsize` clamp
+    // silently yields q = 1 — a single query with almost no soundness. The layout
+    // guard rejects rate == 1 up front; this backstops any other caller. See
+    // `LayoutError::StartingRateBelowOne`.
+    assert!(
+        log_one_minus_delta < 0.0,
+        "rate too high for query soundness: 1 − δ ≥ 1 (log₂ = {log_one_minus_delta})",
+    );
     let q = (security_target / -log_one_minus_delta).ceil() as usize;
     NonZeroUsize::new(q).unwrap_or(NonZeroUsize::MIN)
 }
