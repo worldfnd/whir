@@ -382,7 +382,7 @@ mod tests {
         assert_close(got, -58.0);
     }
 
-    /// Johnson (BCHKS25 Thm 1.5, η = √ρ/20, m = 10):
+    /// Johnson (BCHKS25 Theorem 1.5, η = √ρ/20, m = 10):
     /// `ε = (2·10.5⁵/3) · n · ρ^{−3/2} / |F|` with codeword length n = k/ρ = 64.
     /// log₂ε = log₂(2·10.5⁵/3) + log₂64 + log₂(ρ^{−3/2}) − 64
     ///       = 16.376624613… + 6 + 3 − 64 = −38.623375386…
