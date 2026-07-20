@@ -260,7 +260,7 @@ mod tests {
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
-        buffer::ActiveBuffer,
+        buffer::Buffer,
         hash,
         parameters::ProtocolParameters,
         protocols::params::DecodingRegime,
@@ -359,10 +359,7 @@ mod tests {
             .session(&tag)
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from(*v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -453,10 +450,7 @@ mod tests {
             .session(&format!("zk-stage1-negative {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from(*v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -509,10 +503,7 @@ mod tests {
             .session(&format!("zk-stage1-tamper {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from(*v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -572,7 +563,7 @@ mod tests {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut prover_state = ProverState::new_std(&ds);
-            let vector_buffer = ActiveBuffer::from(vector.as_slice());
+            let vector_buffer = Buffer::from(vector.as_slice());
             let witness = params.commit(&mut prover_state, &[&vector_buffer]);
             let _ = params.prove(
                 &mut prover_state,

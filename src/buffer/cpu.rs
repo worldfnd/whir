@@ -10,7 +10,7 @@ use crate::{
         embedding::Embedding,
         linear_form::{Covector, LinearForm, UnivariateEvaluation},
     },
-    buffer::{Buffer, BufferOps},
+    buffer::{BufferMath, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::{
@@ -99,7 +99,7 @@ impl<T: Encodable + Copy + Send + Sync> Merklize<T> for CpuBuffer<T> {
     }
 }
 
-impl<F: Field> Buffer<F> for CpuBuffer<F> {
+impl<F: Field> BufferMath<F> for CpuBuffer<F> {
     type TargetBuffer<T: Field> = CpuBuffer<T>;
 
     fn zeros(length: usize) -> Self {
@@ -241,7 +241,7 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
         crate::algebra::mixed_scalar_mul_add(embedding, &mut accumulator.data, weight, &self.data);
     }
 
-    fn geometric_challenge<G: Field>(current: G, base: G, length: usize) -> Self::TargetBuffer<G> {
+    fn geometric_challenge<G: Field>(current: G, base: G, length: usize) -> CpuBuffer<G> {
         CpuBuffer {
             data: crate::algebra::geometric_sequence(current, base, length),
         }

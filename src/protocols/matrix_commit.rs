@@ -12,7 +12,7 @@ use tracing::instrument;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::{Buffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::merkle_tree,
@@ -223,11 +223,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
 
     /// Commit the matrix (in row-major order).
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self, size = matrix.len(), engine)))]
-    pub fn commit<H, R>(
-        &self,
-        prover_state: &mut ProverState<H, R>,
-        matrix: &ActiveBuffer<T>,
-    ) -> Witness
+    pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, matrix: &Buffer<T>) -> Witness
     where
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -437,8 +433,8 @@ pub(crate) mod tests {
             .instance(&Empty);
 
         // Instance
-        let matrix: ActiveBuffer<T> =
-            ActiveBuffer::from((0..config.size()).map(|_| rng.gen()).collect::<Vec<_>>());
+        let matrix: Buffer<T> =
+            Buffer::from((0..config.size()).map(|_| rng.gen()).collect::<Vec<_>>());
         let submatrix: Vec<T> = matrix.read_rows(num_cols, indices);
 
         // Prover

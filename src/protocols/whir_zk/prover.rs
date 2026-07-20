@@ -16,7 +16,7 @@ use crate::{
         linear_form::{Covector, Evaluate, LinearForm},
         mixed_dot, scalar_mul_add,
     },
-    buffer::ActiveBuffer,
+    buffer::Buffer,
     hash::Hash,
     protocols::{
         whir::FinalClaim,
@@ -212,7 +212,7 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&ActiveBuffer<F>],
+        vectors: &[&Buffer<F>],
         witness: Witness<F>,
         linear_forms: Vec<Box<dyn LinearForm<F>>>,
         evaluations: Cow<'_, [F]>,
@@ -401,7 +401,7 @@ impl<F: Field> Config<F> {
             let _span = tracing::info_span!("inner_blinded_prove").entered();
             let f_hat_buffers = f_hat_vectors
                 .iter()
-                .map(|v| ActiveBuffer::from(v.as_slice()))
+                .map(|v| Buffer::from(v.as_slice()))
                 .collect::<Vec<_>>();
             let f_hat_refs = f_hat_buffers.iter().collect::<Vec<_>>();
             let f_hat_witness_refs = f_hat_witnesses.iter().collect::<Vec<_>>();
@@ -410,7 +410,7 @@ impl<F: Field> Config<F> {
                 &f_hat_refs,
                 f_hat_witness_refs,
                 linear_forms,
-                ActiveBuffer::from(modified_evaluations),
+                Buffer::from(modified_evaluations),
             )
         };
 
@@ -434,7 +434,7 @@ impl<F: Field> Config<F> {
             // evaluation point is not needed by the outer protocol.
             let blinding_buffers = blinding_vectors
                 .iter()
-                .map(|v| ActiveBuffer::from(v.as_slice()))
+                .map(|v| Buffer::from(v.as_slice()))
                 .collect::<Vec<_>>();
             let blinding_refs = blinding_buffers.iter().collect::<Vec<_>>();
             let _ = self.blinding_commitment.prove(
@@ -442,7 +442,7 @@ impl<F: Field> Config<F> {
                 &blinding_refs,
                 vec![&blinding_witness],
                 blinding_forms,
-                ActiveBuffer::from(all_blinding_claims),
+                Buffer::from(all_blinding_claims),
             );
         }
 

@@ -20,7 +20,7 @@ use super::{
 use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
     algebra::ntt::utils::divisors,
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::{Buffer, BufferOps},
     utils::{chunks_exact_or_empty, zip_strict},
 };
 
@@ -412,9 +412,9 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
     fn interleaved_encode(
         &self,
         messages: Messages<'_, F>,
-        masks: &ActiveBuffer<F>,
+        masks: &Buffer<F>,
         codeword_length: usize,
-    ) -> ActiveBuffer<F> {
+    ) -> Buffer<F> {
         let vectors = messages
             .vectors
             .iter()
@@ -429,7 +429,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         assert!(self.order.is_multiple_of(codeword_length));
         if messages.is_empty() {
             assert!(masks.is_empty());
-            return ActiveBuffer::from(Vec::new());
+            return Buffer::from(Vec::new());
         }
         let num_messages = messages.len();
         let message_len = messages[0].len();
@@ -490,7 +490,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
 
         // Transpose to row-major order with vectors stacked horizontally.
         transpose(&mut result, num_messages, codeword_length);
-        ActiveBuffer::from(result)
+        Buffer::from(result)
     }
 }
 

@@ -4,7 +4,7 @@ use ark_ff::Field;
 
 use crate::{
     algebra::geometric_sequence,
-    buffer::{ActiveBuffer, Buffer},
+    buffer::{Buffer, BufferMath},
     transcript::{Decoding, VerifierMessage},
 };
 
@@ -29,7 +29,7 @@ where
 
 /// Buffer-native equivalent of [`geometric_challenge`]: the sequence is
 /// generated on the backend so it never touches the host.
-pub fn geometric_challenge_buffer<T, F>(transcript: &mut T, count: usize) -> ActiveBuffer<F>
+pub fn geometric_challenge_buffer<T, F>(transcript: &mut T, count: usize) -> Buffer<F>
 where
     T: VerifierMessage,
     F: Field + Decoding<[T::U]>,
@@ -51,10 +51,7 @@ where
 /// into consecutive runs — but nothing is read back to the host. Entropy is
 /// sourced on exactly the same condition (total length `> 1`), so a buffer
 /// prover and a host verifier drawing the same total stay in agreement.
-pub fn geometric_challenge_groups<T, F>(
-    transcript: &mut T,
-    lengths: &[usize],
-) -> Vec<ActiveBuffer<F>>
+pub fn geometric_challenge_groups<T, F>(transcript: &mut T, lengths: &[usize]) -> Vec<Buffer<F>>
 where
     T: VerifierMessage,
     F: Field + Decoding<[T::U]>,
@@ -69,7 +66,7 @@ where
     lengths
         .iter()
         .map(|&len| {
-            let group = ActiveBuffer::<F>::geometric_challenge(current, base, len);
+            let group = Buffer::<F>::geometric_challenge(current, base, len);
             current *= base.pow([len as u64]);
             group
         })

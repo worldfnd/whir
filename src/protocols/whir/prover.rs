@@ -6,7 +6,7 @@ use tracing::instrument;
 use super::{Config, Witness};
 use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
-    buffer::{ActiveBuffer, Buffer, BufferOps},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
         geometric_challenge::{geometric_challenge_buffer, geometric_challenge_groups},
@@ -45,10 +45,10 @@ impl<M: Embedding> Config<M> {
     pub fn prove<'a, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&ActiveBuffer<M::Source>],
+        vectors: &[&Buffer<M::Source>],
         witnesses: Vec<&'a Witness<M::Target, M>>,
         linear_forms: Vec<Box<dyn LinearForm<M::Target>>>,
-        evaluations: ActiveBuffer<M::Target>,
+        evaluations: Buffer<M::Target>,
     ) -> FinalClaim<M::Target>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
@@ -83,10 +83,7 @@ impl<M: Embedding> Config<M> {
             let covector = Covector::from(&**linear_form);
             for (vector, evaluation) in zip_strict(vectors, evaluations) {
                 debug_assert_eq!(
-                    vector.mixed_dot(
-                        self.embedding(),
-                        &ActiveBuffer::from(covector.vector.as_slice())
-                    ),
+                    vector.mixed_dot(self.embedding(), &Buffer::from(covector.vector.as_slice())),
                     *evaluation
                 );
             }
@@ -132,7 +129,7 @@ impl<M: Embedding> Config<M> {
 
         // Random linear combination of the vectors.
         let mut vector_rlc_coeffs = geometric_challenge_buffer(prover_state, num_vectors);
-        let mut vector = ActiveBuffer::<M::Source>::mixed_linear_combination(
+        let mut vector = Buffer::<M::Source>::mixed_linear_combination(
             self.embedding(),
             vectors,
             &vector_rlc_coeffs,
@@ -155,13 +152,13 @@ impl<M: Embedding> Config<M> {
 
         let mut linear_forms = linear_forms;
         let mut covector = if has_constraints {
-            ActiveBuffer::<M::Target>::linear_forms_rlc(
+            Buffer::<M::Target>::linear_forms_rlc(
                 self.initial_size(),
                 &mut linear_forms,
                 &initial_forms_rlc_coeffs,
             )
         } else {
-            ActiveBuffer::<M::Target>::zeros(0)
+            Buffer::<M::Target>::zeros(0)
         };
         drop(linear_forms);
 
@@ -173,7 +170,7 @@ impl<M: Embedding> Config<M> {
 
         // Add OODS constraints
         covector.accumulate_univariate_evaluations(&oods_evals, &oods_rlc_coeffs);
-        let oods_matrix = ActiveBuffer::from(oods_matrix);
+        let oods_matrix = Buffer::from(oods_matrix);
         the_sum += oods_matrix.bilinear_form(&oods_rlc_coeffs, &vector_rlc_coeffs);
         drop(oods_evals);
         drop(oods_matrix);
@@ -198,7 +195,7 @@ impl<M: Embedding> Config<M> {
                 vector.fold(f);
             }
             // Covector must be all zeros.
-            covector = ActiveBuffer::<M::Target>::zeros(self.initial_sumcheck.final_size());
+            covector = Buffer::<M::Target>::zeros(self.initial_sumcheck.final_size());
             folding_randomness
         };
         let mut evaluation_point = folding_randomness.clone();
@@ -241,9 +238,9 @@ impl<M: Embedding> Config<M> {
             // Weights for the in-domain rows: vector_rlc_coeffs ⊗ eq(folding_randomness),
             // built directly on the backend so no readback is needed.
             let stir_weights =
-                vector_rlc_coeffs.tensor_product(&ActiveBuffer::eq_weights(&folding_randomness));
+                vector_rlc_coeffs.tensor_product(&Buffer::eq_weights(&folding_randomness));
             let stir_evaluations = out_of_domain
-                .values_buffer(&ActiveBuffer::ones(1))
+                .values_buffer(&Buffer::ones(1))
                 .concat(&in_domain.values_buffer(&stir_weights));
             let stir_rlc_coeffs = geometric_challenge_buffer(prover_state, stir_challenges.len());
             covector.accumulate_univariate_evaluations(&stir_challenges, &stir_rlc_coeffs);
@@ -260,7 +257,7 @@ impl<M: Embedding> Config<M> {
             debug_assert_eq!(vector.dot(&covector), the_sum);
 
             prev_witness = RoundWitness::Round(new_witness);
-            vector_rlc_coeffs = ActiveBuffer::ones(1);
+            vector_rlc_coeffs = Buffer::ones(1);
         }
 
         // Directly send the vector to the verifier.

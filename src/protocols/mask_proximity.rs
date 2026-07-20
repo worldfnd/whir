@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     algebra::{embedding::Identity, scalar_mul_add, univariate_evaluate},
-    buffer::{ActiveBuffer, Buffer, BufferOps},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
@@ -76,7 +76,7 @@ pub struct Config<F: Field> {
 #[must_use]
 pub struct Witness<F: Field> {
     pub(crate) mask_witness: IrsWitness<F>,
-    pub(crate) fresh_msgs: Vec<ActiveBuffer<F>>,
+    pub(crate) fresh_msgs: Vec<Buffer<F>>,
 }
 
 /// Verifier output from the commit phase.
@@ -130,7 +130,7 @@ impl<F: Field> Config<F> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        original_msgs: &[&ActiveBuffer<F>],
+        original_msgs: &[&Buffer<F>],
     ) -> Witness<F>
     where
         F: Codec<[H::U]>,
@@ -145,12 +145,12 @@ impl<F: Field> Config<F> {
         }
 
         // Sample fresh mask-of-masks
-        let fresh_msgs: Vec<ActiveBuffer<F>> = (0..self.num_masks)
-            .map(|_| ActiveBuffer::random(prover_state.rng(), self.c_zk_commit.vector_size()))
+        let fresh_msgs: Vec<Buffer<F>> = (0..self.num_masks)
+            .map(|_| Buffer::random(prover_state.rng(), self.c_zk_commit.vector_size()))
             .collect();
 
         // Tree layout: [originals..., freshes...]
-        let all_vectors: Vec<&ActiveBuffer<F>> = original_msgs
+        let all_vectors: Vec<&Buffer<F>> = original_msgs
             .iter()
             .copied()
             .chain(fresh_msgs.iter())
@@ -182,7 +182,7 @@ impl<F: Field> Config<F> {
         &self,
         prover_state: &mut ProverState<H, R>,
         witness: &Witness<F>,
-        original_msgs: &[&ActiveBuffer<F>],
+        original_msgs: &[&Buffer<F>],
     ) where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
@@ -378,7 +378,7 @@ mod tests {
             .collect();
         let original_buffers = original_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from(msg.as_slice()))
+            .map(|msg| Buffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
@@ -457,7 +457,7 @@ mod tests {
             .collect();
         let original_buffers = original_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from(msg.as_slice()))
+            .map(|msg| Buffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
@@ -468,7 +468,7 @@ mod tests {
         tampered_msgs[0][0] += F::ONE;
         let tampered_buffers = tampered_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from(msg.as_slice()))
+            .map(|msg| Buffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let tampered_refs = tampered_buffers.iter().collect::<Vec<_>>();
         config.prove(&mut prover_state, &witness, &tampered_refs);
@@ -498,7 +498,7 @@ mod tests {
             .collect();
         let original_buffers = original_msgs
             .iter()
-            .map(|msg| ActiveBuffer::from(msg.as_slice()))
+            .map(|msg| Buffer::from(msg.as_slice()))
             .collect::<Vec<_>>();
         let original_refs = original_buffers.iter().collect::<Vec<_>>();
 
@@ -521,7 +521,7 @@ mod tests {
             if i == 0 {
                 let mut tampered = combined_msg.to_slice().to_vec();
                 tampered[0] += F::ONE;
-                combined_msg = ActiveBuffer::from(tampered.as_slice());
+                combined_msg = Buffer::from(tampered.as_slice());
             }
             prover_state.prover_messages(combined_msg.to_slice());
 

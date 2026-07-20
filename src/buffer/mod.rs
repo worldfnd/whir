@@ -1,6 +1,6 @@
 //! Backend-agnostic buffers for protocol data.
 //!
-//! Protocol code uses the [`ActiveBuffer`] alias to select the backend at
+//! Protocol code uses the [`Buffer`] alias to select the backend at
 //! compile time. Buffers are owned, backend-managed storage: on the CPU
 //! backend they wrap a `Vec`, on an accelerator backend they would own
 //! device memory and only [`BufferOps::to_slice`] (and the other readback
@@ -26,7 +26,7 @@ use crate::algebra::{
     linear_form::{LinearForm, UnivariateEvaluation},
 };
 
-pub type ActiveBuffer<T> = CpuBuffer<T>;
+pub type Buffer<T> = CpuBuffer<T>;
 pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
 
 /// Host communication for owned buffers over any copyable element type.
@@ -48,12 +48,12 @@ pub trait BufferOps<T: Copy> {
 }
 
 /// Field operations on owned buffers.
-pub trait Buffer<F: Field>: Clone {
+pub trait BufferMath<F: Field>: Clone {
     /// Same-backend owned buffer over another field.
     ///
     /// Used by the `mixed_*` operations that lift base-field data into an
     /// extension field through an [`Embedding`].
-    type TargetBuffer<T: Field>: Buffer<T>;
+    type TargetBuffer<T: Field>: BufferMath<T>;
 
     fn zeros(length: usize) -> Self;
 
@@ -137,7 +137,7 @@ pub trait Buffer<F: Field>: Clone {
     fn linear_forms_rlc(
         size: usize,
         linear_forms: &mut [Box<dyn LinearForm<F>>],
-        rlc_coeffs: &ActiveBuffer<F>,
+        rlc_coeffs: &Self,
     ) -> Self;
 
     fn geometric_challenge<G: Field>(current: G, base: G, length: usize) -> Self::TargetBuffer<G>;

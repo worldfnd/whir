@@ -19,7 +19,7 @@ use crate::{
         linear_form::UnivariateEvaluation,
         mixed_dot,
     },
-    buffer::{ActiveBuffer, Buffer, BufferOps},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
         geometric_challenge::{geometric_challenge, geometric_challenge_groups},
@@ -56,7 +56,7 @@ pub struct Config<M: Embedding> {
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct Witness<F: Field> {
-    pub message: ActiveBuffer<F>,
+    pub message: Buffer<F>,
     pub target_witness: IrsWitness<F>,
 }
 
@@ -221,11 +221,11 @@ impl<M: Embedding> Config<M> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        message: ActiveBuffer<M::Target>,
+        message: Buffer<M::Target>,
         witness: &IrsWitness<M::Source>,
-        covector: &mut ActiveBuffer<M::Target>,
+        covector: &mut Buffer<M::Target>,
         folding_randomness: &[M::Target],
-        mask: &ActiveBuffer<M::Target>,
+        mask: &Buffer<M::Target>,
     ) -> Witness<M::Target>
     where
         H: DuplexSpongeInterface,
@@ -295,8 +295,8 @@ impl<M: Embedding> Config<M> {
     fn maybe_send_ood_answers<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        message: &ActiveBuffer<M::Target>,
-        mask: &ActiveBuffer<M::Target>,
+        message: &Buffer<M::Target>,
+        mask: &Buffer<M::Target>,
         ood_points: &[M::Target],
     ) where
         H: DuplexSpongeInterface,
@@ -324,10 +324,10 @@ impl<M: Embedding> Config<M> {
     /// the full `[f; r; s]` and in-domain over the `[f; r]` prefix only.
     fn update_covector(
         &self,
-        covector: &mut ActiveBuffer<M::Target>,
-        ood_rlc_coeffs: &ActiveBuffer<M::Target>,
+        covector: &mut Buffer<M::Target>,
+        ood_rlc_coeffs: &Buffer<M::Target>,
         ood_points: &[M::Target],
-        in_domain_rlc_coeffs: &ActiveBuffer<M::Target>,
+        in_domain_rlc_coeffs: &Buffer<M::Target>,
         in_domain_points: &[M::Target],
     ) {
         match &self.mode {
@@ -620,20 +620,20 @@ mod tests {
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
-        let mut covector = ActiveBuffer::from(covector);
+        let mut covector = Buffer::from(covector);
 
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut prover_state = ProverState::new_std(&ds);
-        let f_full_buffer = ActiveBuffer::from(f_full.as_slice());
+        let f_full_buffer = Buffer::from(f_full.as_slice());
         let source_witness = config.source.commit(&mut prover_state, &[&f_full_buffer]);
 
         // Sample γ for sumcheck folding (length log2(ι)).
         let folding_randomness = sample_folding_randomness(config, &mut rng);
         // Post-fold message Fold(f_full, γ) of length message_length.
-        let folded_message = ActiveBuffer::from(fold_chunks(
+        let folded_message = Buffer::from(fold_chunks(
             &f_full,
             config.source.message_length(),
             &folding_randomness,
@@ -646,7 +646,7 @@ mod tests {
             &source_witness,
             &mut covector,
             &folding_randomness,
-            &ActiveBuffer::from(mask_msg.as_slice()),
+            &Buffer::from(mask_msg.as_slice()),
         );
         let proof = prover_state.proof();
 
@@ -678,18 +678,18 @@ mod tests {
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
-        let mut covector = ActiveBuffer::from(covector);
+        let mut covector = Buffer::from(covector);
 
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut prover_state = ProverState::new_std(&ds);
-        let f_full_buffer = ActiveBuffer::from(f_full.as_slice());
+        let f_full_buffer = Buffer::from(f_full.as_slice());
         let source_witness = config.source.commit(&mut prover_state, &[&f_full_buffer]);
 
         let folding_randomness = sample_folding_randomness(config, &mut rng);
-        let folded_message = ActiveBuffer::from(fold_chunks(
+        let folded_message = Buffer::from(fold_chunks(
             &f_full,
             config.source.message_length(),
             &folding_randomness,
@@ -700,10 +700,10 @@ mod tests {
         // should equal the verifier sum:
         // - non-ZK: h = folded_message (length message_length)
         // - ZK:     h = [folded_message; mask_msg] (length message_length + l_zk)
-        let h: ActiveBuffer<F> = if mask_msg.is_empty() {
+        let h: Buffer<F> = if mask_msg.is_empty() {
             folded_message.clone()
         } else {
-            ActiveBuffer::from(
+            Buffer::from(
                 folded_message
                     .to_slice()
                     .iter()
@@ -720,7 +720,7 @@ mod tests {
             &source_witness,
             &mut covector,
             &folding_randomness,
-            &ActiveBuffer::from(mask_msg.as_slice()),
+            &Buffer::from(mask_msg.as_slice()),
         );
         let proof = prover_state.proof();
 
@@ -757,31 +757,31 @@ mod tests {
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
-        let mut covector = ActiveBuffer::from(covector);
+        let mut covector = Buffer::from(covector);
 
         // Commit honest f_full, fold to get the honest post-fold message.
         let mut prover_state = ProverState::new_std(&ds);
-        let f_full_buffer = ActiveBuffer::from(f_full.as_slice());
+        let f_full_buffer = Buffer::from(f_full.as_slice());
         let source_witness = config.source.commit(&mut prover_state, &[&f_full_buffer]);
         let folding_randomness = sample_folding_randomness(config, &mut rng);
         let folded_message =
             fold_chunks(&f_full, config.source.message_length(), &folding_randomness);
 
         // For non-ZK and source.mask_length == 0, h = folded_message and identity holds.
-        let folded_message_buffer = ActiveBuffer::from(folded_message.as_slice());
+        let folded_message_buffer = Buffer::from(folded_message.as_slice());
         let initial_mu = folded_message_buffer.dot(&covector);
 
         // Tamper the post-fold message before proving.
         let mut tampered = folded_message;
         tampered[0] += F::ONE;
-        let tampered = ActiveBuffer::from(tampered);
+        let tampered = Buffer::from(tampered);
         let _witness = config.prove(
             &mut prover_state,
             tampered,
             &source_witness,
             &mut covector,
             &folding_randomness,
-            &ActiveBuffer::from([].as_slice()),
+            &Buffer::from([].as_slice()),
         );
         let proof = prover_state.proof();
 

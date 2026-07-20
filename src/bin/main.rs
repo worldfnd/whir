@@ -13,7 +13,7 @@ use whir::{
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
     },
     bits::Bits,
-    buffer::ActiveBuffer,
+    buffer::Buffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
@@ -152,7 +152,7 @@ where
     }
 
     let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
-    let vector_buffer = ActiveBuffer::from(vector.as_slice());
+    let vector_buffer = Buffer::from(vector.as_slice());
 
     let whir_commit_time = Instant::now();
     let witness = params.commit(&mut prover_state, &[&vector_buffer]);
@@ -191,7 +191,7 @@ where
         &[&vector_buffer],
         vec![&witness],
         prove_linear_forms,
-        ActiveBuffer::from(evaluations.as_slice()),
+        Buffer::from(evaluations.as_slice()),
     );
     let whir_prove_time = whir_prove_time.elapsed();
 
@@ -319,7 +319,7 @@ where
     }
 
     let whir_commit_time = Instant::now();
-    let vector_buffer = ActiveBuffer::from(vector.as_slice());
+    let vector_buffer = Buffer::from(vector.as_slice());
     let witness = params.commit(&mut prover_state, &[&vector_buffer]);
     let whir_commit_time = whir_commit_time.elapsed();
 

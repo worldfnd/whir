@@ -4,7 +4,7 @@ use whir::{
         fields::Field64,
         ntt::{Messages, NttEngine, ReedSolomon},
     },
-    buffer::{ActiveBuffer, Buffer, BufferOps},
+    buffer::{Buffer, BufferMath, BufferOps},
 };
 
 #[global_allocator]
@@ -34,8 +34,8 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
             let message_length = 1 << (exp - coset_sz);
             let num_messages = 1 << coset_sz;
             let mut rng = ark_std::rand::thread_rng();
-            let coeffs: Vec<ActiveBuffer<Field64>> = (0..num_messages)
-                .map(|_| ActiveBuffer::random(&mut rng, message_length))
+            let coeffs: Vec<Buffer<Field64>> = (0..num_messages)
+                .map(|_| Buffer::random(&mut rng, message_length))
                 .collect();
             let engine = NttEngine::<Field64>::new_from_fftfield();
             (engine, coeffs, expansion)
@@ -43,7 +43,7 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
         .bench_values(|(engine, coeffs, expansion)| {
             let coeffs_refs = coeffs.iter().collect::<Vec<_>>();
             let messages = Messages::new(&coeffs_refs, coeffs[0].len(), 1);
-            let masks = ActiveBuffer::from([].as_slice());
+            let masks = Buffer::from([].as_slice());
             black_box(engine.interleaved_encode(messages, &masks, coeffs[0].len() * expansion))
         });
 }

@@ -12,7 +12,7 @@ use tracing::{instrument, span, Level};
 use zerocopy::IntoBytes;
 
 use crate::{
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::{Buffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash, HashEngine, ENGINES},
     transcript::{
@@ -59,7 +59,7 @@ pub struct Commitment {
 #[must_use]
 pub struct Witness {
     /// The nodes in the Merkle tree, starting with the leaf hash layer.
-    nodes: ActiveBuffer<Hash>,
+    nodes: Buffer<Hash>,
 }
 
 impl Config {
@@ -254,7 +254,7 @@ impl Config {
 
 impl Witness {
     /// Wrap a fully built node buffer (leaf layer first, root last) as a witness.
-    pub const fn new(nodes: ActiveBuffer<Hash>) -> Self {
+    pub const fn new(nodes: Buffer<Hash>) -> Self {
         Self { nodes }
     }
 
@@ -361,7 +361,7 @@ pub(crate) mod tests {
         let mut prover_state = ProverState::new_std(&ds);
         let nodes = config.build_nodes(leaves);
         prover_state.prover_message(&nodes[config.num_nodes() - 1]);
-        let witness = Witness::new(ActiveBuffer::from(nodes));
+        let witness = Witness::new(Buffer::from(nodes));
         config.open(&mut prover_state, &witness, &[13, 42]);
         let proof = prover_state.proof();
 

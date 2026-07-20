@@ -7,7 +7,7 @@ use spongefish::{Decoding, VerificationResult};
 
 use crate::{
     algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
-    buffer::{ActiveBuffer, Buffer, BufferOps},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{irs_commit, proof_of_work, sumcheck},
     transcript::{
@@ -97,9 +97,9 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        mut vector: ActiveBuffer<F>,
+        mut vector: Buffer<F>,
         witness: &irs_commit::Witness<F>,
-        mut covector: ActiveBuffer<F>,
+        mut covector: Buffer<F>,
         mut sum: F,
     ) -> Opening<F>
     where
@@ -156,9 +156,9 @@ impl<F: Field> Config<F> {
     fn maybe_blind_prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vector: &mut ActiveBuffer<F>,
+        vector: &mut Buffer<F>,
         witness: &irs_commit::Witness<F>,
-        covector: &ActiveBuffer<F>,
+        covector: &Buffer<F>,
         sum: &mut F,
     ) -> Option<irs_commit::Witness<F>>
     where
@@ -177,7 +177,7 @@ impl<F: Field> Config<F> {
                 None
             }
             BasecaseMode::ZeroKnowledge => {
-                let mut blinding_vector = ActiveBuffer::random(prover_state.rng(), vector.len());
+                let mut blinding_vector = Buffer::random(prover_state.rng(), vector.len());
                 let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
                 let blinding_inner_product = blinding_vector.dot(covector);
                 prover_state.prover_message(&blinding_inner_product);
@@ -345,8 +345,8 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let vector = ActiveBuffer::random(&mut rng, config.size());
-        let covector = ActiveBuffer::random(&mut rng, config.size());
+        let vector = Buffer::random(&mut rng, config.size());
+        let covector = Buffer::random(&mut rng, config.size());
         let sum = vector.dot(&covector);
 
         let mut prover_state = ProverState::new_std(&ds);
