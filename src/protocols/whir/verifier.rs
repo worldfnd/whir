@@ -11,6 +11,7 @@ use crate::{
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
         tensor_product,
     },
+    buffer::BufferOps,
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
     transcript::{

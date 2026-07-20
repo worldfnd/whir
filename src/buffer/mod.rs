@@ -1,14 +1,14 @@
 //! Backend-agnostic buffers for protocol data.
 //!
-//! Protocol code uses the [`ActiveBuffer`] alias to select the backend at
+//! Protocol code uses the [`Buffer`] alias to select the backend at
 //! compile time. Buffers are owned, backend-managed storage: on the CPU
 //! backend they wrap a `Vec`, on an accelerator backend they would own
 //! device memory and only [`BufferOps::to_slice`] (and the other readback
 //! methods) force a host copy.
 //!
-//! The trait split follows the element type. [`BufferOps`] is generic over
-//! any element and also covers [`struct@Hash`] buffers for Merkle tree
-//! nodes. [`Buffer`] adds field arithmetic used by the protocols.
+//! [`BufferOps`] covers host-to-backend and backend-to-host communication,
+//! while [`Buffer`] provides backend-specific field arithmetic. The traits
+//! are independent so callers can require only the capabilities they use.
 //!
 //! [`DefaultRs`] selects the Reed-Solomon encoder for the active backend.
 
@@ -21,29 +21,19 @@ use ark_std::rand::{
 };
 pub use cpu::CpuBuffer;
 
-use crate::{
-    algebra::{
-        embedding::Embedding,
-        linear_form::{LinearForm, UnivariateEvaluation},
-    },
-    engines::EngineId,
-    hash::Hash,
-    protocols::{matrix_commit::Encodable, merkle_tree},
+use crate::algebra::{
+    embedding::Embedding,
+    linear_form::{LinearForm, UnivariateEvaluation},
 };
 
-pub type ActiveBuffer<T> = CpuBuffer<T>;
+pub type Buffer<T> = CpuBuffer<T>;
 pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
 
-/// Owned buffer operations over any element type.
+/// Host communication for owned buffers over any copyable element type.
 ///
-/// This trait is not field-specific, so it also covers hash buffers and
-/// Merkle node layers. Field arithmetic lives on [`Buffer`].
+/// Construction uses the standard [`From`] implementations of each backend.
+/// Field arithmetic lives independently on [`Buffer`].
 pub trait BufferOps<T: Copy> {
-    /// Same-backend buffer type used for Merkle tree nodes.
-    type Nodes: BufferOps<Hash>;
-
-    fn from_vec(source: Vec<T>) -> Self;
-    fn from_slice(source: &[T]) -> Self;
     /// Read back the buffer contents as a host slice.
     fn to_slice(&self) -> &[T];
     fn len(&self) -> usize;
@@ -54,26 +44,24 @@ pub trait BufferOps<T: Copy> {
     fn read_rows(&self, num_cols: usize, indices: &[usize]) -> Vec<T>;
     /// Gather elements at arbitrary indices.
     fn gather_at_indices(&self, indices: &[usize]) -> Vec<T>;
-    /// Hash rows of width `num_cols` and build a Merkle tree.
-    fn merklize(
-        &self,
-        num_cols: usize,
-        leaf_hash: EngineId,
-        merkle: &merkle_tree::Config,
-    ) -> (Self::Nodes, Hash)
-    where
-        T: Encodable + Send + Sync;
+    fn get(&self, index: usize) -> Option<&T>;
 }
 
 /// Field operations on owned buffers.
-pub trait Buffer<F: Field>: BufferOps<F> + Clone {
+pub trait BufferMath<F: Field>: Clone {
     /// Same-backend owned buffer over another field.
     ///
     /// Used by the `mixed_*` operations that lift base-field data into an
     /// extension field through an [`Embedding`].
-    type TargetBuffer<T: Field>: Buffer<T>;
+    type TargetBuffer<T: Field>: BufferMath<T>;
 
     fn zeros(length: usize) -> Self;
+
+    /// Buffer of `length` copies of `F::ONE`, filled on the backend.
+    ///
+    /// Prefer this over `from(vec![F::ONE; length])`, which uploads a host
+    /// buffer to the backend.
+    fn ones(length: usize) -> Self;
 
     fn random<R>(rng: &mut R, length: usize) -> Self
     where
@@ -82,6 +70,38 @@ pub trait Buffer<F: Field>: BufferOps<F> + Clone {
 
     /// Inner product with another buffer of the same length.
     fn dot(&self, other: &Self) -> F;
+
+    /// Bilinear form over `self`, a row-major matrix with `rows.len()` rows
+    /// and `cols.len()` columns:
+    /// `Σ_i rows[i] · Σ_j cols[j] · self[i · cols.len() + j]`.
+    ///
+    /// Equivalently `rowsᵀ · self · cols`. Generalizes [`Buffer::dot`] to a
+    /// weighted reduction of a matrix; `dot` is the special case where `self`
+    /// is the identity.
+    fn bilinear_form(&self, rows: &Self, cols: &Self) -> F;
+
+    /// Tensor (outer) product `self ⊗ other`, row-major: length
+    /// `self.len() · other.len()` with entry `[i · other.len() + j] = self[i] · other[j]`.
+    #[must_use]
+    fn tensor_product(&self, other: &Self) -> Self;
+
+    /// Matrix-vector product. `self` is a row-major matrix with `vector.len()`
+    /// columns; returns a buffer of length `self.len() / vector.len()` where
+    /// `out[i] = dot(row_i, vector)`. `vector` must be non-empty.
+    #[must_use]
+    fn mat_vec(&self, vector: &Self) -> Self;
+
+    /// Concatenation `[self, other]` into a single buffer of length
+    /// `self.len() + other.len()`.
+    #[must_use]
+    fn concat(&self, other: &Self) -> Self;
+
+    /// Equality-polynomial weights `eq(point, ·)` over the Boolean hypercube
+    /// `{0,1}^{point.len()}`, as a buffer of length `1 << point.len()`.
+    ///
+    /// `point` holds host-side transcript challenges; the weights live on the
+    /// backend so downstream reductions never force a readback.
+    fn eq_weights(point: &[F]) -> Self;
 
     /// Sumcheck round coefficients `(c0, c2)` for `dot(self, other)`.
     fn sumcheck_polynomial(&self, other: &Self) -> (F, F);
@@ -110,8 +130,17 @@ pub trait Buffer<F: Field>: BufferOps<F> + Clone {
     fn accumulate_univariate_evaluations(
         &mut self,
         evaluators: &[UnivariateEvaluation<F>],
-        scalars: &[F],
+        scalars: &Self,
     );
+
+    /// Random linear combination of linear forms into a covector buffer.
+    fn linear_forms_rlc(
+        size: usize,
+        linear_forms: &mut [Box<dyn LinearForm<F>>],
+        rlc_coeffs: &Self,
+    ) -> Self;
+
+    fn geometric_challenge<G: Field>(current: G, base: G, length: usize) -> Self::TargetBuffer<G>;
 
     /// Univariate evaluation at a target-field point.
     fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
@@ -135,17 +164,10 @@ pub trait Buffer<F: Field>: BufferOps<F> + Clone {
         weight: M::Target,
     );
 
-    /// Random linear combination of linear forms into a covector buffer.
-    fn linear_forms_rlc(
-        size: usize,
-        linear_forms: &mut [Box<dyn LinearForm<F>>],
-        rlc_coeffs: &[F],
-    ) -> Self;
-
     /// Random linear combination of vectors, lifted into the target field.
     fn mixed_linear_combination<M: Embedding<Source = F>>(
         embedding: &M,
         vectors: &[&Self],
-        coeffs: &[M::Target],
+        coeffs: &Self::TargetBuffer<M::Target>,
     ) -> Self::TargetBuffer<M::Target>;
 }

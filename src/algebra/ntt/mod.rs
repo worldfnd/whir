@@ -22,7 +22,7 @@ pub use self::{
 };
 use crate::{
     algebra::fields,
-    buffer::{ActiveBuffer, BufferOps, DefaultRs},
+    buffer::{Buffer, BufferOps, DefaultRs},
     type_map::{self, TypeMap},
 };
 
@@ -71,14 +71,14 @@ impl type_map::Family for NttFamily {
 /// elements.
 #[derive(Clone, Copy)]
 pub struct Messages<'a, F> {
-    pub(crate) vectors: &'a [&'a ActiveBuffer<F>],
+    pub(crate) vectors: &'a [&'a Buffer<F>],
     pub(crate) message_length: usize,
     pub(crate) interleaving_depth: usize,
 }
 
 impl<'a, F: Field> Messages<'a, F> {
     pub fn new(
-        vectors: &'a [&'a ActiveBuffer<F>],
+        vectors: &'a [&'a Buffer<F>],
         message_length: usize,
         interleaving_depth: usize,
     ) -> Self {
@@ -131,9 +131,9 @@ pub trait ReedSolomon<F>: Debug + Send + Sync {
     fn interleaved_encode(
         &self,
         messages: Messages<'_, F>,
-        masks: &ActiveBuffer<F>,
+        masks: &Buffer<F>,
         codeword_length: usize,
-    ) -> ActiveBuffer<F>;
+    ) -> Buffer<F>;
 }
 
 assert_obj_safe!(ReedSolomon<crate::algebra::fields::Field256>);
@@ -156,9 +156,9 @@ pub fn evaluation_points<F: 'static>(
 
 pub fn interleaved_rs_encode<F: 'static>(
     messages: Messages<'_, F>,
-    masks: &ActiveBuffer<F>,
+    masks: &Buffer<F>,
     codeword_length: usize,
-) -> ActiveBuffer<F> {
+) -> Buffer<F> {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
         .interleaved_encode(messages, masks, codeword_length)
@@ -228,10 +228,10 @@ mod tests {
             let masks = random_vector(&mut rng, mask_length * num_messages);
             let vectors = messages
                 .iter()
-                .map(|message| ActiveBuffer::from_slice(message))
+                .map(|message| Buffer::from(message.as_slice()))
                 .collect::<Vec<_>>();
             let vector_refs = vectors.iter().collect::<Vec<_>>();
-            let mask_buffer = ActiveBuffer::from_slice(&masks);
+            let mask_buffer = Buffer::from(masks.as_slice());
             let rs_messages = Messages::new(&vector_refs, message_length, 1);
             let codeword = ntt.interleaved_encode(
                 rs_messages,

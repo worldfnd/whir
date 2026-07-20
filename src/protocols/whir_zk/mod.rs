@@ -204,7 +204,7 @@ impl<F: Field> Config<F> {
     /// Precomputed sub-domain powers [1, ω_sub, ω_sub², ..., ω_sub^(num_rows-1)].
     pub(crate) fn omega_powers(&self) -> Vec<F> {
         let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
-        crate::algebra::geometric_sequence(self.omega_sub(), codeword_length)
+        crate::algebra::geometric_sequence(F::ONE, self.omega_sub(), codeword_length)
     }
 
     /// Find the index of `alpha_base` in the sub-domain powers.
@@ -220,7 +220,8 @@ impl<F: Field> Config<F> {
         let omega_powers = self.omega_powers();
         let interleaving_depth = self.interleaving_depth();
         let omega_full = self.omega_full();
-        let zeta_powers = crate::algebra::geometric_sequence(self.zeta(), interleaving_depth);
+        let zeta_powers =
+            crate::algebra::geometric_sequence(F::ONE, self.zeta(), interleaving_depth);
         let embedding = self.blinded_commitment.embedding();
 
         let mut gammas = Vec::with_capacity(query_points.len() * interleaving_depth);
@@ -259,7 +260,7 @@ mod tests {
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
-        buffer::{ActiveBuffer, BufferOps},
+        buffer::Buffer,
         hash,
         parameters::ProtocolParameters,
         protocols::params::DecodingRegime,
@@ -358,10 +359,7 @@ mod tests {
             .session(&tag)
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -452,10 +450,7 @@ mod tests {
             .session(&format!("zk-stage1-negative {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -508,10 +503,7 @@ mod tests {
             .session(&format!("zk-stage1-tamper {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -571,7 +563,7 @@ mod tests {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut prover_state = ProverState::new_std(&ds);
-            let vector_buffer = ActiveBuffer::from_slice(&vector);
+            let vector_buffer = Buffer::from(vector.as_slice());
             let witness = params.commit(&mut prover_state, &[&vector_buffer]);
             let _ = params.prove(
                 &mut prover_state,

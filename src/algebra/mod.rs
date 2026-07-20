@@ -23,9 +23,9 @@ where
     (0..length).map(|_| rng.gen()).collect::<Vec<F>>()
 }
 
-pub fn geometric_sequence<F: Field>(base: F, length: usize) -> Vec<F> {
+pub fn geometric_sequence<F: Field>(current: F, base: F, length: usize) -> Vec<F> {
     let mut result = Vec::with_capacity(length);
-    let mut current = F::ONE;
+    let mut current = current;
     for _ in 0..length {
         result.push(current);
         current *= base;

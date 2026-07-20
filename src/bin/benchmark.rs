@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     fs::OpenOptions,
     io::Write,
     time::{Duration, Instant},
@@ -15,7 +14,7 @@ use whir::{
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
     },
     bits::Bits,
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::Buffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
@@ -163,7 +162,7 @@ where
 
         HASH_COUNTER.reset();
 
-        let vector_buffer = ActiveBuffer::from_slice(&vector);
+        let vector_buffer = Buffer::from(vector.as_slice());
         let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let _ = params.prove(
@@ -171,7 +170,7 @@ where
             &[&vector_buffer],
             vec![&witness],
             vec![],
-            Cow::Owned(vec![]),
+            Buffer::from(vec![]),
         );
 
         let whir_ldt_prover_time = whir_ldt_prover_time.elapsed();
@@ -241,7 +240,7 @@ where
         HASH_COUNTER.reset();
         let whir_prover_time = Instant::now();
 
-        let vector_buffer = ActiveBuffer::from_slice(&vector);
+        let vector_buffer = Buffer::from(vector.as_slice());
         let witness = params.commit(&mut prover_state, &[&vector_buffer]);
 
         let prove_linear_forms: Vec<Box<dyn LinearForm<M::Target>>> = points
@@ -256,7 +255,7 @@ where
             &[&vector_buffer],
             vec![&witness],
             prove_linear_forms,
-            Cow::Borrowed(evaluations.as_slice()),
+            Buffer::from(evaluations.as_slice()),
         );
 
         let whir_prover_time = whir_prover_time.elapsed();
