@@ -23,8 +23,9 @@ use tracing::instrument;
 use crate::{
     algebra::{
         dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
-        mixed_univariate_evaluate, ntt, random_vector,
+        ntt,
     },
+    buffer::{Buffer, BufferMath, BufferOps},
     engines::EngineId,
     hash::Hash,
     protocols::{
@@ -99,8 +100,8 @@ pub struct Config<M: Embedding> {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
 pub struct Witness<F: Field> {
-    pub masks: Vec<F>,
-    pub matrix: Vec<F>,
+    pub masks: Buffer<F>,
+    pub matrix: Buffer<F>,
     pub matrix_witness: matrix_commit::Witness,
 }
 
@@ -119,7 +120,7 @@ pub struct Evaluations<F> {
     pub points: Vec<F>,
 
     /// Matrix of codewords for each row.
-    pub matrix: Vec<F>,
+    pub matrix: Buffer<F>,
 }
 
 /// Named-field inputs to [`Config::new`] / [`Config::try_new`].
@@ -357,7 +358,7 @@ impl<M: Embedding> Config<M> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&[M::Source]],
+        vectors: &[&Buffer<M::Source>],
     ) -> Witness<M::Source>
     where
         Standard: Distribution<M::Source>,
@@ -381,19 +382,22 @@ impl<M: Embedding> Config<M> {
         // fold) read masks back via this layout.
         let mask_length = self.mask_length();
         let num_polys = self.num_messages();
-        let masks: Vec<M::Source> = random_vector(prover_state.rng(), mask_length * num_polys);
+        let masks = Buffer::<M::Source>::random(prover_state.rng(), mask_length * num_polys);
 
         // Engine takes unified polynomial slices (message || mask); the
         // message/mask split is an IRS-side concept, not part of the NTT API.
         let message_length = self.message_length();
         let poly_length = message_length + mask_length;
+        let masks_slice = masks.to_slice();
         let mut poly_buf = Vec::with_capacity(num_polys * poly_length);
         let mut poly_idx = 0;
         for vector in vectors {
-            for message in chunks_exact_or_empty(vector, message_length, self.interleaving_depth) {
+            for message in
+                chunks_exact_or_empty(vector.to_slice(), message_length, self.interleaving_depth)
+            {
                 poly_buf.extend_from_slice(message);
                 poly_buf.extend_from_slice(
-                    &masks[poly_idx * mask_length..(poly_idx + 1) * mask_length],
+                    &masks_slice[poly_idx * mask_length..(poly_idx + 1) * mask_length],
                 );
                 poly_idx += 1;
             }
@@ -438,7 +442,7 @@ impl<M: Embedding> Config<M> {
     pub fn commit_with_ood<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: &[&[M::Source]],
+        vectors: &[&Buffer<M::Source>],
         out_domain_samples: usize,
     ) -> (Witness<M::Source>, Evaluations<M::Target>)
     where
@@ -453,12 +457,18 @@ impl<M: Embedding> Config<M> {
         let mut matrix = Vec::with_capacity(out_domain_samples * vectors.len());
         for &point in &points {
             for &vector in vectors {
-                let value = mixed_univariate_evaluate(&*self.embedding, vector, point);
+                let value = vector.mixed_univariate_evaluate(&*self.embedding, point);
                 prover_state.prover_message(&value);
                 matrix.push(value);
             }
         }
-        (witness, Evaluations { points, matrix })
+        (
+            witness,
+            Evaluations {
+                points,
+                matrix: Buffer::from(matrix.as_slice()),
+            },
+        )
     }
 
     /// Receive a commitment and the legacy WHIR OOD evaluations in one call.
@@ -477,7 +487,13 @@ impl<M: Embedding> Config<M> {
         let commitment = self.receive_commitment(verifier_state)?;
         let points: Vec<M::Target> = verifier_state.verifier_message_vec(out_domain_samples);
         let matrix = verifier_state.prover_messages_vec(out_domain_samples * self.num_vectors)?;
-        Ok((commitment, Evaluations { points, matrix }))
+        Ok((
+            commitment,
+            Evaluations {
+                points,
+                matrix: Buffer::from(matrix.as_slice()),
+            },
+        ))
     }
 
     /// Opens the commitment and returns the evaluations of the vectors.
@@ -510,18 +526,15 @@ impl<M: Embedding> Config<M> {
         // and collect them in the evaluation matrix.
         let stride = witnesses.len() * self.num_cols();
         let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
-        let mut submatrix = Vec::with_capacity(indices.len() * self.num_cols());
         let mut matrix_col_offset = 0;
         for witness in witnesses {
-            submatrix.clear();
-            for (point_index, &code_index) in indices.iter().enumerate() {
-                let row = &witness.matrix
-                    [code_index * self.num_cols()..(code_index + 1) * self.num_cols()];
-                submatrix.extend_from_slice(row);
-
-                let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
-                matrix_row[matrix_col_offset..matrix_col_offset + self.num_cols()]
-                    .copy_from_slice(row);
+            let submatrix = witness.matrix.read_rows(self.num_cols(), &indices);
+            if self.num_cols() != 0 {
+                for (point_index, row) in submatrix.chunks_exact(self.num_cols()).enumerate() {
+                    let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
+                    matrix_row[matrix_col_offset..matrix_col_offset + self.num_cols()]
+                        .copy_from_slice(row);
+                }
             }
             prover_state.prover_hint_ark(&submatrix);
             self.matrix_commit
@@ -529,7 +542,10 @@ impl<M: Embedding> Config<M> {
             matrix_col_offset += self.num_cols();
         }
 
-        Evaluations { points, matrix }
+        Evaluations {
+            points,
+            matrix: Buffer::from(matrix),
+        }
     }
 
     /// Verifies one or more openings and returns the in-domain evaluations.
@@ -574,7 +590,10 @@ impl<M: Embedding> Config<M> {
             }
             matrix_col_offset += self.num_cols();
         }
-        Ok(Evaluations { points, matrix })
+        Ok(Evaluations {
+            points,
+            matrix: Buffer::from(matrix),
+        })
     }
 
     fn in_domain_challenges<T>(&self, transcript: &mut T) -> (Vec<usize>, Vec<M::Source>)
@@ -608,7 +627,8 @@ impl<F: Field> Evaluations<F> {
 
     pub fn rows(&self) -> impl Iterator<Item = &[F]> {
         let cols = self.num_columns();
-        (0..self.num_points()).map(move |i| &self.matrix[i * cols..(i + 1) * cols])
+        let matrix = self.matrix.to_slice();
+        (0..self.num_points()).map(move |i| &matrix[i * cols..(i + 1) * cols])
     }
 
     pub fn lift<M>(&self, embedding: &M) -> Evaluations<M::Target>
@@ -617,7 +637,7 @@ impl<F: Field> Evaluations<F> {
     {
         Evaluations {
             points: lift(embedding, &self.points),
-            matrix: lift(embedding, &self.matrix),
+            matrix: Buffer::from(lift(embedding, self.matrix.to_slice())),
         }
     }
 
@@ -627,8 +647,37 @@ impl<F: Field> Evaluations<F> {
             .map(move |&point| UnivariateEvaluation::new(point, size))
     }
 
+    /// Reduce each row against host `weights`, yielding one value per point.
+    /// Host-side; used by the verifiers.
     pub fn values<'a>(&'a self, weights: &'a [F]) -> impl 'a + Iterator<Item = F> {
         self.rows().map(|row| dot(weights, row))
+    }
+
+    /// Buffer-native [`values`](Self::values): a matrix-vector product on the
+    /// backend, returning one value per point. Both the matrix and the weights
+    /// stay on-device, so no readback of the (potentially large) weights is
+    /// forced. Used by the prover.
+    pub fn values_buffer(&self, weights: &Buffer<F>) -> Buffer<F> {
+        let num_points = self.num_points();
+        if num_points == 0 {
+            assert!(self.matrix.is_empty(), "evaluation matrix has no points");
+            return Buffer::zeros(num_points);
+        }
+        assert_eq!(
+            self.matrix.len() % num_points,
+            0,
+            "evaluation matrix dimensions mismatch"
+        );
+        let num_columns = self.matrix.len() / num_points;
+        assert_eq!(
+            weights.len(),
+            num_columns,
+            "evaluation weights must match matrix columns"
+        );
+        if num_columns == 0 {
+            return Buffer::zeros(num_points);
+        }
+        self.matrix.mat_vec(weights)
     }
 }
 
@@ -684,6 +733,17 @@ pub(crate) fn num_in_domain_queries(
     let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
     // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
     let log_one_minus_delta = regime.one_minus_distance_log2(-rate.log2());
+    // Query soundness requires a positive decoding distance (1 − δ < 1). At
+    // rate == 1 (and beyond the decoding radius generally) `1 − δ ≥ 1`, so
+    // `log_one_minus_delta ≥ 0` and the division below is by a non-positive
+    // number: `ceil() as usize` then saturates to 0 and the `NonZeroUsize` clamp
+    // silently yields q = 1 — a single query with almost no soundness. The layout
+    // guard rejects rate == 1 up front; this backstops any other caller. See
+    // `LayoutError::StartingRateBelowOne`.
+    assert!(
+        log_one_minus_delta < 0.0,
+        "rate too high for query soundness: 1 − δ ≥ 1 (log₂ = {log_one_minus_delta})",
+    );
     let q = (security_target / -log_one_minus_delta).ceil() as usize;
     NonZeroUsize::new(q).unwrap_or(NonZeroUsize::MIN)
 }
@@ -790,10 +850,12 @@ pub(crate) mod tests {
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit(
-            &mut prover_state,
-            &vectors.iter().map(|p| p.as_slice()).collect::<Vec<_>>(),
-        );
+        let vector_buffers = vectors
+            .iter()
+            .map(|v| Buffer::from(v.as_slice()))
+            .collect::<Vec<_>>();
+        let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
+        let witness = config.commit(&mut prover_state, &vector_refs);
         let in_domain_evals = config.open(&mut prover_state, &[&witness]);
         if config.deduplicate_in_domain {
             // Sorting is over index order, not points
@@ -821,6 +883,7 @@ pub(crate) mod tests {
                 &in_domain_evals.points,
                 in_domain_evals
                     .matrix
+                    .to_slice()
                     .chunks_exact(config.num_vectors * config.interleaving_depth),
             ) {
                 let expected_iter = vectors.iter().flat_map(|poly| {

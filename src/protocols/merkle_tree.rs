@@ -12,6 +12,7 @@ use tracing::{instrument, span, Level};
 use zerocopy::IntoBytes;
 
 use crate::{
+    buffer::{Buffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash, HashEngine, ENGINES},
     transcript::{
@@ -58,7 +59,7 @@ pub struct Commitment {
 #[must_use]
 pub struct Witness {
     /// The nodes in the Merkle tree, starting with the leaf hash layer.
-    nodes: Vec<Hash>,
+    nodes: Buffer<Hash>,
 }
 
 impl Config {
@@ -78,13 +79,19 @@ impl Config {
         (1 << (self.layers.len() + 1)) - 1
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(prover_state, leaves), fields(self = %self)))]
-    pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, leaves: Vec<Hash>) -> Witness
-    where
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        Hash: ProverMessage<[H::U]>,
-    {
+    /// Build the full node array from leaf hashes, without touching the transcript.
+    ///
+    /// The returned vector holds the leaf layer first and the root last (at `num_nodes() - 1`).
+    ///
+    /// # Caller obligation
+    ///
+    /// This does **not** commit to anything: the caller must send the root
+    /// (`nodes[num_nodes() - 1]`) to the transcript before using the tree as
+    /// a commitment. In production this is funneled through
+    /// [`matrix_commit::Config::commit`](crate::protocols::matrix_commit::Config::commit),
+    /// which sends the root returned by `merklize`. A tree whose root was
+    /// never sent is not bound by the proof.
+    pub fn build_nodes(&self, leaves: Vec<Hash>) -> Vec<Hash> {
         assert_eq!(
             leaves.len(),
             self.num_leaves,
@@ -120,10 +127,7 @@ impl Config {
             remaining = next_remaining;
         }
 
-        // Commit to the root hash.
-        prover_state.prover_message(&previous[0]);
-
-        Witness { nodes }
+        nodes
     }
 
     pub fn receive_commitment<H>(
@@ -155,33 +159,9 @@ impl Config {
         assert_eq!(witness.nodes.len(), self.num_nodes());
         assert!(indices.iter().all(|&i| i < self.num_leaves));
 
-        // Abstract execution of verify algorithm writing required hashes.
-        let mut indices = indices.to_vec();
-        indices.sort_unstable();
-        indices.dedup();
-        let (mut layer, mut remaining) = witness.nodes.split_at(1 << self.layers.len());
-        while layer.len() > 1 {
-            let mut next_indices = Vec::with_capacity(indices.len());
-            let mut iter = indices.iter().copied().peekable();
-            loop {
-                match (iter.next(), iter.peek()) {
-                    (Some(a), Some(&b)) if b == a ^ 1 => {
-                        // Neighboring indices, merging branches.
-                        next_indices.push(a >> 1);
-                        iter.next(); // Skip the next index.
-                    }
-                    (Some(a), _) => {
-                        // Single index, pushing the neighbor hash.
-                        prover_state.prover_hint(&layer[a ^ 1]);
-                        next_indices.push(a >> 1);
-                    }
-                    (None, _) => break,
-                }
-            }
-            indices = next_indices;
-            let (next_layer, next_remaining) = remaining.split_at(layer.len() / 2);
-            layer = next_layer;
-            remaining = next_remaining;
+        let node_indices = opening_sibling_indices(self.num_leaves, self.layers.len(), indices);
+        for hint in witness.nodes.gather_at_indices(&node_indices) {
+            prover_state.prover_hint(&hint);
         }
     }
 
@@ -273,7 +253,12 @@ impl Config {
 }
 
 impl Witness {
-    pub const fn num_nodes(&self) -> usize {
+    /// Wrap a fully built node buffer (leaf layer first, root last) as a witness.
+    pub const fn new(nodes: Buffer<Hash>) -> Self {
+        Self { nodes }
+    }
+
+    pub fn num_nodes(&self) -> usize {
         self.nodes.len()
     }
 }
@@ -301,6 +286,40 @@ fn parallel_hash(engine: &dyn HashEngine, size: usize, input: &[u8], output: &mu
     } else {
         engine.hash_many(size, input, output);
     }
+}
+
+/// Flat node indices of sibling hashes required to open at `indices`.
+pub fn opening_sibling_indices(num_leaves: usize, layers: usize, indices: &[usize]) -> Vec<usize> {
+    debug_assert!(indices.iter().all(|&i| i < num_leaves));
+
+    let mut indices = indices.to_vec();
+    indices.sort_unstable();
+    indices.dedup();
+
+    let mut node_indices = Vec::new();
+    let mut layer_offset = 0usize;
+    let mut layer_len = 1usize << layers;
+    while layer_len > 1 {
+        let mut next_indices = Vec::with_capacity(indices.len());
+        let mut iter = indices.iter().copied().peekable();
+        loop {
+            match (iter.next(), iter.peek()) {
+                (Some(a), Some(&b)) if b == a ^ 1 => {
+                    next_indices.push(a >> 1);
+                    iter.next();
+                }
+                (Some(a), _) => {
+                    node_indices.push(layer_offset + (a ^ 1));
+                    next_indices.push(a >> 1);
+                }
+                (None, _) => break,
+            }
+        }
+        indices = next_indices;
+        layer_offset += layer_len;
+        layer_len /= 2;
+    }
+    node_indices
 }
 
 #[cfg(test)]
@@ -340,8 +359,10 @@ pub(crate) mod tests {
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
-        let tree = config.commit(&mut prover_state, leaves);
-        config.open(&mut prover_state, &tree, &[13, 42]);
+        let nodes = config.build_nodes(leaves);
+        prover_state.prover_message(&nodes[config.num_nodes() - 1]);
+        let witness = Witness::new(Buffer::from(nodes));
+        config.open(&mut prover_state, &witness, &[13, 42]);
         let proof = prover_state.proof();
 
         // Verifier

@@ -22,34 +22,35 @@ pub use self::{
 };
 use crate::{
     algebra::fields,
+    buffer::{Buffer, DefaultRs},
     type_map::{self, TypeMap},
 };
 
 pub static NTT: LazyLock<TypeMap<NttFamily>> = LazyLock::new(|| {
     let map = TypeMap::new();
     map.insert(
-        Arc::new(NttEngine::<fields::Field64>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field64>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field128>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field128>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field192>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field192>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field256>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
+        Arc::new(DefaultRs::<fields::Field256>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field64_2>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
+        Arc::new(DefaultRs::<fields::Field64_2>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
     );
     map.insert(
-        Arc::new(NttEngine::<fields::Field64_3>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
+        Arc::new(DefaultRs::<fields::Field64_3>::new_from_fftfield()) as Arc<dyn ReedSolomon<_>>,
     );
     map.insert(Arc::new(
-        NttEngine::<<fields::Field64_2 as Field>::BasePrimeField>::new_from_fftfield(),
+        DefaultRs::<<fields::Field64_2 as Field>::BasePrimeField>::new_from_fftfield(),
     ) as Arc<dyn ReedSolomon<_>>);
     map.insert(Arc::new(
-        NttEngine::<<fields::Field64_3 as Field>::BasePrimeField>::new_from_fftfield(),
+        DefaultRs::<<fields::Field64_3 as Field>::BasePrimeField>::new_from_fftfield(),
     ) as Arc<dyn ReedSolomon<_>>);
     map
 });
@@ -104,7 +105,7 @@ pub trait ReedSolomon<F>: Debug + Send + Sync {
     ///
     /// `codeword_length` must be NTT-smooth for this engine and at least the
     /// polynomial length.
-    fn interleaved_encode(&self, polys: &[&[F]], codeword_length: usize) -> Vec<F>;
+    fn interleaved_encode(&self, polys: &[&[F]], codeword_length: usize) -> Buffer<F>;
 }
 
 assert_obj_safe!(ReedSolomon<crate::algebra::fields::Field256>);
@@ -125,7 +126,7 @@ pub fn evaluation_points<F: 'static>(
         .evaluation_points(poly_length, codeword_length, indices)
 }
 
-pub fn interleaved_rs_encode<F: 'static>(polys: &[&[F]], codeword_length: usize) -> Vec<F> {
+pub fn interleaved_rs_encode<F: 'static>(polys: &[&[F]], codeword_length: usize) -> Buffer<F> {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
         .interleaved_encode(polys, codeword_length)
@@ -149,6 +150,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{random_vector, univariate_evaluate},
+        buffer::BufferOps,
         utils::zip_strict,
     };
 
@@ -208,6 +210,7 @@ mod tests {
 
             // Output values are polynomial evaluations in the evaluation points.
             let mut evaluation_points = ntt.evaluation_points(message_length + mask_length, codeword_length, &sampled_indices);
+            let codeword = codeword.to_slice();
             for (&index, &evaluation_point) in zip_strict(&sampled_indices, &evaluation_points) {
                 let evaluations = &codeword[index * num_messages.. (index + 1) * num_messages];
                 for ((message, mask), value) in zip_strict(zip_strict(&messages, &masks), evaluations) {

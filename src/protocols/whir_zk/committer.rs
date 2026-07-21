@@ -1,3 +1,5 @@
+// IGNORE CHANGES TO THIS FILE - NOT FULLY PORTED TO PROPERLY USE BUFFER ABSTRACTION.
+
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
 #[cfg(feature = "tracing")]
@@ -6,6 +8,7 @@ use tracing::instrument;
 use super::{utils::BlindingPolynomials, Config};
 use crate::{
     algebra::embedding::Identity,
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::whir,
     transcript::{
@@ -44,7 +47,7 @@ impl<F: Field> Config<F> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        polynomials: &[&[F]],
+        polynomials: &[&Buffer<F>],
     ) -> Witness<F>
     where
         Standard: Distribution<F>,
@@ -65,6 +68,7 @@ impl<F: Field> Config<F> {
         let num_blinding_variables = self.num_blinding_variables();
         let num_witness_variables = self.num_witness_variables();
         for &poly in polynomials {
+            let poly = poly.to_slice();
             let blinding = BlindingPolynomials::sample(
                 prover_state.rng(),
                 num_blinding_variables,
@@ -88,9 +92,10 @@ impl<F: Field> Config<F> {
                 .zip(mask.iter().cycle())
                 .map(|(&coeff, &m)| coeff + m)
                 .collect::<Vec<_>>();
+            let f_hat_buffer = Buffer::from(f_hat_vec.as_slice());
             let witness = self
                 .blinded_commitment
-                .commit(prover_state, &[f_hat_vec.as_slice()]);
+                .commit(prover_state, &[&f_hat_buffer]);
             f_hat_vectors.push(f_hat_vec);
             f_hat_witnesses.push(witness);
             blinding_polynomials.push(blinding);
@@ -112,10 +117,11 @@ impl<F: Field> Config<F> {
             );
             blinding_vectors.extend(layout);
         }
-        let blinding_vector_refs = blinding_vectors
+        let blinding_buffers = blinding_vectors
             .iter()
-            .map(Vec::as_slice)
+            .map(|v| Buffer::from(v.as_slice()))
             .collect::<Vec<_>>();
+        let blinding_vector_refs = blinding_buffers.iter().collect::<Vec<_>>();
         let blinding_witness = self
             .blinding_commitment
             .commit(prover_state, &blinding_vector_refs);

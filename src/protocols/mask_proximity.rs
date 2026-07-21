@@ -61,6 +61,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{dot, embedding::Identity, random_vector, scalar_mul_add_new, univariate_evaluate},
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
@@ -164,12 +165,15 @@ impl<F: Field> Config<F> {
             .map(|_| random_vector(prover_state.rng(), self.c_zk_commit.vector_size()))
             .collect();
 
-        // Tree layout: [originals..., freshes...]
-        let all_vectors: Vec<&[F]> = original_msgs
+        // Tree layout: [originals..., freshes...]. The IRS committer takes
+        // backend buffers; the message/mask split is a caller-side concept, so
+        // upload each host vector into a buffer here.
+        let all_buffers: Vec<Buffer<F>> = original_msgs
             .iter()
-            .copied()
-            .chain(fresh_msgs.iter().map(Vec::as_slice))
+            .map(|msg| Buffer::from(*msg))
+            .chain(fresh_msgs.iter().map(|msg| Buffer::from(msg.as_slice())))
             .collect();
+        let all_vectors: Vec<&Buffer<F>> = all_buffers.iter().collect();
 
         let mask_witness = self.c_zk_commit.commit(prover_state, &all_vectors);
 
@@ -261,7 +265,7 @@ impl<F: Field> Config<F> {
             // r*_i = r'_i + γ · r_i — IRS stores masks per-polynomial
             // contiguous, so direct slicing reconstructs each poly's mask.
             if irs_masks_per_vector > 0 {
-                let masks = &witness.mask_witness.masks;
+                let masks = witness.mask_witness.masks.to_slice();
                 let orig_r = &masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
                 let fresh_offset = (self.num_masks + i) * irs_masks_per_vector;
                 let fresh_r = &masks[fresh_offset..fresh_offset + irs_masks_per_vector];
@@ -282,13 +286,9 @@ impl<F: Field> Config<F> {
         self.c_zk_commit
             .open(prover_state, &[&witness.mask_witness]);
 
-        // Zeroize IRS mask secret material after the tree open.
-        for elem in &mut witness.mask_witness.masks {
-            elem.zeroize();
-        }
-        for elem in &mut witness.mask_witness.matrix {
-            elem.zeroize();
-        }
+        // NOTE: the IRS mask/matrix secret material lives in opaque backend
+        // `Buffer`s, which do not expose in-place host mutation, so we can no
+        // longer explicitly zeroize it here (it is dropped with the witness).
     }
 
     /// Verify that each original mask is close to a C_zk codeword. When
@@ -354,7 +354,7 @@ impl<F: Field> Config<F> {
         // Step 4: spot-check γ-combination at each opened position
         let num_cols = self.c_zk_commit.num_cols();
         for (row, &point) in zip_strict(
-            evaluations.matrix.chunks_exact(num_cols),
+            evaluations.matrix.to_slice().chunks_exact(num_cols),
             &evaluations.points,
         ) {
             let shift = combined_rs.as_ref().map(|_| point.pow([msg_len as u64]));
@@ -592,10 +592,9 @@ mod tests {
             prover_state.prover_messages(&combined_msg);
 
             if irs_masks_per_vector > 0 {
-                let orig_r = &witness.mask_witness.masks
-                    [i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
-                let fresh_r = &witness.mask_witness.masks[(config.num_masks + i)
-                    * irs_masks_per_vector
+                let masks = witness.mask_witness.masks.to_slice();
+                let orig_r = &masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
+                let fresh_r = &masks[(config.num_masks + i) * irs_masks_per_vector
                     ..(config.num_masks + i + 1) * irs_masks_per_vector];
                 let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
                 prover_state.prover_messages(&combined_r);
@@ -746,10 +745,9 @@ mod tests {
             let combined_msg = scalar_mul_add_new(fresh_msg, gamma, orig_msg);
             prover_state.prover_messages(&combined_msg);
             if irs_masks_per_vector > 0 {
-                let orig_r = &witness.mask_witness.masks
-                    [i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
-                let fresh_r = &witness.mask_witness.masks[(config.num_masks + i)
-                    * irs_masks_per_vector
+                let masks = witness.mask_witness.masks.to_slice();
+                let orig_r = &masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
+                let fresh_r = &masks[(config.num_masks + i) * irs_masks_per_vector
                     ..(config.num_masks + i + 1) * irs_masks_per_vector];
                 let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
                 prover_state.prover_messages(&combined_r);

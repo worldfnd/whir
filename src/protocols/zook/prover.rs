@@ -51,6 +51,7 @@ use crate::{
         dot, embedding::Identity, geometric_sequence, linear_form::LinearForm, random_vector,
         univariate_evaluate,
     },
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
         code_switch::{self, fold_chunks},
@@ -99,7 +100,7 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
 
         // RLC challenge binds the form/value set to the commitment.
         let batching_challenge: F = ps.verifier_message();
-        let claim_weights = geometric_sequence(batching_challenge, linear_forms.len());
+        let claim_weights = geometric_sequence(F::ONE, batching_challenge, linear_forms.len());
 
         // Materialize the combined covector = Σ γ^j · form_j and combined value.
         let mut covector = vec![F::ZERO; self.tuning().vector_size];
@@ -143,9 +144,13 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
         // Standard mode (BasecaseMode::Standard) sends the full witness vector
         // and IRS randomness cleartext. Only call with Mode::ZeroKnowledge if
         // end-to-end hiding is required.
-        let _ = self
-            .basecase()
-            .prove(ps, message, &basecase_witness, covector, sum);
+        let _ = self.basecase().prove(
+            ps,
+            Buffer::from(message.as_slice()),
+            &basecase_witness,
+            Buffer::from(covector.as_slice()),
+            sum,
+        );
     }
 }
 
@@ -186,13 +191,20 @@ where
     // cs_fresh_padding is pre-sampled here because it does not depend on folding randomness.
     let mut masker = RoundMaskOracle::begin(round, ps);
 
+    // Sumcheck folds its buffers in place. Upload the host-side round state,
+    // fold, and read the folded result back into the `Vec` state (which
+    // downstream steps resize/truncate/index directly).
+    let mut message_buf = Buffer::from(state.message.as_slice());
+    let mut covector_buf = Buffer::from(state.covector.as_slice());
     let opening = round.sumcheck().prove(
         ps,
-        &mut state.message,
-        &mut state.covector,
+        &mut message_buf,
+        &mut covector_buf,
         &mut state.sum,
         masker.sumcheck_blinding(),
     );
+    state.message = message_buf.to_slice().to_vec();
+    state.covector = covector_buf.to_slice().to_vec();
 
     // Build cs_mask = (folded_irs_masks ‖ cs_fresh_padding), commit its tree,
     // send mask_eval_sum cleartext, reconcile sum to the unmasked dot.
@@ -322,7 +334,7 @@ impl<'a, F: Field + Zeroize> SumcheckMaskTree<'a, F> {
     {
         let evaluation_covectors: Vec<Vec<F>> = round_challenges
             .iter()
-            .map(|&c| geometric_sequence(c, self.padded_vec_size))
+            .map(|&c| geometric_sequence(F::ONE, c, self.padded_vec_size))
             .collect();
         let covector_refs: Vec<&[F]> = evaluation_covectors.iter().map(Vec::as_slice).collect();
         let padded_mask_refs: Vec<&[F]> = self.padded_masks.iter().map(Vec::as_slice).collect();
@@ -503,7 +515,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
         // cs_mask = (r_folded ‖ s): r folds the source IRS randomness by the sumcheck challenges.
         let source_mask_len = mask_oracle.l_zk().get() - cs_fresh_padding.len();
         let r_folded = fold_chunks(
-            &irs_witness.masks,
+            irs_witness.masks.to_slice(),
             source_mask_len,
             &opening.round_challenges,
         );

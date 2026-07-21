@@ -9,6 +9,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{embedding::Embedding, lift},
+    buffer::Buffer,
     hash::Hash,
     protocols::{
         irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
@@ -70,7 +71,11 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         );
 
         let state = if let Some(round) = self.rounds().first() {
-            let irs_witness = round.code_switch().source().commit(ps, &[witness]);
+            let witness_buffer = Buffer::from(witness);
+            let irs_witness = round
+                .code_switch()
+                .source()
+                .commit(ps, &[&witness_buffer]);
             let message = lift(round.code_switch().source().embedding(), witness);
             CommittedState::Round {
                 message,
@@ -80,7 +85,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             // Basecase IRS is over `M::Target`; lift before committing.
             let embedding = M::default();
             let message = lift(&embedding, witness);
-            let irs_witness = self.basecase().commit().commit(ps, &[&message]);
+            let message_buffer = Buffer::from(message.as_slice());
+            let irs_witness = self.basecase().commit().commit(ps, &[&message_buffer]);
             CommittedState::Basecase {
                 message,
                 irs_witness,

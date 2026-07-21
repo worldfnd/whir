@@ -18,7 +18,7 @@ use super::{
 };
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
-use crate::algebra::ntt::utils::divisors;
+use crate::{algebra::ntt::utils::divisors, buffer::Buffer};
 
 // Supported primes
 const PRIMES: [usize; 2] = [2, 3];
@@ -403,10 +403,10 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         poly_length = polys.first().map(|p| p.len()),
         codeword_length = codeword_length,
     )))]
-    fn interleaved_encode(&self, polys: &[&[F]], codeword_length: usize) -> Vec<F> {
+    fn interleaved_encode(&self, polys: &[&[F]], codeword_length: usize) -> Buffer<F> {
         assert!(self.order.is_multiple_of(codeword_length));
         if polys.is_empty() {
-            return Vec::new();
+            return Buffer::from(Vec::new());
         }
         let num_polys = polys.len();
         let poly_length = polys[0].len();
@@ -460,7 +460,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
 
         // Transpose to row-major order with vectors stacked horizontally.
         transpose(&mut result, num_polys, codeword_length);
-        result
+        Buffer::from(result)
     }
 }
 

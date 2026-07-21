@@ -34,6 +34,12 @@ pub enum LayoutError {
     /// `tuning.folding_factor` must yield at least 1 at every round.
     #[error("tuning.folding_factor min ({min}) must be ≥ 1")]
     FoldingFactorBelowOne { min: usize },
+
+    /// `tuning.starting_log_inv_rate` must be ≥ 1 (i.e. rate < 1). At rate == 1
+    /// the code has zero decoding distance, so query soundness is undefined and
+    /// the in-domain query count would diverge.
+    #[error("tuning.starting_log_inv_rate must be ≥ 1 (rate < 1); got 0")]
+    StartingRateBelowOne,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +77,9 @@ pub(super) fn round_layout<M: Embedding + Default>(
     let min_folding = tuning.folding_factor.min();
     if min_folding < 1 {
         return Err(LayoutError::FoldingFactorBelowOne { min: min_folding }.into());
+    }
+    if tuning.starting_log_inv_rate < 1 {
+        return Err(LayoutError::StartingRateBelowOne.into());
     }
 
     let mut num_vars = tuning.vector_size.trailing_zeros() as usize;
@@ -305,6 +314,21 @@ mod tests {
                 err,
                 DeriveError::Layout(LayoutError::FoldingFactorBelowOne { min: 0 })
             ),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
+    fn round_layout_rejects_zero_starting_rate() {
+        let tuning = TuningSpec {
+            vector_size: 1 << LOG_VECTOR_SIZE_MULTI_ROUND,
+            starting_log_inv_rate: 0,
+            folding_factor: FoldingFactor::Constant(FIXTURE_FOLDING_FACTOR),
+            rate_schedule: RateSchedule::Stepping,
+        };
+        let err = layout(&tuning).expect_err("starting_log_inv_rate = 0 must fail");
+        assert!(
+            matches!(err, DeriveError::Layout(LayoutError::StartingRateBelowOne)),
             "got {err:?}",
         );
     }

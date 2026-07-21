@@ -81,7 +81,7 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
 
         // RLC challenge binds the form/value set to the commitment.
         let batching_challenge: F = vs.verifier_message();
-        let claim_weights = geometric_sequence(batching_challenge, linear_forms.len());
+        let claim_weights = geometric_sequence(F::ONE, batching_challenge, linear_forms.len());
         let batched_evaluation: F = evaluations
             .iter()
             .zip(&claim_weights)
@@ -350,7 +350,7 @@ impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
         let sumcheck_vec_size = mo.sumcheck_masks().c_zk_commit().vector_size();
         let sm_covectors: Vec<Vec<F>> = round_challenges
             .iter()
-            .map(|&r| geometric_sequence(r, sumcheck_vec_size))
+            .map(|&r| geometric_sequence(F::ONE, r, sumcheck_vec_size))
             .collect();
         let sm_refs: Vec<&[F]> = sm_covectors.iter().map(Vec::as_slice).collect();
         let sm_x_values = mo

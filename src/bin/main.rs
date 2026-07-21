@@ -1,4 +1,6 @@
-use std::{borrow::Cow, time::Instant};
+#[cfg(feature = "rs_in_order")]
+use std::borrow::Cow;
+use std::time::Instant;
 
 #[cfg(feature = "rs_in_order")]
 use ark_ff::Field;
@@ -11,6 +13,7 @@ use whir::{
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
     },
     bits::Bits,
+    buffer::Buffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
@@ -149,9 +152,10 @@ where
     }
 
     let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
+    let vector_buffer = Buffer::from(vector.as_slice());
 
     let whir_commit_time = Instant::now();
-    let witness = params.commit(&mut prover_state, &[&vector]);
+    let witness = params.commit(&mut prover_state, &[&vector_buffer]);
     let whir_commit_time = whir_commit_time.elapsed();
 
     // Allocate constraints
@@ -184,10 +188,10 @@ where
     let whir_prove_time = Instant::now();
     let _ = params.prove(
         &mut prover_state,
-        vec![Cow::Borrowed(vector.as_slice())],
-        vec![Cow::Owned(witness)],
+        &[&vector_buffer],
+        vec![&witness],
         prove_linear_forms,
-        Cow::Borrowed(evaluations.as_slice()),
+        Buffer::from(evaluations.as_slice()),
     );
     let whir_prove_time = whir_prove_time.elapsed();
 
@@ -315,13 +319,14 @@ where
     }
 
     let whir_commit_time = Instant::now();
-    let witness = params.commit(&mut prover_state, &[vector.as_slice()]);
+    let vector_buffer = Buffer::from(vector.as_slice());
+    let witness = params.commit(&mut prover_state, &[&vector_buffer]);
     let whir_commit_time = whir_commit_time.elapsed();
 
     let whir_prove_time = Instant::now();
     let _ = params.prove(
         &mut prover_state,
-        vec![Cow::Borrowed(&vector)],
+        &[&vector_buffer],
         witness,
         prove_linear_forms,
         Cow::Borrowed(&evaluations),

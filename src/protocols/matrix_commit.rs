@@ -12,6 +12,7 @@ use tracing::instrument;
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
+    buffer::{Buffer, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::merkle_tree,
@@ -34,6 +35,20 @@ pub trait Encodable {
     /// During leaf hashing, an encoder will be created per thread and re-used
     /// as much as possible.
     fn encoder() -> Box<dyn Encoder<Self>>;
+}
+
+/// Backend-specific construction of a Merkle tree from matrix rows.
+pub trait Merklize<T> {
+    /// Buffer type used to store the resulting Merkle tree nodes.
+    type Nodes;
+
+    /// Hash rows of width `num_cols` and build a Merkle tree.
+    fn merklize(
+        &self,
+        num_cols: usize,
+        leaf_hash: EngineId,
+        merkle: &merkle_tree::Config,
+    ) -> (Self::Nodes, Hash);
 }
 
 /// Object-safe encoder for types that implement [`Encodable`].
@@ -168,7 +183,7 @@ impl<T: Immutable + IntoBytes> Encoder<T> for ZeroCopyEncoder {
     }
 }
 
-impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
+impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
     /// Create a new matrix commit configuration with the recommended hash function.
     pub fn new(num_rows: usize, num_cols: usize) -> Self {
         // Select a leaf hash function.
@@ -208,7 +223,7 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
 
     /// Commit the matrix (in row-major order).
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self, size = matrix.len(), engine)))]
-    pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, matrix: &[T]) -> Witness
+    pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, matrix: &Buffer<T>) -> Witness
     where
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -216,19 +231,9 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
     {
         assert_eq!(matrix.len(), self.num_rows() * self.num_cols);
 
-        let engine = hash::ENGINES
-            .retrieve(self.leaf_hash_id)
-            .expect("Failed to retrieve hash engine");
-        #[cfg(feature = "tracing")]
-        tracing::Span::current().record("engine", engine.name().as_ref());
-
-        // Compute leaf hashes
-        let mut leaves = Vec::with_capacity(self.merkle_tree.num_nodes());
-        leaves.resize(self.merkle_tree.num_leaves, Hash::default());
-        hash_rows(&*engine, matrix, &mut leaves[..self.num_rows()]);
-
-        // Commit the leaf hashes
-        self.merkle_tree.commit(prover_state, leaves)
+        let (nodes, root) = matrix.merklize(self.num_cols, self.leaf_hash_id, &self.merkle_tree);
+        prover_state.prover_message(&root);
+        merkle_tree::Witness::new(nodes)
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
@@ -292,14 +297,14 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
     }
 }
 
-impl<T: TypeInfo + Encodable + Send + Sync> fmt::Display for Config<T> {
+impl<T: TypeInfo + Encodable + Send + Sync + Copy> fmt::Display for Config<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MatrixCommit({} x {})", self.num_rows(), self.num_cols)
     }
 }
 
 #[cfg(not(feature = "parallel"))]
-fn hash_rows<T: Encodable + Send + Sync>(
+pub fn hash_rows<T: Encodable + Send + Sync>(
     engine: &dyn hash::HashEngine,
     matrix: &[T],
     out: &mut [Hash],
@@ -308,7 +313,7 @@ fn hash_rows<T: Encodable + Send + Sync>(
 }
 
 #[cfg(feature = "parallel")]
-fn hash_rows<T: Encodable + Send + Sync>(
+pub fn hash_rows<T: Encodable + Send + Sync>(
     engine: &dyn hash::HashEngine,
     matrix: &[T],
     out: &mut [Hash],
@@ -406,7 +411,7 @@ pub(crate) mod tests {
         num_cols: usize,
         indices: &[usize],
     ) where
-        T: Clone + TypeInfo + Encodable + Send + Sync,
+        T: Copy + TypeInfo + Encodable + Send + Sync,
         Standard: Distribution<T>,
     {
         crate::tests::init();
@@ -428,22 +433,9 @@ pub(crate) mod tests {
             .instance(&Empty);
 
         // Instance
-        let matrix: Vec<T> = (0..config.size()).map(|_| rng.gen()).collect();
-        let submatrix: Vec<T> = if num_cols > 0 {
-            indices
-                .iter()
-                .flat_map(|&index| {
-                    matrix
-                        .chunks_exact(num_cols)
-                        .nth(index)
-                        .unwrap()
-                        .iter()
-                        .cloned()
-                })
-                .collect::<Vec<T>>()
-        } else {
-            Vec::new()
-        };
+        let matrix: Buffer<T> =
+            Buffer::from((0..config.size()).map(|_| rng.gen()).collect::<Vec<_>>());
+        let submatrix: Vec<T> = matrix.read_rows(num_cols, indices);
 
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
@@ -462,7 +454,7 @@ pub(crate) mod tests {
 
     fn proptest<T>()
     where
-        T: Clone + TypeInfo + Encodable + Send + Sync,
+        T: Copy + TypeInfo + Encodable + Send + Sync,
         Standard: Distribution<T>,
     {
         let hashes = [hash::COPY, hash::SHA2, hash::SHA3, hash::BLAKE3];

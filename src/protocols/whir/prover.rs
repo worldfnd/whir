@@ -1,5 +1,3 @@
-use std::{any::Any, borrow::Cow, mem};
-
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
@@ -7,17 +5,14 @@ use tracing::instrument;
 
 use super::{Config, Witness};
 use crate::{
-    algebra::{
-        dot,
-        embedding::Embedding,
-        eq_weights, lift,
-        linear_form::{Covector, Evaluate, LinearForm, UnivariateEvaluation},
-        mixed_scalar_mul_add,
-        sumcheck::fold,
-        tensor_product,
-    },
+    algebra::{embedding::Embedding, linear_form::LinearForm},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
-    protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
+    protocols::{
+        geometric_challenge::{geometric_challenge_buffer, geometric_challenge_groups},
+        irs_commit,
+        whir::FinalClaim,
+    },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerifierMessage,
@@ -26,7 +21,7 @@ use crate::{
 };
 
 enum RoundWitness<'a, F: Field, M: Embedding<Target = F>> {
-    Initial(Vec<Cow<'a, Witness<F, M>>>),
+    Initial(Vec<&'a Witness<F, M>>),
     Round(irs_commit::Witness<F>),
 }
 
@@ -50,10 +45,10 @@ impl<M: Embedding> Config<M> {
     pub fn prove<'a, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: Vec<Cow<'a, [M::Source]>>,
-        witnesses: Vec<Cow<'a, Witness<M::Target, M>>>,
+        vectors: &[&Buffer<M::Source>],
+        witnesses: Vec<&'a Witness<M::Target, M>>,
         linear_forms: Vec<Box<dyn LinearForm<M::Target>>>,
-        evaluations: Cow<'a, [M::Target]>,
+        evaluations: Buffer<M::Target>,
     ) -> FinalClaim<M::Target>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
@@ -73,20 +68,24 @@ impl<M: Embedding> Config<M> {
             witnesses.len() * self.initial_committer.num_vectors()
         );
         assert_eq!(evaluations.len(), num_vectors * linear_forms.len());
-        for vector in &vectors {
+        for vector in vectors {
             assert_eq!(vector.len(), self.initial_size());
         }
         for linear_form in &linear_forms {
             assert_eq!(linear_form.size(), self.initial_size());
         }
         #[cfg(debug_assertions)]
-        for (linear_form, evaluations) in
-            zip_strict(linear_forms.iter(), evaluations.chunks_exact(num_vectors))
-        {
+        for (linear_form, evaluations) in zip_strict(
+            linear_forms.iter(),
+            evaluations.to_slice().chunks_exact(num_vectors),
+        ) {
             use crate::algebra::linear_form::Covector;
             let covector = Covector::from(&**linear_form);
-            for (vector, evaluation) in zip_strict(&vectors, evaluations) {
-                debug_assert_eq!(covector.evaluate(self.embedding(), vector), *evaluation);
+            for (vector, evaluation) in zip_strict(vectors, evaluations) {
+                debug_assert_eq!(
+                    vector.mixed_dot(self.embedding(), &Buffer::from(covector.vector.as_slice())),
+                    *evaluation
+                );
             }
         }
         if vectors.is_empty() {
@@ -110,12 +109,13 @@ impl<M: Embedding> Config<M> {
                         if j >= vector_offset && j < oods_row.len() + vector_offset {
                             debug_assert_eq!(
                                 oods_row[j - vector_offset],
-                                oods_eval.evaluate(self.embedding(), vector)
+                                vector.mixed_univariate_evaluate(self.embedding(), oods_eval.point)
                             );
 
                             oods_matrix.push(oods_row[j - vector_offset]);
                         } else {
-                            let eval = oods_eval.evaluate(self.embedding(), vector);
+                            let eval =
+                                vector.mixed_univariate_evaluate(self.embedding(), oods_eval.point);
                             prover_state.prover_message(&eval);
                             oods_matrix.push(eval);
                         }
@@ -128,69 +128,54 @@ impl<M: Embedding> Config<M> {
         };
 
         // Random linear combination of the vectors.
-        let mut vector_rlc_coeffs: Vec<M::Target> = geometric_challenge(prover_state, num_vectors);
-        assert_eq!(vector_rlc_coeffs[0], M::Target::ONE);
-        // Recycle the first input as the accumulator (its coefficient is always ONE).
-        let mut vectors = vectors.into_iter();
-        let first = vectors.next().expect("non-empty");
-        let mut vector = match first {
-            Cow::Borrowed(slice) => lift(self.embedding(), slice),
-            Cow::Owned(vec) => self.embedding().map_vec(vec),
-        };
-        for (rlc_coeff, input_vector) in zip_strict(&vector_rlc_coeffs[1..], vectors) {
-            mixed_scalar_mul_add(self.embedding(), &mut vector, *rlc_coeff, &input_vector);
-        }
+        let mut vector_rlc_coeffs = geometric_challenge_buffer(prover_state, num_vectors);
+        let mut vector = Buffer::<M::Source>::mixed_linear_combination(
+            self.embedding(),
+            vectors,
+            &vector_rlc_coeffs,
+        );
 
         let mut prev_witness: RoundWitness<'a, M::Target, M> = RoundWitness::Initial(witnesses);
 
-        // Random linear combination of the constraints.
-        let constraint_rlc_coeffs: Vec<M::Target> =
-            geometric_challenge(prover_state, linear_forms.len() + oods_evals.len());
-        let has_constraints = !constraint_rlc_coeffs.is_empty();
-        let (initial_forms_rlc_coeffs, oods_rlc_coeffs) =
-            constraint_rlc_coeffs.split_at(linear_forms.len());
-        // Try to recycle the first linear form as Covector.
-        let mut covector = vec![];
+        // Random linear combination of the constraints. Split the geometric
+        // challenge into a run for the linear forms followed by a contiguous
+        // run for the OODS constraints; the verifier splits the same sequence.
+        let total_constraints = linear_forms.len() + oods_evals.len();
+        let has_constraints = total_constraints > 0;
+        let mut rlc_groups = geometric_challenge_groups::<_, M::Target>(
+            prover_state,
+            &[linear_forms.len(), oods_evals.len()],
+        )
+        .into_iter();
+        let initial_forms_rlc_coeffs = rlc_groups.next().unwrap();
+        let oods_rlc_coeffs = rlc_groups.next().unwrap();
+
         let mut linear_forms = linear_forms;
-        if let Some((first, linear_forms)) = linear_forms.split_first_mut() {
-            debug_assert_eq!(initial_forms_rlc_coeffs[0], M::Target::ONE);
-            if let Some(covector_form) =
-                (first.as_mut() as &mut dyn Any).downcast_mut::<Covector<M::Target>>()
-            {
-                mem::swap(&mut covector, &mut covector_form.vector);
-            } else {
-                covector.resize(self.initial_size(), M::Target::ZERO);
-                first.accumulate(&mut covector, M::Target::ONE);
-            }
-            for (rlc_coeff, linear_form) in zip_strict(&initial_forms_rlc_coeffs[1..], linear_forms)
-            {
-                linear_form.accumulate(&mut covector, *rlc_coeff);
-            }
-        } else if has_constraints {
-            covector.resize(self.initial_size(), M::Target::ZERO);
-        }
+        let mut covector = if has_constraints {
+            Buffer::<M::Target>::linear_forms_rlc(
+                self.initial_size(),
+                &mut linear_forms,
+                &initial_forms_rlc_coeffs,
+            )
+        } else {
+            Buffer::<M::Target>::zeros(0)
+        };
         drop(linear_forms);
 
-        // Compute "The Sum"
-        let mut the_sum: M::Target = zip_strict(
-            initial_forms_rlc_coeffs,
-            evaluations.chunks_exact(num_vectors),
-        )
-        .map(|(poly_coeff, row)| *poly_coeff * dot(&vector_rlc_coeffs, row))
-        .sum();
+        // Compute "The Sum": initial_forms_rlc_coeffsᵀ · evaluations · vector_rlc_coeffs
+        let mut the_sum = evaluations.bilinear_form(&initial_forms_rlc_coeffs, &vector_rlc_coeffs);
         drop(evaluations);
 
-        debug_assert!(!has_constraints || dot(&vector, &covector) == the_sum);
+        debug_assert!(!has_constraints || vector.dot(&covector) == the_sum);
 
         // Add OODS constraints
-        UnivariateEvaluation::accumulate_many(&oods_evals, &mut covector, oods_rlc_coeffs);
-        the_sum += zip_strict(oods_rlc_coeffs, oods_matrix.chunks_exact(num_vectors))
-            .map(|(poly_coeff, row)| *poly_coeff * dot(&vector_rlc_coeffs, row))
-            .sum::<M::Target>();
+        covector.accumulate_univariate_evaluations(&oods_evals, &oods_rlc_coeffs);
+        let oods_matrix = Buffer::from(oods_matrix);
+        the_sum += oods_matrix.bilinear_form(&oods_rlc_coeffs, &vector_rlc_coeffs);
         drop(oods_evals);
         drop(oods_matrix);
 
-        debug_assert!(!has_constraints || dot(&vector, &covector) == the_sum);
+        debug_assert!(!has_constraints || vector.dot(&covector) == the_sum);
 
         // Run initial sumcheck on batched vectors with combined statement
         let mut folding_randomness = if has_constraints {
@@ -207,15 +192,15 @@ impl<M: Embedding> Config<M> {
             self.initial_skip_pow.prove(prover_state);
             // Fold vector
             for &f in &folding_randomness {
-                fold(&mut vector, f);
+                vector.fold(f);
             }
             // Covector must be all zeros.
-            covector = vec![M::Target::ZERO; self.initial_sumcheck.final_size()];
+            covector = Buffer::<M::Target>::zeros(self.initial_sumcheck.final_size());
             folding_randomness
         };
         let mut evaluation_point = folding_randomness.clone();
 
-        debug_assert_eq!(dot(&vector, &covector), the_sum);
+        debug_assert_eq!(vector.dot(&covector), the_sum);
 
         // Execute standard WHIR rounds on the batched vectors
         for (round_index, round_config) in self.round_configs.iter().enumerate() {
@@ -250,21 +235,17 @@ impl<M: Embedding> Config<M> {
                 .evaluators(round_config.initial_size())
                 .chain(in_domain.evaluators(round_config.initial_size()))
                 .collect::<Vec<_>>();
+            // Weights for the in-domain rows: vector_rlc_coeffs ⊗ eq(folding_randomness),
+            // built directly on the backend so no readback is needed.
+            let stir_weights =
+                vector_rlc_coeffs.tensor_product(&Buffer::eq_weights(&folding_randomness));
             let stir_evaluations = out_of_domain
-                .values(&[M::Target::ONE])
-                .chain(in_domain.values(&tensor_product(
-                    &vector_rlc_coeffs,
-                    &eq_weights(&folding_randomness),
-                )))
-                .collect::<Vec<_>>();
-            let stir_rlc_coeffs = geometric_challenge(prover_state, stir_challenges.len());
-            UnivariateEvaluation::accumulate_many(
-                &stir_challenges,
-                &mut covector,
-                &stir_rlc_coeffs,
-            );
-            the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
-            debug_assert_eq!(dot(&vector, &covector), the_sum);
+                .values_buffer(&Buffer::ones(1))
+                .concat(&in_domain.values_buffer(&stir_weights));
+            let stir_rlc_coeffs = geometric_challenge_buffer(prover_state, stir_challenges.len());
+            covector.accumulate_univariate_evaluations(&stir_challenges, &stir_rlc_coeffs);
+            the_sum += stir_rlc_coeffs.dot(&stir_evaluations);
+            debug_assert_eq!(vector.dot(&covector), the_sum);
 
             // Run sumcheck for this round
             folding_randomness = round_config
@@ -273,15 +254,15 @@ impl<M: Embedding> Config<M> {
                 .round_challenges;
 
             evaluation_point.extend(folding_randomness.iter().copied());
-            debug_assert_eq!(dot(&vector, &covector), the_sum);
+            debug_assert_eq!(vector.dot(&covector), the_sum);
 
             prev_witness = RoundWitness::Round(new_witness);
-            vector_rlc_coeffs = vec![M::Target::ONE];
+            vector_rlc_coeffs = Buffer::ones(1);
         }
 
         // Directly send the vector to the verifier.
         assert_eq!(vector.len(), self.final_sumcheck.initial_size());
-        for coeff in &vector {
+        for coeff in vector.to_slice() {
             prover_state.prover_message(coeff);
         }
 
@@ -311,7 +292,7 @@ impl<M: Embedding> Config<M> {
 
         FinalClaim {
             evaluation_point,
-            rlc_coefficients: initial_forms_rlc_coeffs.to_vec(),
+            rlc_coefficients: initial_forms_rlc_coeffs.to_slice().to_vec(),
             linear_form_rlc: M::Target::ZERO,
         }
     }
