@@ -651,10 +651,11 @@ mod tests {
             .session(&format!("whir-zk-bench-2^20 {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let witness = params.commit(&mut prover_state, &[&vector[..]]);
+        let vector_buffer = Buffer::from(vector.as_slice());
+        let witness = params.commit(&mut prover_state, &[&vector_buffer]);
         let _ = params.prove(
             &mut prover_state,
-            vec![Cow::Borrowed(&vector[..])],
+            &[&vector_buffer],
             witness,
             prove_forms,
             Cow::Borrowed(&evaluations),

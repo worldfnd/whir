@@ -72,10 +72,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
 
         let state = if let Some(round) = self.rounds().first() {
             let witness_buffer = Buffer::from(witness);
-            let irs_witness = round
-                .code_switch()
-                .source()
-                .commit(ps, &[&witness_buffer]);
+            let irs_witness = round.code_switch().source().commit(ps, &[&witness_buffer]);
             let message = lift(round.code_switch().source().embedding(), witness);
             CommittedState::Round {
                 message,
