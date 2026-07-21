@@ -4,6 +4,7 @@ use std::{any::Any, mem};
 
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
+use zeroize::Zeroize;
 
 use crate::{
     algebra::{
@@ -54,6 +55,10 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
         &self.data
     }
 
+    fn into_vec(self) -> Vec<T> {
+        self.data
+    }
+
     fn len(&self) -> usize {
         self.data.len()
     }
@@ -72,6 +77,13 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
 
     fn get(&self, index: usize) -> Option<&T> {
         self.data.get(index)
+    }
+
+    fn wipe(&mut self)
+    where
+        T: Zeroize,
+    {
+        self.data.zeroize();
     }
 }
 

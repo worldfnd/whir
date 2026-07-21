@@ -146,9 +146,9 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
         // end-to-end hiding is required.
         let _ = self.basecase().prove(
             ps,
-            Buffer::from(message.as_slice()),
+            Buffer::from(message),
             &basecase_witness,
-            Buffer::from(covector.as_slice()),
+            Buffer::from(covector),
             sum,
         );
     }
@@ -191,11 +191,12 @@ where
     // cs_fresh_padding is pre-sampled here because it does not depend on folding randomness.
     let mut masker = RoundMaskOracle::begin(round, ps);
 
-    // Sumcheck folds its buffers in place. Upload the host-side round state,
-    // fold, and read the folded result back into the `Vec` state (which
-    // downstream steps resize/truncate/index directly).
-    let mut message_buf = Buffer::from(state.message.as_slice());
-    let mut covector_buf = Buffer::from(state.covector.as_slice());
+    // Sumcheck folds its buffers in place. Move the host-side round state into
+    // buffers, fold, and move the folded result back into the `Vec` state
+    // (which downstream steps resize/truncate/index directly). Both hops are
+    // zero-copy on the CPU backend.
+    let mut message_buf = Buffer::from(std::mem::take(&mut state.message));
+    let mut covector_buf = Buffer::from(std::mem::take(&mut state.covector));
     let opening = round.sumcheck().prove(
         ps,
         &mut message_buf,
@@ -203,8 +204,8 @@ where
         &mut state.sum,
         masker.sumcheck_blinding(),
     );
-    state.message = message_buf.to_slice().to_vec();
-    state.covector = covector_buf.to_slice().to_vec();
+    state.message = message_buf.into_vec();
+    state.covector = covector_buf.into_vec();
 
     // Build cs_mask = (folded_irs_masks ‖ cs_fresh_padding), commit its tree,
     // send mask_eval_sum cleartext, reconcile sum to the unmasked dot.

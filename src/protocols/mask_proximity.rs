@@ -286,9 +286,9 @@ impl<F: Field> Config<F> {
         self.c_zk_commit
             .open(prover_state, &[&witness.mask_witness]);
 
-        // NOTE: the IRS mask/matrix secret material lives in opaque backend
-        // `Buffer`s, which do not expose in-place host mutation, so we can no
-        // longer explicitly zeroize it here (it is dropped with the witness).
+        // Zeroize IRS mask secret material after the tree open.
+        witness.mask_witness.masks.wipe();
+        witness.mask_witness.matrix.wipe();
     }
 
     /// Verify that each original mask is close to a C_zk codeword. When
