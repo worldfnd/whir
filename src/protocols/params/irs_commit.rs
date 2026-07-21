@@ -18,6 +18,13 @@ use crate::{
     },
 };
 
+/// Convergence cap for the mask-length / effective-rate fixpoint in [`solve`].
+/// Lemma 9.5 requires `mask_length ≥ in_domain_samples + t_ood`. Both sides
+/// move with each iteration (mask drives codeword sizing → effective rate →
+/// in-domain query count), but `next_order` rounding bounds the shift; the
+/// loop converges in 1-2 iterations under all production specs.
+const SOLVE_MAX_ITER: usize = 4;
+
 pub fn solve<M: Embedding + Default>(
     spec: &SecuritySpec,
     ctx: &RoundContext,
@@ -27,30 +34,45 @@ pub fn solve<M: Embedding + Default>(
     let rate = rate(f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
 
-    let mode = match spec.mode {
-        Mode::Standard => IrsMode::Standard,
-        Mode::ZeroKnowledge => {
-            let mask_length = num_in_domain_queries(spec.decoding_regime, security_target, rate)
-                .saturating_add(out_domain_samples.get());
-            IrsMode::ZeroKnowledge { mask_length }
-        }
+    let build = |mode: IrsMode| -> Result<IrsConfig<M>, DeriveError> {
+        Ok(IrsConfig::try_new(IrsParams {
+            security_target,
+            decoding_regime: spec.decoding_regime,
+            hash_id: spec.hash_id,
+            num_vectors: 1,
+            vector_size: ctx.vector_size,
+            interleaving_depth,
+            rate,
+            mode,
+        })?)
     };
 
-    Ok(IrsConfig::try_new(IrsParams {
-        security_target,
-        decoding_regime: spec.decoding_regime,
-        hash_id: spec.hash_id,
-        num_vectors: 1,
-        vector_size: ctx.vector_size,
-        interleaving_depth,
-        rate,
-        mode,
-    })?)
+    if matches!(spec.mode, Mode::Standard) {
+        return build(IrsMode::Standard);
+    }
+
+    // ZK mode: Lemma 9.5 requires `mask_length ≥ in_domain + OOD`.
+    // `in_domain_samples` is computed inside `IrsConfig::try_new` from the
+    // codeword's *effective* rate (which depends on `mask_length` via
+    // `masked_message_length`). Iterate to align the two: pick a mask, build
+    // the config, check whether the effective in_domain exceeds the assumed
+    // query count, and grow if needed. Converges in 1-2 iterations because
+    // rate shifts are small.
+    let mut q = num_in_domain_queries(spec.decoding_regime, security_target, rate);
+    for _ in 0..SOLVE_MAX_ITER {
+        let mask_length = q.saturating_add(out_domain_samples.get());
+        let cfg = build(IrsMode::ZeroKnowledge { mask_length })?;
+        if cfg.in_domain_samples() <= q.get() {
+            return Ok(cfg);
+        }
+        q = std::num::NonZeroUsize::new(cfg.in_domain_samples()).expect("in_domain ≥ 1");
+    }
+    panic!("mask / effective-rate fixpoint did not converge in {SOLVE_MAX_ITER} iterations");
 }
 
 /// Shared C_zk IRS config for mask polynomials.
 ///
-/// - `l_zk`: message length, must be a power of 2.
+/// - `l_zk`: message length (`ℓ_zk` in the paper), must be a power of 2.
 /// - `source_mask_length`: `r` from Theorem 9.6.
 /// - `num_vectors`: `2 * num_masks` (Construction 7.2: originals + fresh).
 pub fn solve_mask_code<M: Embedding + Default>(

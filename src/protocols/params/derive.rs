@@ -17,25 +17,43 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Fails with [`DeriveError`] when the spec/tuning combination is
     /// infeasible.
     pub fn derive(spec: SecuritySpec, tuning: TuningSpec) -> Result<Self, DeriveError> {
+        let mode: RoundBuildMode<'_> = spec.as_zk().map_or(Branch::Standard, |zk_spec| {
+            Branch::ZeroKnowledge(RoundBuildPayload {
+                zk_spec,
+                // Hardcoded to 2^-4 to decouple the C_zk code rate from the
+                // message rate. The mask-proximity γ-combination discharge
+                // (Lemma 7.4 slot) needs headroom in |Λ(C_zk, δ_zk)|, and
+                // tightening to `tuning.starting_log_inv_rate` (which is set
+                // by the witness rate, not the C_zk rate) shrinks that
+                // headroom unpredictably. Adaptive schedules can still tune
+                // the witness side without touching C_zk.
+                c_zk_log_inv_rate: LogInvRate::new(4),
+            })
+        });
+
         let RoundLayout {
             shapes,
             basecase_vector_size,
             basecase_log_inv_rate,
-        } = round_layout(&tuning)?;
-
-        let mode: RoundBuildMode<'_> = spec.as_zk().map_or(Branch::Standard, |zk_spec| {
-            Branch::ZeroKnowledge(RoundBuildPayload {
-                zk_spec,
-                c_zk_log_inv_rate: LogInvRate::new(tuning.starting_log_inv_rate),
-            })
-        });
+        } = round_layout::<M>(&spec, &tuning, mode)?;
 
         let rounds: Vec<RoundConfig<M>> = shapes
             .iter()
             .map(|shape| build_round_config::<M>(&spec, shape, mode))
             .collect::<Result<_, _>>()?;
 
-        let basecase = basecase_params::solve(&spec, basecase_vector_size, basecase_log_inv_rate)?;
+        // When at least one round exists, the last round's `code_switch.target`
+        // is exactly the IRS that holds the folded basecase message — it has
+        // `interleaving_depth = 1` thanks to the override in `round_layout`.
+        // Build basecase around that same IRS so `zook::prove` can pass the
+        // existing witness directly to `basecase.prove` without re-encoding.
+        // PoW (sumcheck + γ-combination) is re-solved against the swapped
+        // IRS so analytic + PoW still meets the security target.
+        let basecase = if let Some(last) = rounds.last() {
+            basecase_params::solve_with_commit(&spec, last.code_switch().target().clone())?
+        } else {
+            basecase_params::solve(&spec, basecase_vector_size, basecase_log_inv_rate)?
+        };
 
         let plan = Self::new(spec, tuning, rounds, basecase);
         plan.validate()?;
@@ -57,7 +75,10 @@ mod tests {
             params::{
                 error::{ChainSource, ChainTarget, DeriveError, Pow},
                 protocol_config::{ProtocolConfig, RoundMode},
-                spec::{DecodingRegime, FoldingFactor, Mode, PowBudget, SecuritySpec, TuningSpec},
+                spec::{
+                    DecodingRegime, FoldingFactor, KneeWeight, Mode, PowBudget, RateSchedule,
+                    SecuritySpec, TuningSpec,
+                },
                 test_utils::{assert_close, assert_pow_closes_gap, TestEmbedding},
             },
         },
@@ -70,13 +91,23 @@ mod tests {
                 FoldingFactor::ConstantFromSecondRound { initial, rest }
             }),
         ];
-        (4u32..=8, 1u32..=3, folding).prop_map(|(log_size, log_inv_rate, folding_factor)| {
-            TuningSpec {
+        // Mix the three RateSchedule variants so proptest covers Capped and
+        // Adaptive code paths, not just Stepping.
+        let schedule = prop_oneof![
+            Just(RateSchedule::Stepping),
+            (4u32..=10).prop_map(|max_log_inv_rate| RateSchedule::Capped { max_log_inv_rate }),
+            Just(RateSchedule::Adaptive {
+                knee_weight: KneeWeight::DEFAULT,
+            }),
+        ];
+        (4u32..=8, 1u32..=3, folding, schedule).prop_map(
+            |(log_size, log_inv_rate, folding_factor, rate_schedule)| TuningSpec {
                 vector_size: 1usize << log_size,
                 starting_log_inv_rate: log_inv_rate,
                 folding_factor,
-            }
-        })
+                rate_schedule,
+            },
+        )
     }
 
     const FIXTURE_FOLDING_FACTOR: usize = 2;
@@ -90,6 +121,7 @@ mod tests {
             vector_size,
             starting_log_inv_rate: FIXTURE_LOG_INV_RATE,
             folding_factor: FoldingFactor::Constant(FIXTURE_FOLDING_FACTOR),
+            rate_schedule: RateSchedule::Stepping,
         }
     }
 
@@ -108,6 +140,19 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size)).unwrap();
         assert!(plan.rounds().is_empty());
         assert_eq!(plan.basecase().commit().vector_size(), vector_size);
+    }
+
+    #[test]
+    fn protocol_config_json_roundtrip() {
+        let spec = test_spec(Mode::Standard);
+        let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
+        let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size)).unwrap();
+
+        let json = serde_json::to_string(&plan).unwrap();
+        let decoded: ProtocolConfig<TestEmbedding> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, plan);
+        assert!(decoded.check_all_invariants());
     }
 
     #[test]
@@ -181,8 +226,19 @@ mod tests {
                 .source()
                 .interleaving_depth()
                 .trailing_zeros() as usize;
-            let expected_num_masks = k + 1;
-            assert_eq!(mask_oracle.c_zk().num_vectors(), 2 * expected_num_masks);
+            // Split-tree mask oracle: sumcheck tree carries the `k` sumcheck
+            // masks (2·k vectors after originals + freshes); cs_mask tree
+            // carries the single `(r ‖ s)` code-switch mask (2 vectors).
+            assert_eq!(
+                mask_oracle.sumcheck_masks().c_zk_commit().num_vectors(),
+                2 * k,
+                "sumcheck_masks tree must carry 2·k originals+freshes",
+            );
+            assert_eq!(
+                mask_oracle.cs_mask().c_zk_commit().num_vectors(),
+                2,
+                "cs_mask tree carries one (r ‖ s) mask + its fresh pair",
+            );
         }
     }
 
@@ -426,6 +482,206 @@ mod tests {
     }
 
     #[test]
+    fn validate_security_target_met_catches_zeroed_basecase_pow() {
+        // ZK basecase has a γ-combination PoW slot whose analytic floor is
+        // below the security target under the test fixture. Wiping the PoW
+        // must trip `validate_security_target_met`.
+        use crate::{bits::Bits, protocols::proof_of_work::Config as PowConfig};
+        let spec = test_spec(Mode::ZeroKnowledge);
+        let mut plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        assert!(
+            plan.check_all_invariants(),
+            "fresh plan must validate including soundness"
+        );
+
+        // Skip the test if this fixture's basecase γ-combination doesn't
+        // actually require PoW (i.e., analytic ≥ target already). Otherwise
+        // force a violation by zeroing the basecase PoW.
+        let pre_pow = plan.basecase().pow().difficulty();
+        if f64::from(pre_pow) == 0.0 {
+            return;
+        }
+
+        plan.override_basecase_pow_for_test(PowConfig::from_difficulty(Bits::new(0.0)));
+        let err = plan
+            .validate_security_target_met()
+            .expect_err("zeroed γ-combination PoW must trip soundness validation");
+        assert!(
+            matches!(
+                err,
+                DeriveError::SecurityTargetNotMet {
+                    pow: Pow::BasecaseGammaCombination,
+                    ..
+                }
+            ),
+            "got {err:?}",
+        );
+    }
+
+    /// Adaptive plan must validate end-to-end across modes and produce a
+    /// strictly less aggressive rate schedule than the unbounded `Stepping`
+    /// baseline at the tail.
+    #[test]
+    fn adaptive_plan_validates_and_caps_tail_rate() {
+        for mode in [Mode::Standard, Mode::ZeroKnowledge] {
+            let spec = test_spec(mode);
+            let tuning = TuningSpec {
+                vector_size: 1 << LOG_VECTOR_SIZE_MULTI_ROUND,
+                starting_log_inv_rate: FIXTURE_LOG_INV_RATE,
+                folding_factor: FoldingFactor::Constant(FIXTURE_FOLDING_FACTOR),
+                rate_schedule: RateSchedule::Adaptive {
+                    knee_weight: KneeWeight::DEFAULT,
+                },
+            };
+            let plan =
+                ProtocolConfig::<TestEmbedding>::derive(spec.clone(), tuning.clone()).unwrap();
+            assert!(
+                plan.check_all_invariants(),
+                "Adaptive plan must satisfy validate() in mode={mode:?}"
+            );
+
+            // Unbounded `Stepping` is the maximally-aggressive baseline (the
+            // canonical WHIR step-forever schedule). Adaptive should never
+            // propose a schedule whose basecase rate exceeds it — that's the
+            // whole point: Adaptive may stop growing rate earlier.
+            let unbounded = ProtocolConfig::<TestEmbedding>::derive(
+                spec,
+                TuningSpec {
+                    rate_schedule: RateSchedule::Stepping,
+                    ..tuning
+                },
+            )
+            .unwrap();
+            assert!(
+                plan.basecase().commit().rate() >= unbounded.basecase().commit().rate(),
+                "Adaptive basecase rate ({}) must be ≥ unbounded baseline's ({}) — \
+                 Adaptive should pick a *smaller* `1/ρ` at the tail",
+                plan.basecase().commit().rate(),
+                unbounded.basecase().commit().rate(),
+            );
+        }
+    }
+
+    /// When rounds exist, basecase IRS must equal the last round's
+    /// `code_switch.target` IRS — `zook::prove` skips re-encoding the folded
+    /// message at basecase entry.
+    #[test]
+    fn basecase_irs_aliases_last_round_target_when_rounds_present() {
+        for mode in [Mode::Standard, Mode::ZeroKnowledge] {
+            let spec = test_spec(mode);
+            for schedule in [
+                RateSchedule::Stepping,
+                RateSchedule::Capped {
+                    max_log_inv_rate: 6,
+                },
+                RateSchedule::Adaptive {
+                    knee_weight: KneeWeight::DEFAULT,
+                },
+            ] {
+                let tuning = TuningSpec {
+                    vector_size: 1 << LOG_VECTOR_SIZE_MULTI_ROUND,
+                    starting_log_inv_rate: FIXTURE_LOG_INV_RATE,
+                    folding_factor: FoldingFactor::Constant(FIXTURE_FOLDING_FACTOR),
+                    rate_schedule: schedule,
+                };
+                let plan = ProtocolConfig::<TestEmbedding>::derive(spec.clone(), tuning).unwrap();
+                assert!(!plan.rounds().is_empty(), "fixture must have rounds");
+                let last_target = plan.rounds().last().unwrap().code_switch().target();
+                let basecase_commit = plan.basecase().commit();
+                assert_eq!(
+                    last_target, basecase_commit,
+                    "basecase.commit must alias the last round's code_switch.target — \
+                     mode={mode:?} schedule={schedule:?}",
+                );
+                assert_eq!(basecase_commit.interleaving_depth(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn derive_with_capped_rate_shrinks_basecase_codeword() {
+        // Same shape that historically inflates basecase via rate stepping:
+        // ~2^20 witness, folding 3, 5 rounds → stepped log_inv_rate ≈ 12.
+        const LOG_VECTOR_SIZE: u32 = 12;
+        let spec = test_spec(Mode::ZeroKnowledge);
+        let folding = FoldingFactor::Constant(3);
+
+        let stepped_tuning = TuningSpec {
+            vector_size: 1usize << LOG_VECTOR_SIZE,
+            starting_log_inv_rate: 2,
+            folding_factor: folding,
+            rate_schedule: RateSchedule::Stepping,
+        };
+        let stepped_plan =
+            ProtocolConfig::<TestEmbedding>::derive(spec.clone(), stepped_tuning).unwrap();
+
+        let capped_tuning = TuningSpec {
+            vector_size: 1usize << LOG_VECTOR_SIZE,
+            starting_log_inv_rate: 2,
+            folding_factor: folding,
+            rate_schedule: RateSchedule::Capped {
+                max_log_inv_rate: 4,
+            },
+        };
+        let capped_plan = ProtocolConfig::<TestEmbedding>::derive(spec, capped_tuning).unwrap();
+
+        // Same number of rounds — cap only affects per-round rate, not layout shape.
+        assert_eq!(stepped_plan.rounds().len(), capped_plan.rounds().len());
+        // Cap forces a strictly smaller basecase codeword (the saving we're after).
+        let stepped_codeword = stepped_plan.basecase().commit().codeword_length();
+        let capped_codeword = capped_plan.basecase().commit().codeword_length();
+        assert!(
+            capped_codeword < stepped_codeword,
+            "capped basecase codeword ({capped_codeword}) should be smaller than stepped \
+             ({stepped_codeword})",
+        );
+        // For this fixture the cap should produce at least a 4× reduction.
+        assert!(
+            capped_codeword * 4 <= stepped_codeword,
+            "expected ≥4× reduction; got stepped={stepped_codeword}, capped={capped_codeword}",
+        );
+    }
+
+    /// Adaptive must not be worse than the unbounded-`Stepping` baseline on
+    /// basecase NTT work for the folding-3 / 2^12 ZK fixture that historically
+    /// inflates basecase via unbounded rate stepping. At minimum, Adaptive's
+    /// basecase codeword must be ≤ the baseline's.
+    #[test]
+    fn adaptive_basecase_no_worse_than_unbounded_on_inflating_fixture() {
+        const LOG_VECTOR_SIZE: u32 = 12;
+        let spec = test_spec(Mode::ZeroKnowledge);
+        let base = TuningSpec {
+            vector_size: 1usize << LOG_VECTOR_SIZE,
+            starting_log_inv_rate: 2,
+            folding_factor: FoldingFactor::Constant(3),
+            rate_schedule: RateSchedule::Stepping,
+        };
+        let unbounded =
+            ProtocolConfig::<TestEmbedding>::derive(spec.clone(), base.clone()).unwrap();
+        let adaptive = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            TuningSpec {
+                rate_schedule: RateSchedule::Adaptive {
+                    knee_weight: KneeWeight::DEFAULT,
+                },
+                ..base
+            },
+        )
+        .unwrap();
+        let unbounded_basecode = unbounded.basecase().commit().codeword_length();
+        let adaptive_basecode = adaptive.basecase().commit().codeword_length();
+        assert!(
+            adaptive_basecode <= unbounded_basecode,
+            "Adaptive basecase codeword ({adaptive_basecode}) must be ≤ unbounded \
+             baseline's ({unbounded_basecode})",
+        );
+    }
+
+    #[test]
     fn derive_reports_pow_ungrindable() {
         const UNREACHABLE_TARGET_BITS: u32 = 200;
         let spec = SecuritySpec {
@@ -526,7 +782,7 @@ mod tests {
         assert!(!plan.rounds().is_empty(), "expected multi-round plan");
         for r in plan.rounds() {
             let mo = r.mask_oracle().expect("ZK round must own a mask oracle");
-            assert!(mo.c_zk().unique_decoding());
+            assert!(mo.cs_mask().c_zk_commit().unique_decoding());
             assert!(r.code_switch().source().unique_decoding());
             assert!(r.code_switch().out_domain_samples() >= 1);
         }
@@ -629,9 +885,9 @@ mod tests {
                 };
                 let cs = r.code_switch();
                 let k = cs.source().interleaving_depth().trailing_zeros() as usize;
-                let num_masks = k + 1;
-                prop_assert_eq!(mask_oracle.c_zk().num_vectors(), 2 * num_masks);
-                prop_assert_eq!(mask_oracle.mask_proximity().num_masks(), num_masks);
+                // Split-tree mask oracle: sumcheck tree has 2·k vectors, cs tree has 2.
+                prop_assert_eq!(mask_oracle.sumcheck_masks().c_zk_commit().num_vectors(), 2 * k);
+                prop_assert_eq!(mask_oracle.cs_mask().c_zk_commit().num_vectors(), 2);
                 let source_mask = cs.source().mask_length();
                 prop_assert!(mask_oracle.l_zk().get() >= source_mask + t_ood.get());
             }

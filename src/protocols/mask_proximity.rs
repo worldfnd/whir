@@ -1,4 +1,4 @@
-//! Mask proximity verification via γ-combination.
+//! Mask proximity verification via γ-combination + optional inner-product discharge.
 //!
 //! Implements Construction 7.2 (p.43-44) specialized for zero-constraint mask
 //! oracles. Given a shared Merkle tree containing 2n vectors — n original masks
@@ -10,12 +10,19 @@
 //!   columns n..2n-1:  mask-of-masks    s_1, ..., s_n
 //!
 //! Protocol:
-//!   1. Verifier sends γ (combination randomness)
-//!   2. Prover sends combined polynomials ξ*_i = s_i + γ·ξ_i and
+//!   1. (Optional discharge) Prover sends X_i = <ξ_i, w_i> and X'_i = <s_i, w_i>
+//!      for each mask `i` with its own covector `w_i` — Construction 7.2 step 1
+//!      target-claim setup, generalized to per-mask covectors.
+//!   2. Verifier sends γ (combination randomness)
+//!   3. Prover sends combined polynomials ξ*_i = s_i + γ·ξ_i and
 //!      combined IRS randomness r*_i = r'_i + γ·r_i for each mask pair
-//!   3. Shared tree is opened at random positions
-//!   4. Verifier checks: Enc(ξ*_i, r*_i)(y_j) = s_i(y_j) + γ·ξ_i(y_j)
+//!   4. Shared tree is opened at random positions
+//!   5. Verifier checks: Enc(ξ*_i, r*_i)(y_j) = s_i(y_j) + γ·ξ_i(y_j)
 //!      at each opened position, using linearity of the RS encoding
+//!   6. (Optional discharge) Verifier target check: <ξ*_i, w_i> = X'_i + γ·X_i
+//!      for every mask `i`. Binds each X_i to the committed ξ_i via the same
+//!      γ-randomness — the orchestrator uses the returned X_i values to
+//!      reconcile sum offsets and project to f-only.
 //!
 //! ZK safety (follows the pattern of Construction 7.2, §7.1):
 //!   - Only the combined ξ*_i = s_i + γ·ξ_i is revealed in full. Since s_i
@@ -33,7 +40,13 @@
 //! is that the simulator can simulate all 2n values at each position
 //! independently (each pair (ξ_i, s_i) is simulatable from C_zk's ZK
 //! property, and the pairs are independent across i). Formal derivation
-//! for the shared-tree case is pending.
+//! for the shared-tree case: Bound 6 (§5.6) of the parameter
+//! derivation document establishes SD ≤ ζ_C + 2n·ζ_{C_zk} for the shared tree
+//! (vs Lemma 7.3's ζ_C + n·ζ_{C_zk} for separate oracles) by P8 (independent
+//! sampling preserved by the Merkle authentication layer). Under perfect-ZK
+//! encoder conditions (t_zk ≤ r_zk), both terms are 0 and the shared-tree
+//! model is perfectly ZK. The 2n multiplier vs paper's n is the only permanent
+//! artifact and is accounted for in the per-round mask-proximity error budget.
 //!
 //! Soundness: if ξ_i is far from C_zk, the spot-check fails with high
 //! probability over γ (Lemma 7.4, p.45).
@@ -43,10 +56,12 @@ use std::fmt;
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 use crate::{
-    algebra::{embedding::Identity, scalar_mul_add, univariate_evaluate},
-    buffer::{Buffer, BufferMath, BufferOps},
+    algebra::{dot, embedding::Identity, random_vector, scalar_mul_add_new, univariate_evaluate},
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
@@ -76,7 +91,7 @@ pub struct Config<F: Field> {
 #[must_use]
 pub struct Witness<F: Field> {
     pub(crate) mask_witness: IrsWitness<F>,
-    pub(crate) fresh_msgs: Vec<Buffer<F>>,
+    pub(crate) fresh_msgs: Vec<Vec<F>>,
 }
 
 /// Verifier output from the commit phase.
@@ -127,10 +142,11 @@ impl<F: Field> Config<F> {
     ///
     /// Samples n fresh mask-of-mask polynomials, combines them with the
     /// provided original masks into a 2n-vector tree, and commits via IRS.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "mask_proximity::commit", fields(num_masks = self.num_masks, vector_size = self.c_zk_commit.vector_size())))]
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        original_msgs: &[&Buffer<F>],
+        original_msgs: &[&[F]],
     ) -> Witness<F>
     where
         F: Codec<[H::U]>,
@@ -145,16 +161,19 @@ impl<F: Field> Config<F> {
         }
 
         // Sample fresh mask-of-masks
-        let fresh_msgs: Vec<Buffer<F>> = (0..self.num_masks)
-            .map(|_| Buffer::random(prover_state.rng(), self.c_zk_commit.vector_size()))
+        let fresh_msgs: Vec<Vec<F>> = (0..self.num_masks)
+            .map(|_| random_vector(prover_state.rng(), self.c_zk_commit.vector_size()))
             .collect();
 
-        // Tree layout: [originals..., freshes...]
-        let all_vectors: Vec<&Buffer<F>> = original_msgs
+        // Tree layout: [originals..., freshes...]. The IRS committer takes
+        // backend buffers; the message/mask split is a caller-side concept, so
+        // upload each host vector into a buffer here.
+        let all_buffers: Vec<Buffer<F>> = original_msgs
             .iter()
-            .copied()
-            .chain(fresh_msgs.iter())
+            .map(|msg| Buffer::from(*msg))
+            .chain(fresh_msgs.iter().map(|msg| Buffer::from(msg.as_slice())))
             .collect();
+        let all_vectors: Vec<&Buffer<F>> = all_buffers.iter().collect();
 
         let mask_witness = self.c_zk_commit.commit(prover_state, &all_vectors);
 
@@ -165,6 +184,7 @@ impl<F: Field> Config<F> {
     }
 
     /// Receive a mask proximity commitment
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "mask_proximity::receive_commitment", fields(num_masks = self.num_masks)))]
     pub fn receive_commitment<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
@@ -177,12 +197,19 @@ impl<F: Field> Config<F> {
         self.c_zk_commit.receive_commitment(verifier_state)
     }
 
-    /// Prove that each original mask is close to a C_zk codeword.
+    /// Prove that each original mask is close to a C_zk codeword. When
+    /// `mask_contribution_covectors` is `Some(per_mask)`, also runs the
+    /// Construction 7.2 target check for each mask `i` with its own covector
+    /// `per_mask[i]`, discharging `X_i = <originals[i], per_mask[i]>`. All
+    /// `X_i` and `X'_i` are sent before γ so γ binds them; the returned
+    /// values are bound by the verifier-side target checks.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "mask_proximity::prove", fields(num_masks = self.num_masks, vector_size = self.c_zk_commit.vector_size(), with_discharge = mask_contribution_covectors.is_some())))]
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        witness: &Witness<F>,
-        original_msgs: &[&Buffer<F>],
+        mut witness: Witness<F>,
+        original_msgs: &[&[F]],
+        mask_contribution_covectors: Option<&[&[F]]>,
     ) where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
@@ -196,6 +223,23 @@ impl<F: Field> Config<F> {
         assert_eq!(original_msgs.len(), self.num_masks);
         assert_eq!(witness.fresh_msgs.len(), self.num_masks);
 
+        // Construction 7.2 step 1: per-mask discharge claims X_i and X'_i must
+        // be sent BEFORE γ so γ-randomness binds them.
+        if let Some(covectors) = mask_contribution_covectors {
+            assert_eq!(
+                covectors.len(),
+                self.num_masks,
+                "one covector per mask required"
+            );
+            for (i, &covector) in covectors.iter().enumerate() {
+                assert_eq!(covector.len(), self.c_zk_commit.vector_size());
+                let claimed_value = dot(original_msgs[i], covector);
+                let fresh_claim = dot(&witness.fresh_msgs[i], covector);
+                prover_state.prover_message(&claimed_value);
+                prover_state.prover_message(&fresh_claim);
+            }
+        }
+
         // Grind the Lemma 7.4 γ-combination gap before γ is sampled.
         self.pow.prove(prover_state);
 
@@ -205,47 +249,60 @@ impl<F: Field> Config<F> {
         // Step 2: compute and send combined polynomials + IRS randomness
         let irs_masks_per_vector =
             self.c_zk_commit.mask_length() * self.c_zk_commit.interleaving_depth();
-        let irs_masks = &witness.mask_witness.masks;
-        assert_eq!(irs_masks.len(), 2 * self.num_masks * irs_masks_per_vector);
+        assert_eq!(
+            witness.mask_witness.masks.len(),
+            2 * self.num_masks * irs_masks_per_vector
+        );
         for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()
-            .copied()
             .zip(witness.fresh_msgs.iter())
             .enumerate()
         {
             // ξ*_i = s_i + γ · ξ_i
-            let mut combined_msg = fresh_msg.clone();
-            orig_msg.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_msg, gamma);
-            prover_state.prover_messages(combined_msg.to_slice());
+            let combined_msg = scalar_mul_add_new(fresh_msg, gamma, orig_msg);
+            prover_state.prover_messages(&combined_msg);
 
-            // r*_i = r'_i + γ · r_i
-            // Combined on the host: the result is transcript data anyway, and
-            // the IRS randomness is only a few elements per vector.
+            // r*_i = r'_i + γ · r_i — IRS stores masks per-polynomial
+            // contiguous, so direct slicing reconstructs each poly's mask.
             if irs_masks_per_vector > 0 {
-                let base = i * irs_masks_per_vector;
-                let fresh_base = (self.num_masks + i) * irs_masks_per_vector;
-                let masks = irs_masks.to_slice();
-                let mut combined_r = masks[fresh_base..fresh_base + irs_masks_per_vector].to_vec();
-                scalar_mul_add(
-                    &mut combined_r,
-                    gamma,
-                    &masks[base..base + irs_masks_per_vector],
-                );
+                let masks = witness.mask_witness.masks.to_slice();
+                let orig_r = &masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
+                let fresh_offset = (self.num_masks + i) * irs_masks_per_vector;
+                let fresh_r = &masks[fresh_offset..fresh_offset + irs_masks_per_vector];
+                let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
                 prover_state.prover_messages(&combined_r);
             }
         }
 
+        // Zeroize secret mask-of-masks polynomials before freeing.
+        for msg in &mut witness.fresh_msgs {
+            for elem in msg.iter_mut() {
+                elem.zeroize();
+            }
+        }
+        witness.fresh_msgs = Vec::new();
+
         // Step 3: open the shared tree at random in-domain positions
         self.c_zk_commit
             .open(prover_state, &[&witness.mask_witness]);
+
+        // Zeroize IRS mask secret material after the tree open.
+        witness.mask_witness.masks.wipe();
+        witness.mask_witness.matrix.wipe();
     }
 
-    /// Verify that each original mask is close to a C_zk codeword.
+    /// Verify that each original mask is close to a C_zk codeword. When
+    /// `mask_contribution_covectors` is `Some(per_mask)`, also verifies the
+    /// Construction 7.2 target check for each mask `i` against `per_mask[i]`
+    /// and returns `Some(Vec<X_i>)` — the verified claimed values
+    /// `<originals[i], per_mask[i]>`.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "mask_proximity::verify", fields(num_masks = self.num_masks, vector_size = self.c_zk_commit.vector_size(), with_discharge = mask_contribution_covectors.is_some())))]
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
         commitment: &Commitment,
-    ) -> VerificationResult<()>
+        mask_contribution_covectors: Option<&[&[F]]>,
+    ) -> VerificationResult<Option<Vec<F>>>
     where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
@@ -254,6 +311,22 @@ impl<F: Field> Config<F> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
+        // Construction 7.2 step 1: read X_i and X'_i for each mask before γ
+        // so γ binds them.
+        let mask_contribution_claims = if let Some(covectors) = mask_contribution_covectors {
+            verify!(covectors.len() == self.num_masks);
+            let mut claims = Vec::with_capacity(self.num_masks);
+            for &covector in covectors {
+                verify!(covector.len() == self.c_zk_commit.vector_size());
+                let claimed_value: F = verifier_state.prover_message()?;
+                let fresh_claim: F = verifier_state.prover_message()?;
+                claims.push((covector, claimed_value, fresh_claim));
+            }
+            Some(claims)
+        } else {
+            None
+        };
+
         // Grind the Lemma 7.4 γ-combination gap before γ is sampled.
         self.pow.verify(verifier_state)?;
 
@@ -301,7 +374,19 @@ impl<F: Field> Config<F> {
             }
         }
 
-        Ok(())
+        // Construction 7.2 target check per mask: <ξ*_i, w_i> = X'_i + γ·X_i.
+        mask_contribution_claims.map_or(Ok(None), |claims| {
+            let mut claimed_values = Vec::with_capacity(claims.len());
+            for (i, (covector, claimed_value, fresh_claim)) in claims.into_iter().enumerate() {
+                let lhs = dot(&combined_msgs[i], covector);
+                let rhs = fresh_claim + gamma * claimed_value;
+                if lhs != rhs {
+                    return Err(spongefish::VerificationError);
+                }
+                claimed_values.push(claimed_value);
+            }
+            Ok(Some(claimed_values))
+        })
     }
 }
 
@@ -376,20 +461,18 @@ mod tests {
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
             .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
             .collect();
-        let original_buffers = original_msgs
-            .iter()
-            .map(|msg| Buffer::from(msg.as_slice()))
-            .collect::<Vec<_>>();
-        let original_refs = original_buffers.iter().collect::<Vec<_>>();
+        let original_refs: Vec<&[F]> = original_msgs.iter().map(Vec::as_slice).collect();
 
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit(&mut prover_state, &original_refs);
-        config.prove(&mut prover_state, &witness, &original_refs);
+        config.prove(&mut prover_state, witness, &original_refs, None);
         let proof = prover_state.proof();
 
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let commitment = config.receive_commitment(&mut verifier_state).unwrap();
-        config.verify(&mut verifier_state, &commitment).unwrap();
+        let _ = config
+            .verify(&mut verifier_state, &commitment, None)
+            .unwrap();
         verifier_state.check_eof().unwrap();
     }
 
@@ -455,28 +538,20 @@ mod tests {
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
             .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
             .collect();
-        let original_buffers = original_msgs
-            .iter()
-            .map(|msg| Buffer::from(msg.as_slice()))
-            .collect::<Vec<_>>();
-        let original_refs = original_buffers.iter().collect::<Vec<_>>();
+        let original_refs: Vec<&[F]> = original_msgs.iter().map(Vec::as_slice).collect();
 
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit(&mut prover_state, &original_refs);
 
         let mut tampered_msgs = original_msgs;
         tampered_msgs[0][0] += F::ONE;
-        let tampered_buffers = tampered_msgs
-            .iter()
-            .map(|msg| Buffer::from(msg.as_slice()))
-            .collect::<Vec<_>>();
-        let tampered_refs = tampered_buffers.iter().collect::<Vec<_>>();
-        config.prove(&mut prover_state, &witness, &tampered_refs);
+        let tampered_refs: Vec<&[F]> = tampered_msgs.iter().map(Vec::as_slice).collect();
+        config.prove(&mut prover_state, witness, &tampered_refs, None);
         let proof = prover_state.proof();
 
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let commitment = config.receive_commitment(&mut verifier_state).unwrap();
-        assert_rejected(|| config.verify(&mut verifier_state, &commitment));
+        assert_rejected(|| config.verify(&mut verifier_state, &commitment, None));
     }
 
     /// Post-γ tamper: commit honestly, then corrupt the combined message to
@@ -496,11 +571,7 @@ mod tests {
         let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
             .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
             .collect();
-        let original_buffers = original_msgs
-            .iter()
-            .map(|msg| Buffer::from(msg.as_slice()))
-            .collect::<Vec<_>>();
-        let original_refs = original_buffers.iter().collect::<Vec<_>>();
+        let original_refs: Vec<&[F]> = original_msgs.iter().map(Vec::as_slice).collect();
 
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit(&mut prover_state, &original_refs);
@@ -508,33 +579,24 @@ mod tests {
         let gamma: F = prover_state.verifier_message();
         let irs_masks_per_vector =
             config.c_zk_commit.mask_length() * config.c_zk_commit.interleaving_depth();
-        let irs_masks = &witness.mask_witness.masks;
 
-        for (i, (orig_msg, fresh_msg)) in original_refs
+        for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()
-            .copied()
             .zip(witness.fresh_msgs.iter())
             .enumerate()
         {
-            let mut combined_msg = fresh_msg.clone();
-            orig_msg.mixed_scalar_mul_add_to(&Identity::<F>::new(), &mut combined_msg, gamma);
+            let mut combined_msg = scalar_mul_add_new(fresh_msg, gamma, orig_msg);
             if i == 0 {
-                let mut tampered = combined_msg.to_slice().to_vec();
-                tampered[0] += F::ONE;
-                combined_msg = Buffer::from(tampered.as_slice());
+                combined_msg[0] += F::ONE;
             }
-            prover_state.prover_messages(combined_msg.to_slice());
+            prover_state.prover_messages(&combined_msg);
 
             if irs_masks_per_vector > 0 {
-                let base = i * irs_masks_per_vector;
-                let fresh_base = (config.num_masks + i) * irs_masks_per_vector;
-                let masks = irs_masks.to_slice();
-                let mut combined_r = masks[fresh_base..fresh_base + irs_masks_per_vector].to_vec();
-                scalar_mul_add(
-                    &mut combined_r,
-                    gamma,
-                    &masks[base..base + irs_masks_per_vector],
-                );
+                let masks = witness.mask_witness.masks.to_slice();
+                let orig_r = &masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
+                let fresh_r = &masks[(config.num_masks + i) * irs_masks_per_vector
+                    ..(config.num_masks + i + 1) * irs_masks_per_vector];
+                let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
                 prover_state.prover_messages(&combined_r);
             }
         }
@@ -546,7 +608,7 @@ mod tests {
 
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let commitment = config.receive_commitment(&mut verifier_state).unwrap();
-        assert_rejected(|| config.verify(&mut verifier_state, &commitment));
+        assert_rejected(|| config.verify(&mut verifier_state, &commitment, None));
     }
 
     fn assert_rejected<T>(verify: impl FnOnce() -> VerificationResult<T>) {
@@ -581,6 +643,139 @@ mod tests {
         proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
             prop_assume!(config.c_zk_commit.in_domain_samples() > 0);
             test_tampered_combined_msg_config(seed, &config);
+        });
+    }
+
+    /// Construction 7.2 target check: per-mask discharge round-trip.
+    fn test_discharge_config<F>(seed: u64, config: &Config<F>)
+    where
+        F: Field + Codec<[u8]> + 'static,
+        Standard: Distribution<F>,
+        Hash: crate::transcript::ProverMessage<[u8]>,
+    {
+        let instance = U64(seed);
+        let ds = DomainSeparator::protocol(config)
+            .session(&format!("Test at {}:{}", file!(), line!()))
+            .instance(&instance);
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
+            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
+            .collect();
+        let original_refs: Vec<&[F]> = original_msgs.iter().map(Vec::as_slice).collect();
+        // One distinct covector per mask.
+        let covectors: Vec<Vec<F>> = (0..config.num_masks)
+            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
+            .collect();
+        let expected_claims: Vec<F> = original_msgs
+            .iter()
+            .zip(covectors.iter())
+            .map(|(m, c)| dot(m, c))
+            .collect();
+        let covector_refs: Vec<&[F]> = covectors.iter().map(|v| v.as_slice()).collect();
+
+        let mut prover_state = ProverState::new_std(&ds);
+        let witness = config.commit(&mut prover_state, &original_refs);
+        config.prove(
+            &mut prover_state,
+            witness,
+            &original_refs,
+            Some(&covector_refs),
+        );
+        let proof = prover_state.proof();
+
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+        let commitment = config.receive_commitment(&mut verifier_state).unwrap();
+        let returned = config
+            .verify(&mut verifier_state, &commitment, Some(&covector_refs))
+            .unwrap();
+        assert_eq!(returned, Some(expected_claims));
+        verifier_state.check_eof().unwrap();
+    }
+
+    /// Discharge with the wrong `claimed_value` — target check must reject.
+    fn test_discharge_wrong_claim_config<F>(seed: u64, config: &Config<F>)
+    where
+        F: Field + Codec<[u8]> + 'static,
+        Standard: Distribution<F>,
+        Hash: crate::transcript::ProverMessage<[u8]>,
+    {
+        let instance = U64(seed);
+        let ds = DomainSeparator::protocol(config)
+            .session(&format!("Test at {}:{}", file!(), line!()))
+            .instance(&instance);
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let original_msgs: Vec<Vec<F>> = (0..config.num_masks)
+            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
+            .collect();
+        let original_refs: Vec<&[F]> = original_msgs.iter().map(Vec::as_slice).collect();
+        let covectors: Vec<Vec<F>> = (0..config.num_masks)
+            .map(|_| random_vector(&mut rng, config.c_zk_commit.vector_size()))
+            .collect();
+        let covector_refs: Vec<&[F]> = covectors.iter().map(|v| v.as_slice()).collect();
+
+        let mut prover_state = ProverState::new_std(&ds);
+        let witness = config.commit(&mut prover_state, &original_refs);
+
+        // Lie on mask 0's X; emit honest claims for the rest, then complete
+        // the protocol manually to exercise the verifier's target check.
+        let wrong_claim = dot(&original_msgs[0], &covectors[0]) + F::ONE;
+        let fresh_claim_0 = dot(&witness.fresh_msgs[0], &covectors[0]);
+        prover_state.prover_message(&wrong_claim);
+        prover_state.prover_message(&fresh_claim_0);
+        for i in 1..config.num_masks {
+            let x = dot(&original_msgs[i], &covectors[i]);
+            let x_prime = dot(&witness.fresh_msgs[i], &covectors[i]);
+            prover_state.prover_message(&x);
+            prover_state.prover_message(&x_prime);
+        }
+
+        // Run the rest of the protocol manually (mirror prove without the
+        // discharge prelude we already emitted).
+        config.pow.prove(&mut prover_state);
+        let gamma: F = prover_state.verifier_message();
+        let irs_masks_per_vector =
+            config.c_zk_commit.mask_length() * config.c_zk_commit.interleaving_depth();
+        for (i, (orig_msg, fresh_msg)) in original_msgs
+            .iter()
+            .zip(witness.fresh_msgs.iter())
+            .enumerate()
+        {
+            let combined_msg = scalar_mul_add_new(fresh_msg, gamma, orig_msg);
+            prover_state.prover_messages(&combined_msg);
+            if irs_masks_per_vector > 0 {
+                let masks = witness.mask_witness.masks.to_slice();
+                let orig_r = &masks[i * irs_masks_per_vector..(i + 1) * irs_masks_per_vector];
+                let fresh_r = &masks[(config.num_masks + i) * irs_masks_per_vector
+                    ..(config.num_masks + i + 1) * irs_masks_per_vector];
+                let combined_r = scalar_mul_add_new(fresh_r, gamma, orig_r);
+                prover_state.prover_messages(&combined_r);
+            }
+        }
+        config
+            .c_zk_commit
+            .open(&mut prover_state, &[&witness.mask_witness]);
+        let proof = prover_state.proof();
+
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+        let commitment = config.receive_commitment(&mut verifier_state).unwrap();
+        assert_rejected(|| config.verify(&mut verifier_state, &commitment, Some(&covector_refs)));
+    }
+
+    #[test]
+    fn test_discharge_roundtrip() {
+        crate::tests::init();
+        proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
+            test_discharge_config(seed, &config);
+        });
+    }
+
+    #[test]
+    fn test_discharge_wrong_claim_rejected() {
+        crate::tests::init();
+        proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
+            test_discharge_wrong_claim_config(seed, &config);
         });
     }
 }

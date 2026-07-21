@@ -56,6 +56,7 @@ arrayvec = "0.7.6"
 derive-where = { version = "1.6.0", features = ["safe"] }
 ordered-float = { version = "5.1.0", features = ["serde"] }
 thiserror = "2.0"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 proptest = "1.0"
@@ -86,6 +87,11 @@ harness = false
 [[bench]]
 name = "sumcheck"
 harness = false
+
+# Enable to bench zook std + ZK vs Base WHIR performance
+# [[bench]]
+# name = "zook_vs_whir"
+# harness = false
 
 # Disable untill fixed.
 # [[bench]]

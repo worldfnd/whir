@@ -36,6 +36,14 @@ pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
 pub trait BufferOps<T: Copy> {
     /// Read back the buffer contents as a host slice.
     fn to_slice(&self) -> &[T];
+    /// Consume the buffer and return its contents as an owned host `Vec`.
+    ///
+    /// The dual of the `From<Vec<T>>` constructor: on the CPU backend this is a
+    /// zero-copy move of the backing storage; an accelerator backend would copy
+    /// device memory back to the host once.
+    fn into_vec(self) -> Vec<T>
+    where
+        Self: Sized;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -45,6 +53,15 @@ pub trait BufferOps<T: Copy> {
     /// Gather elements at arbitrary indices.
     fn gather_at_indices(&self, indices: &[usize]) -> Vec<T>;
     fn get(&self, index: usize) -> Option<&T>;
+
+    /// Best-effort in-place zeroization of the buffer's contents.
+    ///
+    /// Used to scrub secret material (blinding masks, witness randomness)
+    /// before the buffer is dropped. On the CPU backend this zeroizes the
+    /// backing storage; accelerator backends would override with a device wipe.
+    fn wipe(&mut self)
+    where
+        T: zeroize::Zeroize;
 }
 
 /// Field operations on owned buffers.
