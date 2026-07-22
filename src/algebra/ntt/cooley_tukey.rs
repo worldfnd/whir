@@ -591,7 +591,7 @@ pub fn apply_twiddles<F: Field>(values: &mut [F], roots: &[F], rows: usize, cols
 #[cfg(test)]
 #[allow(clippy::significant_drop_tightening)]
 mod tests {
-    use ark_ff::{AdditiveGroup as _, BigInteger, PrimeField};
+    use ark_ff::{AdditiveGroup as _, PrimeField};
 
     use super::*;
     use crate::algebra::fields::Field64;
@@ -643,7 +643,7 @@ mod tests {
         let root = engine.root(16);
 
         // The inverse of ω is ω^{-1}, computed as ω^(p-2) in Field64.
-        let p: u64 = u64::from_be_bytes(Field64::MODULUS.to_bytes_be().try_into().unwrap());
+        let p: u64 = Field64::MODULUS.as_ref()[0];
         let inverse_root = root.pow([p - 2]);
         assert_eq!(root * inverse_root, Field64::ONE);
     }
