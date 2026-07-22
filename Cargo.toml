@@ -87,6 +87,10 @@ harness = false
 name = "sumcheck"
 harness = false
 
+[[bench]]
+name = "whir"
+harness = false
+
 # Disable untill fixed.
 # [[bench]]
 # name = "zk_whir"
