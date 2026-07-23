@@ -45,6 +45,10 @@ pub trait BufferOps<T: Copy> {
     /// Gather elements at arbitrary indices.
     fn gather_at_indices(&self, indices: &[usize]) -> Vec<T>;
     fn get(&self, index: usize) -> Option<&T>;
+    /// Concatenation `[self, other]` into a single buffer of length
+    /// `self.len() + other.len()`.
+    #[must_use]
+    fn concat(&self, other: &Self) -> Self;
 }
 
 /// Field operations on owned buffers.
@@ -91,11 +95,6 @@ pub trait BufferMath<F: Field>: Clone {
     #[must_use]
     fn mat_vec(&self, vector: &Self) -> Self;
 
-    /// Concatenation `[self, other]` into a single buffer of length
-    /// `self.len() + other.len()`.
-    #[must_use]
-    fn concat(&self, other: &Self) -> Self;
-
     /// Equality-polynomial weights `eq(point, ·)` over the Boolean hypercube
     /// `{0,1}^{point.len()}`, as a buffer of length `1 << point.len()`.
     ///
@@ -108,11 +107,13 @@ pub trait BufferMath<F: Field>: Clone {
 
     fn fold(&mut self, weight: F);
 
+    /// backends should override this to avoid two fold calls
     fn fold_pair(&mut self, other: &mut Self, weight: F) {
         self.fold(weight);
         other.fold(weight);
     }
 
+    /// backends should override this and use a single kernel
     fn fold_pair_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F) {
         self.fold_pair(other, weight);
         self.sumcheck_polynomial(other)

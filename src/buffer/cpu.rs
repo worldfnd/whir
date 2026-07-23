@@ -73,6 +73,13 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
     fn get(&self, index: usize) -> Option<&T> {
         self.data.get(index)
     }
+
+    fn concat(&self, other: &Self) -> Self {
+        let mut data = Vec::with_capacity(self.data.len() + other.data.len());
+        data.extend_from_slice(&self.data);
+        data.extend_from_slice(&other.data);
+        Self { data }
+    }
 }
 
 impl<T: Encodable + Copy + Send + Sync> Merklize<T> for CpuBuffer<T> {
@@ -166,13 +173,6 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
                 .map(|row| crate::algebra::dot(&vector.data, row))
                 .collect(),
         }
-    }
-
-    fn concat(&self, other: &Self) -> Self {
-        let mut data = Vec::with_capacity(self.data.len() + other.data.len());
-        data.extend_from_slice(&self.data);
-        data.extend_from_slice(&other.data);
-        Self { data }
     }
 
     fn eq_weights(point: &[F]) -> Self {
