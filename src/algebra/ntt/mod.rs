@@ -69,11 +69,11 @@ impl type_map::Family for NttFamily {
 ///
 /// Each vector stores `interleaving_depth` consecutive messages of `message_length` field
 /// elements.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Messages<'a, F> {
-    pub(crate) vectors: &'a [&'a Buffer<F>],
-    pub(crate) message_length: usize,
-    pub(crate) interleaving_depth: usize,
+    pub vectors: &'a [&'a Buffer<F>],
+    pub message_length: usize,
+    pub interleaving_depth: usize,
 }
 
 impl<'a, F: Field> Messages<'a, F> {
@@ -181,8 +181,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        algebra::{random_vector, univariate_evaluate},
-        buffer::BufferOps,
+        algebra::univariate_evaluate,
+        buffer::{Buffer, BufferMath},
         utils::{chunks_exact_or_empty, zip_strict},
     };
 
@@ -223,19 +223,14 @@ mod tests {
         )| {
             let mut rng = StdRng::seed_from_u64(seed);
             let messages = (0..num_messages)
-                .map(|_| random_vector(&mut rng, message_length))
+                .map(|_| Buffer::random(&mut rng, message_length))
                 .collect::<Vec<_>>();
-            let masks = random_vector(&mut rng, mask_length * num_messages);
-            let vectors = messages
-                .iter()
-                .map(|message| Buffer::from(message.as_slice()))
-                .collect::<Vec<_>>();
-            let vector_refs = vectors.iter().collect::<Vec<_>>();
-            let mask_buffer = Buffer::from(masks.as_slice());
+            let masks = Buffer::random(&mut rng, mask_length * num_messages);
+            let vector_refs = messages.iter().collect::<Vec<_>>();
             let rs_messages = Messages::new(&vector_refs, message_length, 1);
             let codeword = ntt.interleaved_encode(
                 rs_messages,
-                &mask_buffer,
+                &masks,
                 codeword_length,
             );
 
@@ -247,10 +242,10 @@ mod tests {
             let codeword = codeword.to_slice();
             for (&index, &evaluation_point) in zip_strict(&sampled_indices, &evaluation_points) {
                 let evaluations = &codeword[index * num_messages.. (index + 1) * num_messages];
-                let masks = chunks_exact_or_empty(&masks, mask_length, num_messages);
+                let masks = chunks_exact_or_empty(masks.to_slice(), mask_length, num_messages);
                 for ((message, mask), value) in zip_strict(zip_strict(&messages, masks), evaluations) {
                     assert_eq!(*value,
-                        univariate_evaluate(message, evaluation_point)
+                        univariate_evaluate(message.to_slice(), evaluation_point)
                         + evaluation_point.pow([message_length as u64])
                         * univariate_evaluate(mask, evaluation_point));
                 }
