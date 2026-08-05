@@ -71,6 +71,7 @@ mod tests {
             linear_form::{Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
+        buffer::{Buffer, BufferMath, BufferOps},
         hash,
         protocols::params::spec::{
             DecodingRegime, FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
@@ -141,7 +142,7 @@ mod tests {
     ) {
         let embedding = <SmallEmbed as Default>::default();
         let mut rng = StdRng::seed_from_u64(seed);
-        let witness: Vec<SmallF> = random_vector(&mut rng, config.tuning().vector_size);
+        let witness = Buffer::<SmallF>::random(&mut rng, config.tuning().vector_size);
         let mu = config.tuning().vector_size.trailing_zeros() as usize;
 
         let forms: Vec<MultilinearExtension<SmallF>> = (0..num_claims)
@@ -151,14 +152,14 @@ mod tests {
             .collect();
         let values: Vec<SmallF> = forms
             .iter()
-            .map(|f| f.evaluate(&embedding, &witness))
+            .map(|f| f.evaluate(&embedding, witness.to_slice()))
             .collect();
         let form_refs: Vec<&dyn LinearForm<SmallF>> =
             forms.iter().map(|f| f as &dyn LinearForm<SmallF>).collect();
 
         let ds = make_ds(label);
         let mut ps = ProverState::new_std(&ds);
-        let committed = config.commit(&mut ps, &witness);
+        let committed = config.commit(&mut ps, witness);
         config.prove(&mut ps, committed, &form_refs, &values);
         let proof = ps.proof();
 
@@ -204,7 +205,7 @@ mod tests {
     ) {
         let embedding = <MixedEmbed as Default>::default();
         let mut rng = StdRng::seed_from_u64(seed);
-        let witness: Vec<MixedSource> = random_vector(&mut rng, config.tuning().vector_size);
+        let witness = Buffer::<MixedSource>::random(&mut rng, config.tuning().vector_size);
         let mu = config.tuning().vector_size.trailing_zeros() as usize;
 
         let forms: Vec<MultilinearExtension<MixedField>> = (0..num_claims)
@@ -214,7 +215,7 @@ mod tests {
             .collect();
         let values: Vec<MixedField> = forms
             .iter()
-            .map(|f| f.evaluate(&embedding, &witness))
+            .map(|f| f.evaluate(&embedding, witness.to_slice()))
             .collect();
         let form_refs: Vec<&dyn LinearForm<MixedField>> = forms
             .iter()
@@ -223,7 +224,7 @@ mod tests {
 
         let ds = make_ds(label);
         let mut ps = ProverState::new_std(&ds);
-        let committed = config.commit(&mut ps, &witness);
+        let committed = config.commit(&mut ps, witness);
         config.prove(&mut ps, committed, &form_refs, &values);
         let proof = ps.proof();
 
@@ -334,7 +335,7 @@ mod tests {
             ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
                 .unwrap();
         let mut rng = StdRng::seed_from_u64(0);
-        let witness: Vec<SmallF> = random_vector(&mut rng, config.tuning().vector_size);
+        let witness = Buffer::<SmallF>::random(&mut rng, config.tuning().vector_size);
         let mu = config.tuning().vector_size.trailing_zeros() as usize;
         let form: MultilinearExtension<SmallF> = MultilinearExtension {
             point: random_vector(&mut rng, mu),
@@ -343,7 +344,7 @@ mod tests {
             .session(&"count-mismatch".to_string())
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
-        let committed = config.commit(&mut ps, &witness);
+        let committed = config.commit(&mut ps, witness);
         // 1 form but 2 values — should panic
         config.prove(
             &mut ps,
@@ -360,12 +361,12 @@ mod tests {
             ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
                 .unwrap();
         let mut rng = StdRng::seed_from_u64(0);
-        let witness: Vec<SmallF> = random_vector(&mut rng, config.tuning().vector_size);
+        let witness = Buffer::<SmallF>::random(&mut rng, config.tuning().vector_size);
         let ds = DomainSeparator::protocol(&"zook-test")
             .session(&"empty-forms".to_string())
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
-        let committed = config.commit(&mut ps, &witness);
+        let committed = config.commit(&mut ps, witness);
         // No forms at all — should panic
         config.prove(&mut ps, committed, &[], &[]);
     }
@@ -539,7 +540,7 @@ mod tests {
             ProtocolConfig::<LargeEmbed>::derive(large_spec(mode), large_tuning()).unwrap();
 
         let mut rng = StdRng::seed_from_u64(seed);
-        let witness: Vec<LargeF> = random_vector(&mut rng, config.tuning().vector_size);
+        let witness = Buffer::<LargeF>::random(&mut rng, config.tuning().vector_size);
         let mu = config.tuning().vector_size.trailing_zeros() as usize;
         let embedding = <LargeEmbed as Default>::default();
 
@@ -550,7 +551,7 @@ mod tests {
             .collect();
         let values: Vec<LargeF> = forms
             .iter()
-            .map(|f| f.evaluate(&embedding, &witness))
+            .map(|f| f.evaluate(&embedding, witness.to_slice()))
             .collect();
         let form_refs: Vec<&dyn LinearForm<LargeF>> =
             forms.iter().map(|f| f as &dyn LinearForm<LargeF>).collect();
@@ -560,7 +561,7 @@ mod tests {
             .instance(&Empty);
 
         let mut ps = ProverState::new_std(&ds);
-        let committed = config.commit(&mut ps, &witness);
+        let committed = config.commit(&mut ps, witness);
         config.prove(&mut ps, committed, &form_refs, &values);
         let proof = ps.proof();
 

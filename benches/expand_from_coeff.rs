@@ -1,5 +1,8 @@
 use divan::{black_box, AllocProfiler, Bencher};
-use whir::algebra::{fields::Field64, ntt, random_vector};
+use whir::{
+    algebra::{fields::Field64, ntt, random_vector},
+    buffer::{Buffer, BufferMath, BufferOps},
+};
 
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
@@ -28,15 +31,18 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
             let message_length = 1 << (exp - coset_sz);
             let num_messages = 1 << coset_sz;
             let mut rng = ark_std::rand::thread_rng();
-            let coeffs: Vec<Vec<Field64>> = (0..num_messages)
-                .map(|_| random_vector(&mut rng, message_length))
+            let coeffs: Vec<Buffer<Field64>> = (0..num_messages)
+                .map(|_| Buffer::from(random_vector(&mut rng, message_length)))
                 .collect();
-            (coeffs, expansion, coset_sz)
+            let masks = Buffer::zeros(0);
+            (coeffs, masks, expansion, coset_sz)
         })
-        .bench_values(|(coeffs, expansion, _coset_sz)| {
-            let coeffs_refs = coeffs.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+        .bench_values(|(coeffs, masks, expansion, _coset_sz)| {
+            let coeffs_refs = coeffs.iter().collect::<Vec<_>>();
+            let messages = ntt::Messages::new(&coeffs_refs, coeffs[0].len(), 1);
             black_box(ntt::interleaved_rs_encode(
-                &coeffs_refs,
+                messages,
+                &masks,
                 coeffs[0].len() * expansion,
             ))
         });

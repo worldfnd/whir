@@ -22,7 +22,7 @@ pub use self::{
 };
 use crate::{
     algebra::fields,
-    buffer::{Buffer, DefaultRs},
+    buffer::{Buffer, BufferOps, DefaultRs},
     type_map::{self, TypeMap},
 };
 
@@ -62,12 +62,42 @@ impl type_map::Family for NttFamily {
     type Dyn<F: 'static> = dyn ReedSolomon<F>;
 }
 
+/// Buffer-native description of interleaved Reed-Solomon messages.
+///
+/// Each vector contains `interleaving_depth` consecutive messages of
+/// `message_length` elements. The encoder decides how to gather those chunks,
+/// append masks, and pad them for the NTT.
+// TODO: Generalize `Messages` plus the separate mask buffer into an
+// IRS-agnostic segmented-polynomial batch so the encoder sees only resident
+// prefix/suffix segments, not message/mask protocol semantics.
+#[derive(Clone)]
+pub struct Messages<'a, F> {
+    pub vectors: &'a [&'a Buffer<F>],
+    pub message_length: usize,
+    pub interleaving_depth: usize,
+}
+
+impl<'a, F: Copy> Messages<'a, F> {
+    pub fn new(
+        vectors: &'a [&'a Buffer<F>],
+        message_length: usize,
+        interleaving_depth: usize,
+    ) -> Self {
+        assert!(vectors
+            .iter()
+            .all(|vector| vector.len() == message_length * interleaving_depth));
+        Self {
+            vectors,
+            message_length,
+            interleaving_depth,
+        }
+    }
+}
+
 /// Reed-Solomon encoder for a given field `F`.
 ///
-/// Pure-NTT abstraction: encodes polynomials, knows nothing about how callers
-/// structure those polynomials (whir's IRS, for example, concatenates a
-/// message and a mask into a single polynomial before calling this trait —
-/// that split lives entirely on the caller side).
+/// The input remains buffer-native so each backend can gather messages, append
+/// masks, and pad without forcing protocol code through host slices.
 pub trait ReedSolomon<F>: Debug + Send + Sync {
     /// Smallest supported codeword length `>= size`, or `None` if `size`
     /// exceeds the engine's maximum order. The returned length is always
@@ -96,16 +126,19 @@ pub trait ReedSolomon<F>: Debug + Send + Sync {
         indices: &[usize],
     ) -> Vec<F>;
 
-    /// Batch-encode polynomials in parallel.
+    /// Batch-encode masked polynomials in parallel.
     ///
-    /// All `polys[i]` must have the same length. Output is a flat buffer of
-    /// `polys.len() * codeword_length` elements in row-major
-    /// `(eval_index, poly)` layout: `result[i * polys.len() + j]` is poly
-    /// `j`'s value at the `i`-th evaluation point.
+    /// Each logical polynomial is a message chunk followed by its mask row.
+    /// Output is a flat buffer in row-major `(eval_index, polynomial)` layout.
     ///
     /// `codeword_length` must be NTT-smooth for this engine and at least the
     /// polynomial length.
-    fn interleaved_encode(&self, polys: &[&[F]], codeword_length: usize) -> Buffer<F>;
+    fn interleaved_encode(
+        &self,
+        messages: Messages<'_, F>,
+        masks: &Buffer<F>,
+        codeword_length: usize,
+    ) -> Buffer<F>;
 }
 
 assert_obj_safe!(ReedSolomon<crate::algebra::fields::Field256>);
@@ -126,10 +159,14 @@ pub fn evaluation_points<F: 'static>(
         .evaluation_points(poly_length, codeword_length, indices)
 }
 
-pub fn interleaved_rs_encode<F: 'static>(polys: &[&[F]], codeword_length: usize) -> Buffer<F> {
+pub fn interleaved_rs_encode<F: 'static>(
+    messages: Messages<'_, F>,
+    masks: &Buffer<F>,
+    codeword_length: usize,
+) -> Buffer<F> {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
-        .interleaved_encode(polys, codeword_length)
+        .interleaved_encode(messages, masks, codeword_length)
 }
 
 pub fn generator<F: 'static>(codeword_length: usize) -> F {
@@ -149,8 +186,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        algebra::{random_vector, univariate_evaluate},
-        buffer::BufferOps,
+        algebra::univariate_evaluate,
+        buffer::{BufferMath, BufferOps},
         utils::zip_strict,
     };
 
@@ -191,19 +228,12 @@ mod tests {
         )| {
             let mut rng = StdRng::seed_from_u64(seed);
             let messages = (0..num_messages)
-                .map(|_| random_vector(&mut rng, message_length))
+                .map(|_| Buffer::random(&mut rng, message_length))
                 .collect::<Vec<_>>();
-            let masks: Vec<Vec<F>> = (0..num_messages)
-                .map(|_| random_vector(&mut rng, mask_length))
-                .collect();
-            // Build each polynomial as `message || mask`. The engine takes
-            // unified polynomial slices; the message/mask split is purely a
-            // caller-side concept.
-            let polys: Vec<Vec<F>> = (0..num_messages)
-                .map(|i| messages[i].iter().chain(masks[i].iter()).copied().collect())
-                .collect();
-            let poly_refs: Vec<&[F]> = polys.iter().map(Vec::as_slice).collect();
-            let codeword = ntt.interleaved_encode(&poly_refs, codeword_length);
+            let masks = Buffer::random(&mut rng, mask_length * num_messages);
+            let message_refs = messages.iter().collect::<Vec<_>>();
+            let input = Messages::new(&message_refs, message_length, 1);
+            let codeword = ntt.interleaved_encode(input, &masks, codeword_length);
 
             // Output must be the right size.
             assert_eq!(codeword.len(), codeword_length * num_messages);
@@ -213,9 +243,10 @@ mod tests {
             let codeword = codeword.to_slice();
             for (&index, &evaluation_point) in zip_strict(&sampled_indices, &evaluation_points) {
                 let evaluations = &codeword[index * num_messages.. (index + 1) * num_messages];
-                for ((message, mask), value) in zip_strict(zip_strict(&messages, &masks), evaluations) {
+                for (poly_index, (message, value)) in zip_strict(&messages, evaluations).enumerate() {
+                    let mask = &masks.to_slice()[poly_index * mask_length..(poly_index + 1) * mask_length];
                     assert_eq!(*value,
-                        univariate_evaluate(message, evaluation_point)
+                        univariate_evaluate(message.to_slice(), evaluation_point)
                         + evaluation_point.pow([message_length as u64])
                         * univariate_evaluate(mask, evaluation_point));
                 }

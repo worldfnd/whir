@@ -52,9 +52,9 @@ use crate::{
         embedding::{Embedding, Identity},
         geometric_sequence,
         linear_form::LinearForm,
-        mixed_dot, random_vector, univariate_evaluate,
+        random_vector, univariate_evaluate,
     },
-    buffer::{Buffer, BufferOps},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
         code_switch::{self, mixed_fold_chunks},
@@ -120,6 +120,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             .zip(&claim_weights)
             .map(|(v, weight)| *v * weight)
             .sum();
+        let covector = Buffer::from(covector);
 
         // Reduce to basecase inputs `(message, witness, covector, sum)`. The
         // two arms differ only in how those are obtained.
@@ -156,13 +157,9 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         // Standard mode (BasecaseMode::Standard) sends the full witness vector
         // and IRS randomness cleartext. Only call with Mode::ZeroKnowledge if
         // end-to-end hiding is required.
-        let _ = self.basecase().prove(
-            ps,
-            Buffer::from(message),
-            &basecase_witness,
-            Buffer::from(covector),
-            sum,
-        );
+        let _ = self
+            .basecase()
+            .prove(ps, message, &basecase_witness, covector, sum);
     }
 }
 
@@ -172,9 +169,9 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
 /// into an `M::Target` one, so [`prove_round`] maps `ProverRoundState<M>` to
 /// `ProverRoundState<Identity<M::Target>>`.
 struct ProverRoundState<M: Embedding> {
-    message: Vec<M::Source>,
+    message: Buffer<M::Source>,
     irs_witness: IrsWitness<M::Source>,
-    covector: Vec<M::Target>,
+    covector: Buffer<M::Target>,
     sum: M::Target,
 }
 
@@ -208,7 +205,7 @@ where
 
     let embedding = round.code_switch().source().embedding();
     debug_assert_eq!(
-        mixed_dot(embedding, &covector, &message),
+        message.mixed_dot(embedding, &covector),
         sum,
         "prove_round entry: dot(message, covector) must equal sum"
     );
@@ -218,22 +215,16 @@ where
     let mut masker = RoundMaskOracle::begin(round, ps);
 
     // Sumcheck lifts the source-field message into `M::Target` at its first
-    // fold and returns the folded buffer (the covector folds in place). Move
-    // the host-side round state into buffers, fold, and move the folded result
-    // back into the `Vec` state (which downstream steps resize/truncate/index
-    // directly). The hops are zero-copy on the CPU backend.
-    let message_buf = Buffer::from(message);
-    let mut covector_buf = Buffer::from(covector);
-    let (message_buf, opening) = round.sumcheck().prove(
+    // fold. Both outputs remain resident for code-switch and the next round.
+    let mut covector = covector;
+    let (message, opening) = round.sumcheck().prove(
         ps,
         embedding,
-        message_buf,
-        &mut covector_buf,
+        message,
+        &mut covector,
         &mut sum,
         masker.sumcheck_blinding(),
     );
-    let message = message_buf.into_vec();
-    let mut covector = covector_buf.into_vec();
 
     // Build cs_mask = (folded_irs_masks ‖ cs_fresh_padding), commit its tree,
     // send mask_eval_sum cleartext, reconcile sum to the unmasked dot.
@@ -246,13 +237,13 @@ where
     );
 
     debug_assert_eq!(
-        dot(&message, &covector),
+        message.dot(&covector),
         sum,
         "post-reconcile: dot(message, covector) must equal sum"
     );
 
     // Extend covector for ZK mask region; +0 in Standard mode.
-    covector.resize(msg_len + masker.covector_extension(), M::Target::ZERO);
+    covector.resize_zeroed(msg_len + masker.covector_extension());
     let cs_witness = round.code_switch().prove(
         ps,
         message,
@@ -266,19 +257,16 @@ where
     );
 
     // Prove both mask trees; subtract cs_mask contribution to project sum to f-only.
-    masker.finish(
-        &opening.round_challenges,
-        &covector[msg_len..],
-        &mut sum,
-        ps,
-    );
+    let cs_mask_indices = (msg_len..covector.len()).collect::<Vec<_>>();
+    let cs_mask_covector = covector.gather_at_indices(&cs_mask_indices);
+    masker.finish(&opening.round_challenges, &cs_mask_covector, &mut sum, ps);
     drop(opening);
 
     let message = cs_witness.message;
-    covector.truncate(message.len());
+    covector.resize_zeroed(message.len());
 
     debug_assert_eq!(
-        dot(&message, &covector),
+        message.dot(&covector),
         sum,
         "prove_round exit: dot(message, covector) must equal sum"
     );

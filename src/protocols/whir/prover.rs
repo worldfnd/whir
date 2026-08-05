@@ -98,36 +98,36 @@ impl<M: Embedding> Config<M> {
 
         // Complete evaluations of EVERY vector at EVERY linear form.
         let (oods_evals, oods_matrix) = {
-            let mut oods_evals = Vec::new();
+            let mut oods_points = Vec::new();
             let mut oods_matrix = Vec::new();
 
             // Out of domain samples. Compute missing cross-terms and send to verifier.
             let mut vector_offset = 0;
             for witness in &witnesses {
                 for (oods_eval, oods_row) in zip_strict(
-                    witness.out_of_domain.evaluators(self.initial_size()),
+                    witness.out_of_domain.points.iter().copied(),
                     witness.out_of_domain.rows(),
                 ) {
                     for (j, vector) in vectors.iter().enumerate() {
                         if j >= vector_offset && j < oods_row.len() + vector_offset {
                             debug_assert_eq!(
                                 oods_row[j - vector_offset],
-                                vector.mixed_univariate_evaluate(self.embedding(), oods_eval.point)
+                                vector.mixed_univariate_evaluate(self.embedding(), oods_eval)
                             );
 
                             oods_matrix.push(oods_row[j - vector_offset]);
                         } else {
                             let eval =
-                                vector.mixed_univariate_evaluate(self.embedding(), oods_eval.point);
+                                vector.mixed_univariate_evaluate(self.embedding(), oods_eval);
                             prover_state.prover_message(&eval);
                             oods_matrix.push(eval);
                         }
                     }
-                    oods_evals.push(oods_eval);
+                    oods_points.push(oods_eval);
                 }
                 vector_offset += witness.num_vectors();
             }
-            (oods_evals, oods_matrix)
+            (oods_points, oods_matrix)
         };
 
         // Random linear combination of the vectors.
@@ -172,7 +172,7 @@ impl<M: Embedding> Config<M> {
         debug_assert!(!has_constraints || vector.dot(&covector) == the_sum);
 
         // Add OODS constraints
-        covector.accumulate_univariate_evaluations(&oods_evals, &oods_rlc_coeffs);
+        covector.accumulate_geometric(&oods_evals, &oods_rlc_coeffs, self.initial_size());
         let oods_matrix = Buffer::from(oods_matrix);
         the_sum += oods_matrix.bilinear_form(&oods_rlc_coeffs, &vector_rlc_coeffs);
         drop(oods_evals);
@@ -241,19 +241,25 @@ impl<M: Embedding> Config<M> {
             };
 
             // Collect constraints for this round and RLC them in
-            let stir_challenges = out_of_domain
-                .evaluators(round_config.initial_size())
-                .chain(in_domain.evaluators(round_config.initial_size()))
+            let stir_points = out_of_domain
+                .points
+                .iter()
+                .chain(&in_domain.points)
+                .copied()
                 .collect::<Vec<_>>();
             // Weights for the in-domain rows: vector_rlc_coeffs ⊗ eq(folding_randomness),
             // built directly on the backend so no readback is needed.
             let stir_weights =
                 vector_rlc_coeffs.tensor_product(&Buffer::eq_weights(&folding_randomness));
             let stir_evaluations = out_of_domain
-                .values_buffer(&Buffer::ones(1))
-                .concat(&in_domain.values_buffer(&stir_weights));
-            let stir_rlc_coeffs = geometric_challenge_buffer(prover_state, stir_challenges.len());
-            covector.accumulate_univariate_evaluations(&stir_challenges, &stir_rlc_coeffs);
+                .values_buffer(&Identity::new(), &Buffer::ones(1))
+                .concat(&in_domain.values_buffer(&Identity::new(), &stir_weights));
+            let stir_rlc_coeffs = geometric_challenge_buffer(prover_state, stir_points.len());
+            covector.accumulate_geometric(
+                &stir_points,
+                &stir_rlc_coeffs,
+                round_config.initial_size(),
+            );
             the_sum += stir_rlc_coeffs.dot(&stir_evaluations);
             debug_assert_eq!(vector.dot(&covector), the_sum);
 

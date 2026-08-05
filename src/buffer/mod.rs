@@ -21,13 +21,19 @@ use ark_std::rand::{
 };
 pub use cpu::CpuBuffer;
 
-use crate::algebra::{
-    embedding::Embedding,
-    linear_form::{LinearForm, UnivariateEvaluation},
-};
+use crate::algebra::{embedding::Embedding, linear_form::LinearForm};
 
-pub type Buffer<T> = CpuBuffer<T>;
-pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
+/// Compile-time-selected prover backend.
+///
+/// Keep the storage and Reed-Solomon families in one module so they cannot be
+/// selected independently. A GPU backend replaces this module as a unit.
+mod active_backend {
+    pub type Buffer<T> = super::CpuBuffer<T>;
+    pub type ReedSolomon<T> = crate::algebra::ntt::NttEngine<T>;
+}
+
+pub type Buffer<T> = active_backend::Buffer<T>;
+pub type DefaultRs<T> = active_backend::ReedSolomon<T>;
 
 /// Host communication for owned buffers over any copyable element type.
 ///
@@ -89,6 +95,10 @@ pub trait BufferMath<F: Field>: Clone {
         R: RngCore + CryptoRng,
         Standard: Distribution<F>;
 
+    /// Change the logical length, filling newly exposed entries with zeroes.
+    /// Backends may reuse capacity or allocate/copy entirely on-device.
+    fn resize_zeroed(&mut self, new_len: usize);
+
     /// Inner product with another buffer of the same length.
     fn dot(&self, other: &Self) -> F;
 
@@ -139,17 +149,9 @@ pub trait BufferMath<F: Field>: Clone {
     /// In-place scalar multiplication: `self[i] *= weight`.
     fn scalar_mul(&mut self, weight: F);
 
-    /// Accumulate `Σ_j scalars[j] · evaluators[j].point^i` into entry `i`.
-    ///
-    /// The evaluators must share a common size `s ≤ self.len()`; only the
-    /// first `s` entries are updated. This allows accumulating constraints
-    /// that cover a prefix of the buffer (e.g. the unmasked message part of
-    /// a covector).
-    fn accumulate_univariate_evaluations(
-        &mut self,
-        evaluators: &[UnivariateEvaluation<F>],
-        scalars: &Self,
-    );
+    /// Accumulate `Σ_j scalars[j] · points[j]^i` into entry `i` for the
+    /// first `prefix_len` entries of the buffer.
+    fn accumulate_geometric(&mut self, points: &[F], scalars: &Self, prefix_len: usize);
 
     /// Random linear combination of linear forms into a covector buffer.
     fn linear_forms_rlc(
@@ -167,12 +169,26 @@ pub trait BufferMath<F: Field>: Clone {
         point: M::Target,
     ) -> M::Target;
 
+    /// Lift every element into the target field without host materialization.
+    #[must_use]
+    fn mixed_lift<M: Embedding<Source = F>>(&self, embedding: &M) -> Self::TargetBuffer<M::Target>;
+
     /// Inner product with a target-field buffer.
     fn mixed_dot<M: Embedding<Source = F>>(
         &self,
         embedding: &M,
         other: &Self::TargetBuffer<M::Target>,
     ) -> M::Target;
+
+    /// Mixed-field matrix-vector product. `self` is a row-major source-field
+    /// matrix with `vector.len()` columns; the result contains one target-field
+    /// inner product per row.
+    #[must_use]
+    fn mixed_mat_vec<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        vector: &Self::TargetBuffer<M::Target>,
+    ) -> Self::TargetBuffer<M::Target>;
 
     /// Sumcheck round coefficients `(c0, c2)` for the mixed inner product of
     /// source-field `self` against a target-field covector.

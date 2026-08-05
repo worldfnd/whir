@@ -9,7 +9,7 @@ use zeroize::Zeroize;
 use crate::{
     algebra::{
         embedding::Embedding,
-        linear_form::{Covector, LinearForm, UnivariateEvaluation},
+        linear_form::{Covector, LinearForm},
     },
     buffer::{BufferMath, BufferOps},
     engines::EngineId,
@@ -143,6 +143,10 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         }
     }
 
+    fn resize_zeroed(&mut self, new_len: usize) {
+        self.data.resize(new_len, F::ZERO);
+    }
+
     fn dot(&self, other: &Self) -> F {
         crate::algebra::dot(&self.data, &other.data)
     }
@@ -213,18 +217,15 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         crate::algebra::scalar_mul(&mut self.data, weight);
     }
 
-    fn accumulate_univariate_evaluations(
-        &mut self,
-        evaluators: &[UnivariateEvaluation<F>],
-        scalars: &Self,
-    ) {
-        let Some(size) = evaluators.first().map(|e| e.size) else {
+    fn accumulate_geometric(&mut self, points: &[F], scalars: &Self, prefix_len: usize) {
+        assert_eq!(points.len(), scalars.len());
+        if points.is_empty() {
             return;
-        };
-        UnivariateEvaluation::accumulate_many(
-            evaluators,
-            &mut self.data[..size],
-            scalars.to_slice(),
+        }
+        crate::algebra::geometric_accumulate(
+            &mut self.data[..prefix_len],
+            scalars.to_slice().to_vec(),
+            points,
         );
     }
 
@@ -236,12 +237,41 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         crate::algebra::mixed_univariate_evaluate(embedding, &self.data, point)
     }
 
+    fn mixed_lift<M: Embedding<Source = F>>(&self, embedding: &M) -> CpuBuffer<M::Target> {
+        CpuBuffer {
+            data: crate::algebra::lift(embedding, &self.data),
+        }
+    }
+
     fn mixed_dot<M: Embedding<Source = F>>(
         &self,
         embedding: &M,
         other: &CpuBuffer<M::Target>,
     ) -> M::Target {
         crate::algebra::mixed_dot(embedding, &other.data, &self.data)
+    }
+
+    fn mixed_mat_vec<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        vector: &CpuBuffer<M::Target>,
+    ) -> CpuBuffer<M::Target> {
+        assert!(
+            !vector.data.is_empty(),
+            "matrix-vector product requires a non-empty vector"
+        );
+        assert_eq!(
+            self.data.len() % vector.data.len(),
+            0,
+            "matrix-vector dimensions mismatch"
+        );
+        CpuBuffer {
+            data: self
+                .data
+                .chunks_exact(vector.data.len())
+                .map(|row| crate::algebra::mixed_dot(embedding, &vector.data, row))
+                .collect(),
+        }
     }
 
     fn mixed_sumcheck_polynomial<M: Embedding<Source = F>>(
@@ -329,7 +359,11 @@ mod tests {
     use ark_ff::AdditiveGroup;
 
     use super::*;
-    use crate::algebra::{fields::Field64, geometric_accumulate};
+    use crate::algebra::{
+        embedding::Basefield,
+        fields::{Field64, Field64_2},
+        geometric_accumulate,
+    };
 
     type F = Field64;
 
@@ -344,6 +378,18 @@ mod tests {
     }
 
     #[test]
+    fn resize_zeroed_preserves_prefix_and_zero_fills() {
+        let mut buffer = CpuBuffer::from(vec![F::from(1u64), F::from(2u64)]);
+        buffer.resize_zeroed(4);
+        assert_eq!(
+            buffer.to_slice(),
+            &[F::from(1u64), F::from(2u64), F::ZERO, F::ZERO]
+        );
+        buffer.resize_zeroed(1);
+        assert_eq!(buffer.to_slice(), &[F::from(1u64)]);
+    }
+
+    #[test]
     fn accumulate_matches_geometric_accumulate_over_prefix() {
         let len = 8usize;
         let points = vec![F::from(3u64), F::from(5u64)];
@@ -352,12 +398,7 @@ mod tests {
         // Full-length and prefix accumulation.
         for size in [len, 5] {
             let mut buffer = CpuBuffer::from(vec![F::ZERO; len]);
-            let evaluators: Vec<_> = points
-                .iter()
-                .map(|&point| UnivariateEvaluation::new(point, size))
-                .collect();
-            buffer
-                .accumulate_univariate_evaluations(&evaluators, &CpuBuffer::from(scalars.clone()));
+            buffer.accumulate_geometric(&points, &CpuBuffer::from(scalars.clone()), size);
 
             // Reference: accumulate Σ_j scalars[j]·points[j]^i into the prefix
             // of a plain vector.
@@ -370,5 +411,30 @@ mod tests {
                 "accumulate mismatch for evaluator size {size}"
             );
         }
+    }
+
+    #[test]
+    fn mixed_mat_vec_matches_row_wise_mixed_dot() {
+        let matrix = CpuBuffer::from(vec![
+            F::from(1u64),
+            F::from(2u64),
+            F::from(3u64),
+            F::from(4u64),
+            F::from(5u64),
+            F::from(6u64),
+        ]);
+        let vector = CpuBuffer::from(vec![
+            Field64_2::new(F::from(7u64), F::from(1u64)),
+            Field64_2::new(F::from(8u64), F::from(2u64)),
+            Field64_2::new(F::from(9u64), F::from(3u64)),
+        ]);
+        let embedding = Basefield::<Field64_2>::new();
+        let result = matrix.mixed_mat_vec(&embedding, &vector);
+        let expected = matrix
+            .to_slice()
+            .chunks_exact(vector.len())
+            .map(|row| crate::algebra::mixed_dot(&embedding, vector.to_slice(), row))
+            .collect::<Vec<_>>();
+        assert_eq!(result.to_slice(), expected);
     }
 }
