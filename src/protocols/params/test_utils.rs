@@ -16,8 +16,9 @@ use crate::{
         params::{
             branch::OodMode,
             build_round::solve_t_ood,
+            config::MaskOracleInfo,
+            error::RoundSlot,
             irs_commit as irs_params,
-            protocol_config::MaskOracleInfo,
             spec::{
                 DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
                 PowBudget, RoundContext, SecuritySpec, ZkSpec,
@@ -157,8 +158,14 @@ pub fn build_round_io<M: Embedding + Default>(
     let ood_mode = c_zk_log_inv_rate.map_or(OodMode::Standard, |rate| {
         OodMode::ZeroKnowledge(LogInvRate::new(rate))
     });
-    let (source, t_ood) = solve_t_ood::<M>(spec, &source_ctx, target_list_size, ood_mode, 0)
-        .expect("solve_t_ood diverged in test fixture");
+    let (source, t_ood) = solve_t_ood::<M>(
+        spec,
+        &source_ctx,
+        target_list_size,
+        ood_mode,
+        RoundSlot::Shared(0),
+    )
+    .expect("solve_t_ood diverged in test fixture");
 
     let target_ctx = RoundContext {
         vector_size: source.message_length(),

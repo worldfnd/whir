@@ -14,8 +14,8 @@ use crate::{
         params::{
             bounds::usize_to_f64,
             branch::SolveMode,
-            error::{grind_to_at, DeriveError, Pow},
-            protocol_config::MaskOracleInfo,
+            config::MaskOracleInfo,
+            error::{grind_to_at, DeriveError, Pow, RoundSlot},
             solved::Solved,
             spec::SecuritySpec,
         },
@@ -29,7 +29,7 @@ pub fn solve<M: Embedding>(
     target: IrsConfig<Identity<M::Target>>,
     t_ood: usize,
     mode: SolveMode,
-    round_index: usize,
+    round_slot: RoundSlot,
 ) -> Result<Solved<CodeSwitchConfig<M>>, DeriveError> {
     let (mask_oracle, output_mode) = match mode {
         SolveMode::Standard => (None, code_switch::CodeSwitchMode::Standard),
@@ -51,7 +51,7 @@ pub fn solve<M: Embedding>(
     };
 
     let analytic = analytic_error_bits(&source, &target, t_ood, mask_oracle);
-    let pow = grind_to_at(spec, analytic, Pow::RoundCodeSwitch { index: round_index })?;
+    let pow = grind_to_at(spec, analytic, Pow::RoundCodeSwitch { round: round_slot })?;
 
     Ok(Solved::new(
         CodeSwitchConfig::new(source, target, t_ood, output_mode, pow),
@@ -258,7 +258,7 @@ mod tests {
         ) {
             let (source, target, t_ood) =
                 build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
-            let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
+            let config = solve(&spec, source, target, t_ood, SolveMode::Standard, RoundSlot::Shared(0)).unwrap();
             prop_assert!(matches!(config.mode(), code_switch::CodeSwitchMode::Standard));
             prop_assert!(config.out_domain_samples() >= 1);
         }
@@ -292,7 +292,7 @@ mod tests {
                 target,
                 t_ood,
                 SolveMode::ZeroKnowledge(mask_oracle),
-                0,
+                RoundSlot::Shared(0),
             )
             .unwrap();
             prop_assert_eq!(config.message_mask_length(), (r + t_ood).next_power_of_two());
@@ -306,7 +306,7 @@ mod tests {
             let (source, target, t_ood) =
                 build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
             let error = analytic_error_bits(&source, &target, t_ood, None);
-            let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
+            let config = solve(&spec, source, target, t_ood, SolveMode::Standard, RoundSlot::Shared(0)).unwrap();
             assert_pow_closes_gap(&spec, error, &config.pow());
         }
     }
@@ -354,7 +354,7 @@ mod tests {
             target,
             t_ood,
             SolveMode::ZeroKnowledge(mask_oracle),
-            0,
+            RoundSlot::Shared(0),
         );
     }
 
@@ -372,7 +372,7 @@ mod tests {
             &source_ctx,
             target_list_size,
             OodMode::Standard,
-            0,
+            RoundSlot::Shared(0),
         )
         .unwrap();
         let target = irs_params::solve::<Identity<TestExtensionField>>(
@@ -382,7 +382,15 @@ mod tests {
         )
         .expect("target IRS fixture must solve");
 
-        let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
+        let config = solve(
+            &spec,
+            source,
+            target,
+            t_ood,
+            SolveMode::Standard,
+            RoundSlot::Shared(0),
+        )
+        .unwrap();
         assert!(matches!(
             config.mode(),
             code_switch::CodeSwitchMode::Standard
@@ -405,7 +413,7 @@ mod tests {
             &source_ctx,
             target_list_size,
             OodMode::ZeroKnowledge(LogInvRate::new(source_ctx.log_inv_rate)),
-            0,
+            RoundSlot::Shared(0),
         )
         .unwrap();
         let target = irs_params::solve::<Identity<TestExtensionField>>(
@@ -425,7 +433,7 @@ mod tests {
             target,
             t_ood,
             SolveMode::ZeroKnowledge(mask_oracle),
-            0,
+            RoundSlot::Shared(0),
         )
         .unwrap();
         assert!(matches!(

@@ -1,61 +1,122 @@
 //! Zook ZK protocol — Construction 9.7.
 
+pub mod batched;
+pub(crate) mod block;
 pub mod commit;
 pub mod prover;
+pub(crate) mod round;
+pub(crate) mod slot_weights;
 pub mod verifier;
 
+pub use batched::commit::{BundleCommitment, BundleCommittedWitness};
 pub use commit::{Commitment, CommittedWitness};
 
-pub use crate::protocols::params::protocol_config::ProtocolConfig;
-use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, verify};
+pub use crate::protocols::params::config::ProtocolConfig;
+use crate::{
+    algebra::{eq_weights, geometric_sequence, linear_form::LinearForm},
+    protocols::zook::batched::bundle::BundleDescriptor,
+    transcript::VerificationResult,
+    verify,
+};
 
-/// Output of [`ProtocolConfig::verify`].
+/// Unified terminator for both single-track and batched zook verification.
 ///
-/// The verifier has completed all round checks. The caller must finish
-/// verification by checking that the input forms evaluate to the claimed value:
+/// `groups` holds one [`ClaimGroup`] per independently-batched claim set:
+///   - single-track: exactly one group, `batching_challenge` = the form-batching challenge;
+///   - batched: one group per bundle, `batching_challenge` = the bundle's intra-bundle γ.
 ///
-/// ```text
-/// initial_claim_scale × Σ_j rlc_coefficients[j] × form_j.mle_evaluate(evaluation_point) == linear_forms_contribution
-/// ```
+/// Finish with [`Self::verify`] (flat form list, single-track) or
+/// [`Self::verify_bundles`] (per-bundle descriptors, batched).
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct FinalClaim<F: ark_ff::Field> {
-    /// All sumcheck challenges from all rounds concatenated with basecase
-    /// evaluation points. Length = log2(vector_size).
-    pub evaluation_point: Vec<F>,
-    /// Cumulative product of all code-switch `original_sl_coeff` values.
-    pub initial_claim_scale: F,
-    /// `opening.linear_form_evaluation − Σ_c constraint_contributions`.
-    /// The portion of the protocol sum attributable to the input linear forms.
+    pub groups: Vec<ClaimGroup<F>>,
+    /// `opening.linear_form_evaluation − Σ_c constraint_contributions`, shared
+    /// across all groups.
     pub linear_forms_contribution: F,
-    /// Fiat-Shamir RLC coefficients for each input form.
-    /// `rlc_coefficients[0] == F::ONE` always.
-    pub rlc_coefficients: Vec<F>,
+}
+
+/// One batched claim set's terminal data.
+#[derive(Clone, Debug)]
+pub struct ClaimGroup<F: ark_ff::Field> {
+    /// Round challenges ++ basecase points for this group's claims.
+    pub evaluation_point: Vec<F>,
+    /// Cumulative product of code-switch scale factors reaching this group.
+    pub initial_claim_scale: F,
+    /// Form-batching challenge (single-track) or intra-bundle γ (batched).
+    pub batching_challenge: F,
 }
 
 impl<F: ark_ff::Field> FinalClaim<F> {
-    /// Complete the verification started by [`ProtocolConfig::verify`].
+    /// Shared skeleton for both terminators: require one group per claim set,
+    /// accumulate `scale_g · group_sum(g)` across groups, then check the total
+    /// equals `linear_forms_contribution`. `group_sum` computes a single group's
+    /// γ-weighted form-MLE sum and may short-circuit (e.g. descriptor validation).
+    fn check_groups<S>(&self, num_groups: usize, group_sum: S) -> VerificationResult<()>
+    where
+        F: Default,
+        S: Fn(&ClaimGroup<F>, usize) -> VerificationResult<F>,
+    {
+        verify!(self.groups.len() == num_groups);
+        let mut accumulated = F::ZERO;
+        for (i, group) in self.groups.iter().enumerate() {
+            accumulated += group.initial_claim_scale * group_sum(group, i)?;
+        }
+        verify!(accumulated == self.linear_forms_contribution);
+        Ok(())
+    }
+
+    /// Single-track terminator: all `linear_forms` share one evaluation point and
+    /// are combined by a flat γ-RLC. Requires exactly one group.
     ///
-    /// Checks `initial_claim_scale × Σ_j rlc_coefficients[j] × form_j.mle_evaluate(evaluation_point) == linear_forms_contribution`.
-    ///
-    /// For `MultilinearExtension` forms this runs in O(num_forms × log N).
-    /// For `Covector` forms the default `mle_evaluate` is O(N).
+    /// Checks `scale × Σ_j γ^j × form_j.mle(evaluation_point) == linear_forms_contribution`.
     pub fn verify(&self, linear_forms: &[&dyn LinearForm<F>]) -> VerificationResult<()>
     where
         F: Default,
     {
-        assert_eq!(
-            linear_forms.len(),
-            self.rlc_coefficients.len(),
-            "linear_forms.len() must match rlc_coefficients.len()"
-        );
-        let form_mle_sum: F = linear_forms
-            .iter()
-            .zip(&self.rlc_coefficients)
-            .map(|(form, &g)| g * form.mle_evaluate(&self.evaluation_point))
-            .sum();
-        verify!(self.initial_claim_scale * form_mle_sum == self.linear_forms_contribution);
-        Ok(())
+        verify!(self.groups.len() == 1);
+        self.check_groups(1, |g, _| {
+            let rlc = geometric_sequence(F::ONE, g.batching_challenge, linear_forms.len());
+            let form_mle_sum: F = linear_forms
+                .iter()
+                .zip(&rlc)
+                .map(|(form, &c)| c * form.mle_evaluate(&g.evaluation_point))
+                .sum();
+            Ok(form_mle_sum)
+        })
+    }
+
+    /// Batched terminator: one group per bundle, each combined by the two-axis
+    /// `eq(poly axis) × γ(claim axis)` identity against its descriptor.
+    pub fn verify_bundles(&self, bundles: &[&BundleDescriptor<F>]) -> VerificationResult<()>
+    where
+        F: Default,
+    {
+        self.check_groups(bundles.len(), |group, i| {
+            let bundle = bundles[i];
+            bundle.validate()?;
+            verify!(group.evaluation_point.len() == bundle.domain_bits());
+
+            let log_n = bundle.log_num_polys();
+            let (k_pt, b_pt) = group.evaluation_point.split_at(log_n);
+            let eq_high = eq_weights(k_pt);
+
+            let total_claims = bundle.total_claims();
+            let claim_weights = geometric_sequence(F::ONE, group.batching_challenge, total_claims);
+
+            let mut idx = 0;
+            let mut form_sum = F::ZERO;
+            for (k, claims) in bundle.per_poly_claims.iter().enumerate() {
+                let eq_k = eq_high[k];
+                for claim in claims {
+                    form_sum += claim_weights[idx] * eq_k * claim.form.mle_evaluate(b_pt);
+                    idx += 1;
+                }
+            }
+            debug_assert_eq!(idx, total_claims);
+
+            Ok(form_sum)
+        })
     }
 }
 
@@ -236,6 +297,26 @@ mod tests {
         vs.check_eof().unwrap();
     }
 
+    #[test]
+    fn roundtrip_standard_with_rounds_basefield() {
+        let config =
+            ProtocolConfig::<MixedEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
+                .unwrap();
+        assert!(config.has_rounds(), "expected at least one round");
+        full_roundtrip_mixed(&config, 1, 10, "roundtrip_standard_with_rounds_basefield");
+    }
+
+    #[test]
+    fn roundtrip_zk_with_rounds_basefield() {
+        let config = ProtocolConfig::<MixedEmbed>::derive(
+            small_spec(Mode::ZeroKnowledge),
+            multi_round_tuning(),
+        )
+        .unwrap();
+        assert!(config.has_rounds(), "expected at least one round");
+        full_roundtrip_mixed(&config, 3, 11, "roundtrip_zk_with_rounds_basefield");
+    }
+
     /// Expect verification to fail (handles both `verifier_panics` and normal builds).
     fn assert_verify_rejected(verify: impl FnOnce() -> crate::transcript::VerificationResult<()>) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(verify));
@@ -265,26 +346,6 @@ mod tests {
                 .unwrap();
         assert!(!config.rounds().is_empty(), "expected at least one round");
         full_roundtrip(&config, 1, 1, "roundtrip_standard_with_rounds");
-    }
-
-    #[test]
-    fn roundtrip_standard_with_rounds_basefield() {
-        let config =
-            ProtocolConfig::<MixedEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
-                .unwrap();
-        assert!(config.has_rounds(), "expected at least one round");
-        full_roundtrip_mixed(&config, 1, 10, "roundtrip_standard_with_rounds_basefield");
-    }
-
-    #[test]
-    fn roundtrip_zk_with_rounds_basefield() {
-        let config = ProtocolConfig::<MixedEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
-        assert!(config.has_rounds(), "expected at least one round");
-        full_roundtrip_mixed(&config, 3, 11, "roundtrip_zk_with_rounds_basefield");
     }
 
     #[test]

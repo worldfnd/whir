@@ -94,11 +94,52 @@ impl<F: Field> Config<F> {
         matches!(self.mode, BasecaseMode::ZeroKnowledge)
     }
 
+    /// Prove the basecase claim `dot(vector, covector) == sum` against a
+    /// single source commitment.
+    ///
+    /// Thin wrapper around [`Self::prove_virtual`] with one active block and
+    /// `block_weights = [F::ONE]`.
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        mut vector: Buffer<F>,
+        vector: Buffer<F>,
         witness: &irs_commit::Witness<F>,
+        covector: Buffer<F>,
+        sum: F,
+    ) -> Opening<F>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        F: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+        Standard: Distribution<F>,
+    {
+        self.prove_virtual(prover_state, vector, &[witness], &[F::ONE], covector, sum)
+    }
+
+    /// Prove the basecase claim against one or more source commitments
+    /// combined via caller-supplied `block_weights`.
+    ///
+    /// `vector` is the merged virtual message `m^★ = Σ_b θ_b · vector_b`.
+    /// `witnesses` are the active block commitments (each must have
+    /// `interleaving_depth == 1` and `num_vectors == 1`, the basecase IRS
+    /// constraint). `block_weights[b] = θ_b` — the cross-block selector
+    /// weights from the preceding selector merge. `covector` is `C^★ =
+    /// η · Σ_b θ_b · covector_b` and `sum` is `S^★`.
+    ///
+    /// In ZK mode the prover commits one blinding codeword and combines via
+    /// γ; the per-query row reduction then uses weights `[1, γ·θ_0, …,
+    /// γ·θ_{t-1}]` over `[blinding, *witnesses]`. In Standard mode the
+    /// weights are just `θ` over `witnesses`.
+    pub fn prove_virtual<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        mut vector: Buffer<F>,
+        witnesses: &[&irs_commit::Witness<F>],
+        block_weights: &[F],
         mut covector: Buffer<F>,
         mut sum: F,
     ) -> Opening<F>
@@ -116,6 +157,12 @@ impl<F: Field> Config<F> {
         assert_eq!(self.commit.num_vectors(), 1);
         assert_eq!(self.commit.vector_size(), self.sumcheck.initial_size());
         assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size()));
+        assert_eq!(
+            witnesses.len(),
+            block_weights.len(),
+            "block_weights must have one entry per active witness"
+        );
+        assert!(!witnesses.is_empty());
         debug_assert_eq!(vector.dot(&covector), sum);
         if self.size() == 0 {
             return Opening {
@@ -124,13 +171,35 @@ impl<F: Field> Config<F> {
             };
         }
 
-        let blinding_witness =
-            self.maybe_blind_prove(prover_state, &mut vector, witness, &covector, &mut sum);
+        // Σ θ_b · witnesses[b].masks — the merged IRS randomness the
+        // verifier's per-query spot check must reconcile against the merged
+        // vector. Mask length is identical across witnesses (same IrsConfig).
+        let mask_len = self.commit.mask_length() * self.commit.num_messages();
+        let mut merged_irs_randomness = vec![F::ZERO; mask_len];
+        for (w, &theta) in witnesses.iter().zip(block_weights) {
+            debug_assert_eq!(w.masks.len(), mask_len);
+            for (acc, &m) in merged_irs_randomness.iter_mut().zip(w.masks.to_slice()) {
+                *acc += theta * m;
+            }
+        }
 
-        let witnesses: Vec<&irs_commit::Witness<F>> = blinding_witness
-            .as_ref()
-            .map_or_else(|| vec![witness], |b| vec![b, witness]);
-        let _ = self.commit.open(prover_state, &witnesses);
+        let blinding_witness = self.maybe_blind_prove(
+            prover_state,
+            &mut vector,
+            &merged_irs_randomness,
+            &covector,
+            &mut sum,
+        );
+
+        // commitments + slot_weights for the IRS opening. Blinding adds a
+        // leading entry with weight `1`; the real witnesses keep weights
+        // `γ·θ_b` (ZK) or `θ_b` (Standard).
+        let mut active: Vec<&irs_commit::Witness<F>> = Vec::with_capacity(witnesses.len() + 1);
+        if let Some(b) = blinding_witness.as_ref() {
+            active.push(b);
+        }
+        active.extend(witnesses.iter().copied());
+        let _ = self.commit.open(prover_state, &active);
 
         let (vector, opening) = self.sumcheck.prove(
             prover_state,
@@ -157,12 +226,12 @@ impl<F: Field> Config<F> {
 
     /// ZK: commits a blinding codeword, runs the RLC, mutates `vector`/`sum` to
     /// the combined values, sends them cleartext. Standard: sends `vector` and
-    /// `witness.masks` cleartext (no ZK).
+    /// the merged IRS randomness cleartext (no ZK).
     fn maybe_blind_prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
         vector: &mut Buffer<F>,
-        witness: &irs_commit::Witness<F>,
+        merged_irs_randomness: &[F],
         covector: &Buffer<F>,
         sum: &mut F,
     ) -> Option<irs_commit::Witness<F>>
@@ -178,7 +247,7 @@ impl<F: Field> Config<F> {
         match self.mode {
             BasecaseMode::Standard => {
                 prover_state.prover_messages(vector.to_slice());
-                prover_state.prover_messages(witness.masks.to_slice());
+                prover_state.prover_messages(merged_irs_randomness);
                 None
             }
             BasecaseMode::ZeroKnowledge => {
@@ -201,13 +270,16 @@ impl<F: Field> Config<F> {
                 *vector = blinding_vector;
                 prover_state.prover_messages(vector.to_slice());
 
-                let mut combined_irs_randomness = blinding_witness.masks.clone();
-                witness.masks.mixed_scalar_mul_add_to(
-                    &Identity::<F>::new(),
-                    &mut combined_irs_randomness,
-                    combination_randomness,
-                );
-                prover_state.prover_messages(combined_irs_randomness.to_slice());
+                // combined = blinding.masks + γ · merged_irs_randomness (the
+                // θ-weighted merge of the active witnesses' masks).
+                let mut combined_irs_randomness = blinding_witness.masks.to_slice().to_vec();
+                for (acc, &m) in combined_irs_randomness
+                    .iter_mut()
+                    .zip(merged_irs_randomness)
+                {
+                    *acc += combination_randomness * m;
+                }
+                prover_state.prover_messages(&combined_irs_randomness);
 
                 *sum = blinding_inner_product + combination_randomness * *sum;
                 Some(blinding_witness)
@@ -215,10 +287,35 @@ impl<F: Field> Config<F> {
         }
     }
 
+    /// Verify the basecase against a single source commitment.
+    ///
+    /// Thin wrapper around [`Self::verify_virtual`] with one active block
+    /// and `block_weights = [F::ONE]`.
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
         commitment: &irs_commit::Commitment,
+        sum: F,
+    ) -> VerificationResult<Opening<F>>
+    where
+        H: DuplexSpongeInterface,
+        F: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        self.verify_virtual(verifier_state, &[commitment], &[F::ONE], sum)
+    }
+
+    /// Verify the basecase against one or more source commitments combined
+    /// via caller-supplied `block_weights`. Verifier mirror of
+    /// [`Self::prove_virtual`].
+    pub fn verify_virtual<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        commitments: &[&irs_commit::Commitment],
+        block_weights: &[F],
         mut sum: F,
     ) -> VerificationResult<Opening<F>>
     where
@@ -233,6 +330,8 @@ impl<F: Field> Config<F> {
         assert_eq!(self.commit.num_vectors(), 1);
         assert_eq!(self.commit.vector_size(), self.sumcheck.initial_size());
         assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size()));
+        verify!(!commitments.is_empty());
+        verify!(commitments.len() == block_weights.len());
         if self.size() == 0 {
             return Ok(Opening {
                 evaluation_points: Vec::new(),
@@ -246,11 +345,26 @@ impl<F: Field> Config<F> {
         let irs_randomness = verifier_state
             .prover_messages_vec(self.commit.mask_length() * self.commit.num_messages())?;
 
-        let (commitments, weights): (Vec<&irs_commit::Commitment>, Vec<F>) = match &blind {
-            Some((b, gamma)) => (vec![b, commitment], vec![F::ONE, *gamma]),
-            None => (vec![commitment], vec![F::ONE]),
-        };
-        let evals = self.commit.verify(verifier_state, &commitments)?;
+        // Build the IRS-verify commitment list and the matching per-column
+        // weights. Layout: `[blinding?, *commitments]` with weights
+        // `[1, γ·θ_0, …, γ·θ_{t-1}]` (ZK) or `[θ_0, …, θ_{t-1}]` (Standard).
+        let mut all_commitments: Vec<&irs_commit::Commitment> =
+            Vec::with_capacity(commitments.len() + 1);
+        let mut weights: Vec<F> = Vec::with_capacity(commitments.len() + 1);
+        if let Some((b, gamma)) = &blind {
+            all_commitments.push(b);
+            weights.push(F::ONE);
+            for &w in block_weights {
+                weights.push(*gamma * w);
+            }
+        } else {
+            for &w in block_weights {
+                weights.push(w);
+            }
+        }
+        all_commitments.extend(commitments.iter().copied());
+
+        let evals = self.commit.verify(verifier_state, &all_commitments)?;
 
         // Spot-check: Enc_C(vector, irs_randomness)(x) = Σ weights · opened_row(x).
         for (&point, value) in zip_strict(&evals.points, evals.values(&weights)) {
@@ -328,6 +442,7 @@ mod tests {
                     proof_of_work::Config::none(),
                     size.next_power_of_two().trailing_zeros() as usize,
                     sumcheck::SumcheckMode::Standard,
+                    std::num::NonZeroUsize::new(2).expect("2 is non-zero"),
                 ),
                 mode: if is_zk {
                     BasecaseMode::ZeroKnowledge

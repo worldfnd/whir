@@ -9,8 +9,8 @@ use crate::{
         params::{
             bounds::usize_to_f64,
             branch::SolveMode,
+            config::MaskOracleInfo,
             error::{grind_to_at, DeriveError, Pow},
-            protocol_config::MaskOracleInfo,
             solved::Solved,
             spec::{RoundContext, SecuritySpec},
         },
@@ -43,6 +43,7 @@ pub fn solve<M: Embedding>(
             round_pow,
             num_sumcheck_rounds(ctx),
             output_mode,
+            std::num::NonZeroUsize::new(2).expect("2 is non-zero"),
         ),
         analytic,
     ))
@@ -92,6 +93,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
+        error::RoundSlot,
         irs_commit as irs_params,
         spec::{ListSize, MaskCodeMessageLen, Mode, OodSampleBudget},
         test_utils::{
@@ -132,7 +134,9 @@ mod tests {
             &ctx,
             &source_irs,
             SolveMode::ZeroKnowledge(mask_oracle),
-            Pow::RoundSumcheck { index: 0 },
+            Pow::RoundSumcheck {
+                round: RoundSlot::Shared(0),
+            },
         )
         .unwrap();
         match config.mode() {
@@ -207,7 +211,7 @@ mod tests {
             ctx in arb_round_ctx(),
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
-            let pow = Pow::RoundSumcheck { index: 0 };
+            let pow = Pow::RoundSumcheck { round: RoundSlot::Shared(0) };
             let config = solve(&spec, &ctx, &source_irs, SolveMode::Standard, pow).unwrap();
             prop_assert!(matches!(config.mode(), sumcheck::SumcheckMode::Standard));
         }
@@ -221,7 +225,7 @@ mod tests {
             ctx in arb_round_ctx(),
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
-            let pow = Pow::RoundSumcheck { index: 0 };
+            let pow = Pow::RoundSumcheck { round: RoundSlot::Shared(0) };
             let mode = build_minimal_mask_oracle(&spec)
                 .map_or(SolveMode::Standard, SolveMode::ZeroKnowledge);
             let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
@@ -251,7 +255,7 @@ mod tests {
             let source_irs = build_source_irs(&spec, &ctx);
             let mask_oracle = build_minimal_mask_oracle(&spec);
             let error = analytic_error_bits(&source_irs, mask_oracle);
-            let pow = Pow::RoundSumcheck { index: 0 };
+            let pow = Pow::RoundSumcheck { round: RoundSlot::Shared(0) };
             let mode = mask_oracle.map_or(SolveMode::Standard, SolveMode::ZeroKnowledge);
             let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
             assert_pow_closes_gap(&spec, error, &config.round_pow());
@@ -274,7 +278,9 @@ mod tests {
             &ctx,
             &source_irs,
             SolveMode::ZeroKnowledge(info),
-            Pow::RoundSumcheck { index: 0 },
+            Pow::RoundSumcheck {
+                round: RoundSlot::Shared(0),
+            },
         )
         .unwrap();
         assert!(matches!(

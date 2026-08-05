@@ -20,10 +20,10 @@ use crate::{
             branch::{Branch, RoundBuildMode},
             build_round::{build_mask_oracle, solve_t_ood},
             code_switch as code_switch_params,
+            config::MaskOracleInfo,
             error::DeriveError,
             irs_commit as irs_params,
             layout::RoundShape,
-            protocol_config::MaskOracleInfo,
             spec::{KneeWeight, Mode, OodSampleBudget, RoundContext, SecuritySpec, TuningSpec},
             sumcheck as sumcheck_params,
         },
@@ -360,7 +360,8 @@ fn try_round_dims<M: Embedding + Default>(
         .list_size_estimate(target_log_degree, f64::from(target_log_inv_rate));
 
     let ood_mode = mode.map(|p| p.c_zk_log_inv_rate);
-    let (source, t_ood) = solve_t_ood::<M>(spec, &src_ctx, target_list_size, ood_mode, 0).ok()?;
+    let (source, t_ood) =
+        solve_t_ood::<M>(spec, &src_ctx, target_list_size, ood_mode, shape.round_slot).ok()?;
 
     let target_budget = match mode {
         Branch::Standard => OodSampleBudget::ZERO,
@@ -383,7 +384,7 @@ fn try_round_dims<M: Embedding + Default>(
                 &source,
                 t_ood,
                 payload.c_zk_log_inv_rate,
-                shape.round_index,
+                shape.round_slot,
             )
             .ok()?;
             fits(f64::from(mo.analytic_bits()), max_deficit)?;

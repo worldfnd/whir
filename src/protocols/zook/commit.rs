@@ -1,7 +1,8 @@
 //! Initial witness commitment for zook.
 //!
-//! Goes through `rounds[0].code_switch.source` when the plan has rounds;
-//! through `basecase.commit` when it doesn't.
+//! Single-witness path goes through `rounds[0].code_switch.source` when the plan has rounds;
+//! through `basecase.commit` otherwise. The batched (per-bundle) commit lives in
+//! [`super::batched::commit`].
 
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
@@ -13,7 +14,7 @@ use crate::{
     hash::Hash,
     protocols::{
         irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
-        params::protocol_config::ProtocolConfig,
+        params::config::ProtocolConfig,
     },
     transcript::{
         Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,

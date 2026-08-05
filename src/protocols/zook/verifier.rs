@@ -36,11 +36,13 @@ use crate::{
     hash::Hash,
     protocols::{
         code_switch::CovectorUpdateParams,
-        irs_commit::Commitment as IrsCommitment,
         mask_proximity,
-        params::protocol_config::{MaskOracleConfig, ProtocolConfig, RoundConfig},
+        params::config::{MaskOracleConfig, ProtocolConfig, RoundConfig},
         sumcheck::SumcheckOpening,
-        zook::{commit::Commitment, FinalClaim},
+        zook::{
+            block::VerifierBlock, commit::Commitment, round::verify_whir_round, ClaimGroup,
+            FinalClaim,
+        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, VerificationResult,
@@ -102,37 +104,54 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             // initial_claim_scale = ONE. The caller checks:
             // ONE × Σ_j claim_weight_j × form_j.mle_at(evaluation_point) == linear_forms_contribution
             return Ok(FinalClaim {
-                evaluation_point: opening.evaluation_points,
-                initial_claim_scale: one,
+                groups: vec![ClaimGroup {
+                    evaluation_point: opening.evaluation_points,
+                    initial_claim_scale: one,
+                    batching_challenge,
+                }],
                 linear_forms_contribution: opening.linear_form_evaluation,
-                rlc_coefficients: claim_weights,
             });
         }
 
-        // Multi-round path: accumulate constraints implicitly, no initial_covector.
-        let mut state = VerifierRoundState {
-            irs_commitment: commitment.irs_commitment,
-            constraints: Vec::new(),
-            all_round_challenges: Vec::new(),
-            challenges_at: vec![0],
-            round_scale_factors: Vec::new(),
-            current_msg_len: self.tuning().vector_size,
-            sum: batched_evaluation,
-        };
-        if let Some(first) = self.first_round() {
-            state = verify_round::<M, H>(first, state, vs)?;
-        }
+        let mut block = VerifierBlock::single_source(batched_evaluation, commitment.irs_commitment);
+        let mut constraints: Vec<ImplicitConstraint<M::Target>> = Vec::new();
+        let mut all_round_challenges: Vec<M::Target> = Vec::new();
+        let mut challenges_at: Vec<usize> = vec![0];
+        let mut round_scale_factors: Vec<M::Target> = Vec::new();
+
+        // Round 0 verifies over `M` (opens a base source IRS); the tail is ext→ext.
+        let first = self
+            .first_round()
+            .expect("has_rounds() true implies a first round");
+        let first_msg_len = first.code_switch().source().message_length();
+        let (next, out) = verify_whir_round::<M, H>(first, block, vs)?;
+        all_round_challenges.extend_from_slice(&out.round_challenges);
+        push_constraints(&mut constraints, &out.update_params, first_msg_len, 0);
+        round_scale_factors.push(out.update_params.original_sl_coeff);
+        challenges_at.push(all_round_challenges.len());
+        block = next;
+
         for round in self.tail_rounds() {
-            state = verify_round::<Identity<M::Target>, H>(round, state, vs)?;
+            let msg_len = round.code_switch().source().message_length();
+            let (next, out) = verify_whir_round::<Identity<M::Target>, H>(round, block, vs)?;
+            all_round_challenges.extend_from_slice(&out.round_challenges);
+            push_constraints(
+                &mut constraints,
+                &out.update_params,
+                msg_len,
+                round_scale_factors.len(),
+            );
+            round_scale_factors.push(out.update_params.original_sl_coeff);
+            challenges_at.push(all_round_challenges.len());
+            block = next;
         }
 
         let opening = self
             .basecase()
-            .verify(vs, &state.irs_commitment, state.sum)?;
+            .verify(vs, &block.commitments[0], block.sum)?;
 
         // full_eval_point = all round challenges ++ basecase evaluation points.
-        let full_eval_point: Vec<M::Target> = state
-            .all_round_challenges
+        let full_eval_point: Vec<M::Target> = all_round_challenges
             .iter()
             .chain(opening.evaluation_points.iter())
             .copied()
@@ -144,20 +163,18 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         );
 
         // Compute scale_suffixes[round_idx] = Π_{r'=round_idx..num_completed_rounds-1} round_scale_factors[r'].
-        let num_completed_rounds = state.round_scale_factors.len();
+        let num_completed_rounds = round_scale_factors.len();
         let mut scale_suffixes = vec![one; num_completed_rounds + 1];
         for round_idx in (0..num_completed_rounds).rev() {
             scale_suffixes[round_idx] =
-                state.round_scale_factors[round_idx] * scale_suffixes[round_idx + 1];
+                round_scale_factors[round_idx] * scale_suffixes[round_idx + 1];
         }
 
-        // Compute constraint contributions (O(num_constraints × log N)).
         // constraint_sum = Σ_c c.batching_weight × scale_suffixes[c.round+1] × mle_of_geom(c.eval_point, z_suffix)
-        let constraint_sum: M::Target = state
-            .constraints
+        let constraint_sum: M::Target = constraints
             .iter()
             .map(|c| {
-                let z_suffix_start = state.challenges_at[c.added_at_round + 1];
+                let z_suffix_start = challenges_at[c.added_at_round + 1];
                 let z_suffix =
                     &full_eval_point[z_suffix_start..z_suffix_start + c.domain_bits as usize];
                 c.batching_weight
@@ -172,49 +189,65 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let linear_forms_contribution = opening.linear_form_evaluation - constraint_sum;
 
         Ok(FinalClaim {
-            evaluation_point: full_eval_point,
-            initial_claim_scale: scale_suffixes[0],
+            groups: vec![ClaimGroup {
+                evaluation_point: full_eval_point,
+                initial_claim_scale: scale_suffixes[0],
+                batching_challenge,
+            }],
             linear_forms_contribution,
-            rlc_coefficients: claim_weights,
         })
     }
 }
 
-struct VerifierRoundState<F: Field> {
-    irs_commitment: IrsCommitment,
-    /// Deferred constraint terms from code_switch OOD and in-domain constraints.
-    constraints: Vec<ImplicitConstraint<F>>,
-    /// All sumcheck round challenges seen so far, in order.
-    all_round_challenges: Vec<F>,
-    /// `challenges_at[r]` = number of cumulative challenges before round r.
-    /// Length = number of rounds processed + 1 (initial entry is 0).
-    challenges_at: Vec<usize>,
-    /// `original_sl_coeff` from each round's code_switch, in order.
-    round_scale_factors: Vec<F>,
-    /// Current message length (size of post-fold covector this round).
-    current_msg_len: usize,
-    sum: F,
+/// Append the round's OOD + in-domain constraints to the accumulator.
+pub(crate) fn push_constraints<F: Field>(
+    constraints: &mut Vec<ImplicitConstraint<F>>,
+    update_params: &CovectorUpdateParams<F>,
+    msg_len: usize,
+    added_at_round: usize,
+) {
+    let domain_bits = msg_len.trailing_zeros();
+    for (batching_weight, eval_point) in update_params
+        .ood_rlc_coeffs
+        .iter()
+        .zip(&update_params.ood_eval_points)
+    {
+        constraints.push(ImplicitConstraint {
+            eval_point: *eval_point,
+            batching_weight: *batching_weight,
+            domain_bits,
+            added_at_round,
+        });
+    }
+    for (batching_weight, eval_point) in update_params
+        .in_domain_rlc_coeffs
+        .iter()
+        .zip(&update_params.in_domain_eval_points)
+    {
+        constraints.push(ImplicitConstraint {
+            eval_point: *eval_point,
+            batching_weight: *batching_weight,
+            domain_bits,
+            added_at_round,
+        });
+    }
 }
 
-struct ImplicitConstraint<F: Field> {
+pub(crate) struct ImplicitConstraint<F: Field> {
     /// OOD alpha or in-domain omega.
-    eval_point: F,
+    pub(crate) eval_point: F,
     /// RLC coefficient at the time this constraint was added.
-    batching_weight: F,
+    pub(crate) batching_weight: F,
     /// log2 of the effective domain size = log2(msg_len when added).
-    /// The final contribution is batching_weight * mle_evaluate(eval_point, z_suffix)
-    /// where z_suffix has exactly this many elements.
-    domain_bits: u32,
+    pub(crate) domain_bits: u32,
     /// Index into `round_scale_factors`: which round added this constraint.
-    /// `scale_suffixes[added_at_round + 1]` is the product of all round_scale_factors
-    /// from the round after this one to the end.
-    added_at_round: usize,
+    pub(crate) added_at_round: usize,
 }
 
 /// Manages ZK mask verification state for one round.
 /// Mirrors `RoundMaskOracle` in `prover.rs` on the receive side.
 /// `Disabled` is the Null Object for Standard mode — all methods return Ok(()) / &[].
-enum RoundMaskOracleCheck<'a, F: Field> {
+pub(crate) enum RoundMaskOracleCheck<'a, F: Field> {
     /// Standard mode: no mask oracle.
     Disabled,
     /// ZK — sumcheck-masks commitment received; awaiting cs_mask.
@@ -237,7 +270,10 @@ enum RoundMaskOracleCheck<'a, F: Field> {
 
 impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
     /// Receive the sumcheck-masks commitment (ZK) or construct Disabled (Standard).
-    fn begin<M, H>(round: &'a RoundConfig<M>, vs: &mut VerifierState<H>) -> VerificationResult<Self>
+    pub(crate) fn begin<M, H>(
+        round: &'a RoundConfig<M>,
+        vs: &mut VerifierState<H>,
+    ) -> VerificationResult<Self>
     where
         M: Embedding<Target = F>,
         F: Codec<[H::U]>,
@@ -261,7 +297,7 @@ impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
     /// Receive the cs_mask commitment + mask_eval_sum (δ) cleartext, then reconcile *sum.
     /// Transitions SumcheckCommitmentReceived → ReadyForDischarge in place.
     /// No-op for Disabled.
-    fn receive_cs_mask_and_reconcile<H>(
+    pub(crate) fn receive_cs_mask_and_reconcile<H>(
         &mut self,
         opening: &SumcheckOpening<F>,
         vs: &mut VerifierState<H>,
@@ -311,7 +347,7 @@ impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
     /// Soundness: `code_switch.verify_for_implicit` (step 4) checked OOD/in-domain
     /// consistency of the target codeword but did NOT verify the masks are close to
     /// C_zk. Both checks are load-bearing per Theorem 9.10 / Construction 7.2.
-    fn verify_and_discharge<H>(
+    pub(crate) fn verify_and_discharge<H>(
         self,
         round_challenges: &[F],
         msg_len: usize,
@@ -406,86 +442,4 @@ impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
 
         Ok(())
     }
-}
-
-#[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify_round", fields(msg_len = round.code_switch().source().message_length())))]
-fn verify_round<M, H>(
-    round: &RoundConfig<M>,
-    mut state: VerifierRoundState<M::Target>,
-    vs: &mut VerifierState<H>,
-) -> VerificationResult<VerifierRoundState<M::Target>>
-where
-    M: Embedding,
-    M::Target: Field + Default + Codec<[H::U]>,
-    Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
-{
-    let msg_len = round.code_switch().source().message_length();
-
-    // Receive sumcheck-masks commitment (ZK) or construct Disabled (Standard).
-    let mut masker = RoundMaskOracleCheck::begin(round, vs)?;
-
-    // Sumcheck: mutates sum, records round challenges for full_eval_point reconstruction.
-    let opening = round.sumcheck().verify(vs, &mut state.sum)?;
-    state
-        .all_round_challenges
-        .extend_from_slice(&opening.round_challenges);
-    state.current_msg_len = msg_len;
-
-    // Receive cs_mask commitment + mask_eval_sum (δ), reconcile sum to the unmasked dot.
-    masker.receive_cs_mask_and_reconcile(&opening, vs, &mut state.sum)?;
-
-    // Code-switch: accumulate implicit constraints; no explicit covector update.
-    let (target_commitment, update_params) = round.code_switch().verify_for_implicit(
-        vs,
-        &mut state.sum,
-        &opening.round_challenges,
-        &state.irs_commitment,
-    )?;
-    let current_round = state.round_scale_factors.len();
-    let domain_bits = msg_len.trailing_zeros();
-    for (batching_weight, eval_point) in update_params
-        .ood_rlc_coeffs
-        .iter()
-        .zip(&update_params.ood_eval_points)
-    {
-        state.constraints.push(ImplicitConstraint {
-            eval_point: *eval_point,
-            batching_weight: *batching_weight,
-            domain_bits,
-            added_at_round: current_round,
-        });
-    }
-    for (batching_weight, eval_point) in update_params
-        .in_domain_rlc_coeffs
-        .iter()
-        .zip(&update_params.in_domain_eval_points)
-    {
-        state.constraints.push(ImplicitConstraint {
-            eval_point: *eval_point,
-            batching_weight: *batching_weight,
-            domain_bits,
-            added_at_round: current_round,
-        });
-    }
-    state
-        .round_scale_factors
-        .push(update_params.original_sl_coeff);
-    state.challenges_at.push(state.all_round_challenges.len());
-    state.irs_commitment = target_commitment;
-
-    // Verify both mask trees and subtract cs_mask contribution from sum.
-    masker.verify_and_discharge(
-        &opening.round_challenges,
-        msg_len,
-        &update_params,
-        vs,
-        &mut state.sum,
-    )?;
-
-    Ok(state)
 }

@@ -170,16 +170,23 @@ impl SecuritySpec {
 }
 
 /// Per-round folding strategy. `at_round(i)` returns the factor for round `i`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PerRound` carries an explicit Vec, so this enum is not `Copy`. Callers
+/// that need to reuse a value pass `&self` or call `.clone()` explicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FoldingFactor {
     /// Same folding factor across all rounds.
     Constant(usize),
     /// `at_round(0) = initial`; `at_round(i) = rest` for `i ≥ 1`.
     ConstantFromSecondRound { initial: usize, rest: usize },
+    /// Explicit per-round schedule. `at_round(i) = factors[i]`; rounds at or
+    /// past `factors.len()` return the last entry (the trailing factor used
+    /// once the explicit prefix is exhausted).
+    PerRound(Vec<usize>),
 }
 
 impl FoldingFactor {
-    pub const fn at_round(&self, round: usize) -> usize {
+    pub fn at_round(&self, round: usize) -> usize {
         match self {
             Self::Constant(f) => *f,
             Self::ConstantFromSecondRound { initial, rest } => {
@@ -189,11 +196,20 @@ impl FoldingFactor {
                     *rest
                 }
             }
+            Self::PerRound(factors) => {
+                if round < factors.len() {
+                    factors[round]
+                } else {
+                    *factors
+                        .last()
+                        .expect("FoldingFactor::PerRound must be non-empty")
+                }
+            }
         }
     }
 
     /// Smallest factor across rounds.
-    pub const fn min(&self) -> usize {
+    pub fn min(&self) -> usize {
         match self {
             Self::Constant(f) => *f,
             Self::ConstantFromSecondRound { initial, rest } => {
@@ -203,7 +219,20 @@ impl FoldingFactor {
                     *rest
                 }
             }
+            Self::PerRound(factors) => factors
+                .iter()
+                .copied()
+                .min()
+                .expect("FoldingFactor::PerRound must be non-empty"),
         }
+    }
+
+    /// `true` only for an empty [`Self::PerRound`] schedule, which has no
+    /// well-defined fold at any round. Callers reject this at the input
+    /// boundary (see `round_layout`) so [`Self::at_round`] and [`Self::min`]
+    /// can stay infallible.
+    pub const fn is_empty_schedule(&self) -> bool {
+        matches!(self, Self::PerRound(factors) if factors.is_empty())
     }
 }
 
@@ -529,6 +558,37 @@ mod tests {
         assert_eq!(cap.step(4, 3), 5); // would step to 6 → clamp to 5
         assert_eq!(cap.step(5, 3), 5); // already at cap → stays
         assert_eq!(cap.step(10, 3), 5); // above cap → snaps back to cap
+    }
+
+    #[test]
+    fn folding_factor_per_round_indexes_factors() {
+        let f = FoldingFactor::PerRound(vec![1, 2, 3]);
+        assert_eq!(f.at_round(0), 1);
+        assert_eq!(f.at_round(1), 2);
+        assert_eq!(f.at_round(2), 3);
+        // Past-end requests return the last entry — `round_layout` walks rounds
+        // until it can't fold further, so this saturating behavior keeps the
+        // walk total without a Vec resize at the call site.
+        assert_eq!(f.at_round(3), 3);
+        assert_eq!(f.at_round(99), 3);
+    }
+
+    #[test]
+    fn folding_factor_per_round_min() {
+        assert_eq!(FoldingFactor::PerRound(vec![3, 1, 2]).min(), 1);
+        assert_eq!(FoldingFactor::PerRound(vec![4]).min(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "FoldingFactor::PerRound must be non-empty")]
+    fn folding_factor_per_round_empty_at_round_panics() {
+        let _ = FoldingFactor::PerRound(Vec::new()).at_round(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "FoldingFactor::PerRound must be non-empty")]
+    fn folding_factor_per_round_empty_min_panics() {
+        let _ = FoldingFactor::PerRound(Vec::new()).min();
     }
 
     #[test]

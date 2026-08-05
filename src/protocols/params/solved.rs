@@ -12,7 +12,7 @@ use crate::bits::Bits;
 /// Being wrapped in `Solved` is a type-level guarantee that the config came
 /// out of a params solver; ad-hoc construction paths only produce the bare
 /// config. Drift checks in
-/// [`super::protocol_config::ProtocolConfig::validate`] compare the recorded
+/// [`super::config::ProtocolConfig::validate`] compare the recorded
 /// floor against a fresh recompute.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Solved<C> {

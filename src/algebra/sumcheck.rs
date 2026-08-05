@@ -110,6 +110,89 @@ pub fn fold_and_compute_polynomial<F: Field>(a: &mut Vec<F>, b: &mut Vec<F>, wei
     compute_sumcheck_polynomial(a, b)
 }
 
+/// Computes the round polynomial of the cubic sumcheck
+///
+/// ```text
+///   p(X) = Σ_{b ∈ {0,1}^{n-1}}  eq(X, b) · m(X, b) · v(X, b)
+/// ```
+///
+/// where `eq`, `m`, and `v` are multilinear over `n` variables, supplied
+/// as their length-`2^n` evaluation tables on the Boolean hypercube. The
+/// `X = 0` half occupies the first `2^{n-1}` entries; the `X = 1` half
+/// occupies the rest. Returns `[c_0, c_2, c_3]` — the three coefficients
+/// the prover sends; `c_1` is recovered by the verifier from
+/// `p(0) + p(1) = sum`.
+///
+/// Implicitly zero-extends `eq`, `m`, `v` to the next power of two when
+/// their lengths are equal but not already a power of two. (When the input
+/// lengths differ, the shortest length is used and the others are truncated
+/// — matching the convention of [`compute_sumcheck_polynomial`].)
+pub fn compute_round_poly_degree3<F: Field>(eq: &[F], m: &[F], v: &[F]) -> (F, F, F) {
+    let non_padded = eq.len().min(m.len()).min(v.len());
+    let eq = &eq[..non_padded];
+    let m = &m[..non_padded];
+    let v = &v[..non_padded];
+
+    if eq.is_empty() {
+        return (F::ZERO, F::ZERO, F::ZERO);
+    }
+    if eq.len() == 1 {
+        // X has no half to split into; the X=1 side is implicit zero. So:
+        //   p(X) = eq[0]·(1-X) · m[0]·(1-X) · v[0]·(1-X)
+        //        = eq[0]·m[0]·v[0] · (1 - X)^3
+        //        = eq[0]·m[0]·v[0] · (1 - 3X + 3X^2 - X^3)
+        let t = eq[0] * m[0] * v[0];
+        return (t, t + t + t, -t);
+    }
+
+    let half = eq.len().next_power_of_two() >> 1;
+    let (eq0, eq1) = eq.split_at(half);
+    let (m0, m1) = m.split_at(half);
+    let (v0, v1) = v.split_at(half);
+    debug_assert!(eq0.len() >= eq1.len());
+    // Split eq0/m0/v0 into a paired prefix (matching eq1/m1/v1) and a tail
+    // where the X=1 side is implicit zero padding.
+    let (eq0_paired, eq0_tail) = eq0.split_at(eq1.len());
+    let (m0_paired, m0_tail) = m0.split_at(v1.len());
+    let (v0_paired, v0_tail) = v0.split_at(v1.len());
+
+    // p(X) = (e0 + (e1-e0)·X) · (m0 + (m1-m0)·X) · (v0 + (v1-v0)·X)
+    //      = a0 + a1·X + a2·X^2 + a3·X^3
+    // a0 = e0·m0·v0
+    // a2 = e0·dm·dv + m0·dv·de + v0·dm·de      where d* = (*_1 - *_0)
+    // a3 = de·dm·dv
+    let mut acc0 = F::ZERO;
+    let mut acc2 = F::ZERO;
+    let mut acc3 = F::ZERO;
+    for ((((&e0, &e1), (&mm0, &mm1)), &vv0), &vv1) in eq0_paired
+        .iter()
+        .zip(eq1.iter())
+        .zip(m0_paired.iter().zip(m1.iter()))
+        .zip(v0_paired.iter())
+        .zip(v1.iter())
+    {
+        let de = e1 - e0;
+        let dm = mm1 - mm0;
+        let dv = vv1 - vv0;
+
+        acc0 += e0 * mm0 * vv0;
+        acc2 += e0 * dm * dv + mm0 * dv * de + vv0 * dm * de;
+        acc3 += de * dm * dv;
+    }
+
+    // Tail (`X=1` side implicit zero): p(X) = e0·m0·v0 · (1-X)^3, contributes
+    //   c0 += t,  c2 += 3·t,  c3 -= t.
+    let mut tail = F::ZERO;
+    for ((&e0, &mm0), &vv0) in eq0_tail.iter().zip(m0_tail.iter()).zip(v0_tail.iter()) {
+        tail += e0 * mm0 * vv0;
+    }
+    acc0 += tail;
+    acc2 += tail + tail + tail;
+    acc3 -= tail;
+
+    (acc0, acc2, acc3)
+}
+
 /// Embedding-aware [`compute_sumcheck_polynomial`]: `a` lives in the source
 /// field, `b` in the target field.
 ///
@@ -276,6 +359,117 @@ pub(crate) mod tests {
             assert_eq!(compute_sumcheck_polynomial(&vector, &covector), expected);
             assert_eq!(compute_sumcheck_polynomial(&extended_vector, &covector), expected);
             assert_eq!(compute_sumcheck_polynomial(&vector, &extended_covector), expected);
+        });
+    }
+
+    /// Naive reference: enumerate every Boolean hypercube assignment and
+    /// evaluate `p(X) = Σ_b eq(X, b) · m(X, b) · v(X, b)` at four points,
+    /// then interpolate. Slow but obviously correct.
+    fn naive_round_poly_degree3<F: Field>(eq: &[F], m: &[F], v: &[F]) -> (F, F, F) {
+        let n = eq.len().max(m.len()).max(v.len()).next_power_of_two();
+        let eq = {
+            let mut e = eq.to_vec();
+            e.resize(n, F::ZERO);
+            e
+        };
+        let m = {
+            let mut x = m.to_vec();
+            x.resize(n, F::ZERO);
+            x
+        };
+        let v = {
+            let mut x = v.to_vec();
+            x.resize(n, F::ZERO);
+            x
+        };
+        if n <= 1 {
+            // Trivial case: single value, X=1 side implicit zero.
+            // p(X) = e[0]·m[0]·v[0]·(1-X)^3 = t·(1 - 3X + 3X² - X³)
+            let e0 = *eq.first().unwrap_or(&F::ZERO);
+            let m0 = *m.first().unwrap_or(&F::ZERO);
+            let v0 = *v.first().unwrap_or(&F::ZERO);
+            let t = e0 * m0 * v0;
+            return (t, t + t + t, -t);
+        }
+        let half = n / 2;
+        // Evaluate p at X = 0, 1, 2, 3 (four points uniquely determine a cubic).
+        let eval_at = |x: F| -> F {
+            let one_minus_x = F::ONE - x;
+            let mut acc = F::ZERO;
+            for b in 0..half {
+                let e_at_x = eq[b] * one_minus_x + eq[b + half] * x;
+                let m_at_x = m[b] * one_minus_x + m[b + half] * x;
+                let v_at_x = v[b] * one_minus_x + v[b + half] * x;
+                acc += e_at_x * m_at_x * v_at_x;
+            }
+            acc
+        };
+        let p0 = eval_at(F::ZERO);
+        let p1 = eval_at(F::ONE);
+        let two = F::ONE + F::ONE;
+        let three = two + F::ONE;
+        let p2 = eval_at(two);
+        let p3 = eval_at(three);
+        // Solve for [c0, c1, c2, c3] from p(0..3).
+        //   c0 = p0
+        //   c0 + c1 + c2 + c3 = p1
+        //   c0 + 2c1 + 4c2 + 8c3 = p2
+        //   c0 + 3c1 + 9c2 + 27c3 = p3
+        // Forward-difference (finite-difference inversion):
+        //   c3 = (p3 - 3p2 + 3p1 - p0) / 6
+        //   c2 = (p2 - 2p1 + p0)/2 - 3·c3
+        //   c1 = p1 - p0 - c2 - c3
+        let six = three + three;
+        let c3 = (p3 - p2 - p2 - p2 + p1 + p1 + p1 - p0) * six.inverse().unwrap();
+        let c2 = (p2 - p1 - p1 + p0) * two.inverse().unwrap() - (c3 + c3 + c3);
+        let c0 = p0;
+        (c0, c2, c3)
+    }
+
+    #[test]
+    fn compute_round_poly_degree3_matches_naive() {
+        proptest!(|(seed: u64, log_len in 0_usize..6)| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let len = 1 << log_len;
+            let eq: Vec<F> = random_vector(&mut rng, len);
+            let m: Vec<F> = random_vector(&mut rng, len);
+            let v: Vec<F> = random_vector(&mut rng, len);
+            let expected = naive_round_poly_degree3(&eq, &m, &v);
+            let got = compute_round_poly_degree3(&eq, &m, &v);
+            assert_eq!(got, expected, "len = {len}");
+        });
+    }
+
+    #[test]
+    fn compute_round_poly_degree3_zero_extend() {
+        // Lengths that aren't powers of two should match the zero-extended
+        // versions (the tail path is exercised).
+        proptest!(|(seed: u64, len in 0_usize..(1 << 6))| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let eq: Vec<F> = random_vector(&mut rng, len);
+            let m: Vec<F> = random_vector(&mut rng, len);
+            let v: Vec<F> = random_vector(&mut rng, len);
+            let extended_eq = zero_pad(&eq);
+            let extended_m = zero_pad(&m);
+            let extended_v = zero_pad(&v);
+            let expected = compute_round_poly_degree3(&extended_eq, &extended_m, &extended_v);
+            assert_eq!(compute_round_poly_degree3(&eq, &m, &v), expected);
+        });
+    }
+
+    #[test]
+    fn compute_round_poly_degree3_singleton() {
+        // n = 1 (single value, X=1 side implicit zero). p(X) = e·m·v·(1-X)^3.
+        proptest!(|(seed: u64)| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let e: F = rng.gen();
+            let m: F = rng.gen();
+            let v: F = rng.gen();
+            let (c0, c2, c3) = compute_round_poly_degree3(&[e], &[m], &[v]);
+            let t = e * m * v;
+            assert_eq!(c0, t);
+            assert_eq!(c2, t + t + t);
+            assert_eq!(c3, -t);
         });
     }
 

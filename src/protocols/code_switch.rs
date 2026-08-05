@@ -96,15 +96,18 @@ impl<M: Embedding> Config<M> {
         mode: CodeSwitchMode,
         pow: proof_of_work::Config,
     ) -> Self {
-        assert_eq!(
-            source_config.num_vectors(),
-            1,
-            "code-switch requires a single source vector"
+        // The virtual API accepts one or more source commitments, and each
+        // source may itself contain one or more IRS vectors. The thin
+        // single-source wrappers below are narrower: without caller-supplied
+        // vector-axis weights, they only support `num_vectors == 1`.
+        assert!(
+            source_config.num_vectors() >= 1,
+            "code-switch requires at least one source vector"
         );
         assert_eq!(
             target_config.num_vectors(),
             1,
-            "code-switch requires a single target vector"
+            "code-switch target is always single-poly (the fresh folded message)"
         );
         // Construction 9.7 needs at least one OOD challenge; unique-decoding
         // Standard mode (`t_ood = 0`) is incompatible with code-switch.
@@ -213,7 +216,7 @@ impl<M: Embedding> Config<M> {
         self.source.message_length() + self.message_mask_length()
     }
 
-    /// Prove the code-switch.
+    /// Prove the code-switch against a single source commitment.
     ///
     /// # Soundness-critical inputs
     ///
@@ -233,14 +236,85 @@ impl<M: Embedding> Config<M> {
     /// `mask` is `(r || s)` from the orchestrator's shared mask tree
     /// (see Construction 9.7 Step 1, p.55). Length must equal
     /// `self.message_mask_length()` — pass an empty slice in Standard mode.
+    ///
+    /// Thin wrapper around [`Self::prove_virtual`]: builds the single-source
+    /// `slot_weights = eq_weights(folding_randomness)` and delegates.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
         message: Vec<M::Target>,
-        witness: IrsWitness<M::Source>,
+        witness: &IrsWitness<M::Source>,
         claim: Claim<'_, M::Target>,
         folding_randomness: &[M::Target],
+        mask: &[M::Target],
+    ) -> Witness<M::Target>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Standard: Distribution<M::Target>,
+        M::Target: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        assert_eq!(
+            1 << folding_randomness.len(),
+            self.source.interleaving_depth(),
+            "folding_randomness must have length log2(source.interleaving_depth) ({} != log2({}))",
+            folding_randomness.len(),
+            self.source.interleaving_depth(),
+        );
+        assert_eq!(
+            self.source.num_vectors(),
+            1,
+            "code-switch single-source wrapper requires source.num_vectors == 1; use prove_virtual with explicit slot_weights"
+        );
+        // Single-source `slot_weights` is just the WHIR sumcheck collapse
+        // weights — one weight per leaf column. Selector-merged blocks call
+        // `prove_virtual` directly with one source commitment per block.
+        let slot_weights = eq_weights(folding_randomness);
+        debug_assert_eq!(slot_weights.len(), self.source.num_cols());
+        self.prove_virtual(
+            prover_state,
+            message,
+            &[witness],
+            &slot_weights,
+            claim,
+            mask,
+        )
+    }
+
+    /// Prove the code-switch against one or more source commitments combined
+    /// by a caller-supplied flat weight vector.
+    ///
+    /// This is the generic core. `slot_weights` is the linear combination
+    /// that reduces each query's row to a single target-field value:
+    ///
+    /// ```text
+    ///   collapsed[query] = Σ_i slot_weights[i] · row[query, i]
+    /// ```
+    ///
+    /// with `row[query]` of length `witnesses.len() × source.num_cols()`,
+    /// horizontally concatenated across witnesses in the same order as
+    /// `witnesses`. The caller pre-bakes everything that varies per slot
+    /// into `slot_weights`:
+    /// - the WHIR sumcheck collapse `eq_weights(γ)` (length
+    ///   `source.interleaving_depth()`), and
+    /// - any cross-block selector weights `θ_b`.
+    ///
+    /// `message` is the merged virtual message `Fold(m^★, γ)`. `mask` is the
+    /// merged mask oracle entries; both are caller-managed for the multi-
+    /// commit case.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    pub fn prove_virtual<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        message: Vec<M::Target>,
+        witnesses: &[&IrsWitness<M::Source>],
+        slot_weights: &[M::Target],
+        claim: Claim<'_, M::Target>,
         mask: &[M::Target],
     ) -> Witness<M::Target>
     where
@@ -257,12 +331,15 @@ impl<M: Embedding> Config<M> {
         assert_eq!(message.len(), self.source.message_length());
         assert_eq!(covector.len(), self.covector_length());
         assert_eq!(mask.len(), self.message_mask_length());
+        assert!(
+            !witnesses.is_empty(),
+            "code-switch requires at least one source witness"
+        );
+        let stride = witnesses.len() * self.source.num_cols();
         assert_eq!(
-            1 << folding_randomness.len(),
-            self.source.interleaving_depth(),
-            "folding_randomness must have length log2(source.interleaving_depth) ({} != log2({}))",
-            folding_randomness.len(),
-            self.source.interleaving_depth(),
+            slot_weights.len(),
+            stride,
+            "slot_weights length must equal witnesses.len() × source.num_cols()",
         );
 
         // Step 1: g := Enc_{C'}(f, r') — Construction 9.7 Step 1, p.55
@@ -277,17 +354,17 @@ impl<M: Embedding> Config<M> {
         let ood_answers = self.maybe_send_ood_answers(prover_state, &message, mask, &ood_points);
 
         // Step 4: in-domain queries — Construction 9.7 Step 4, p.55
-        let source_evaluations = self.source.open(prover_state, &[&witness]);
-        // Source IRS matrix is no longer needed; release it before the trailing
-        // arithmetic and the caller's mask-discharge phase.
-        drop(witness);
-        let collapse_weights = eq_weights(folding_randomness);
-        let collapsed_values: Vec<M::Target> = source_evaluations
-            .matrix
-            .to_slice()
-            .chunks_exact(self.source.interleaving_depth())
-            .map(|row| mixed_dot(self.source.embedding(), &collapse_weights, row))
-            .collect();
+        let source_evaluations = self.source.open(prover_state, witnesses);
+        let collapsed_values: Vec<M::Target> = if stride == 0 {
+            Vec::new()
+        } else {
+            source_evaluations
+                .matrix
+                .to_slice()
+                .chunks_exact(stride)
+                .map(|row| mixed_dot(self.source.embedding(), slot_weights, row))
+                .collect()
+        };
 
         // Step 4.1: batching — Construction 9.7 Step 4, p.55
         let num_ood = self.out_domain_samples;
@@ -411,15 +488,25 @@ impl<M: Embedding> Config<M> {
     /// per-round mask tree containing `s` and is responsible for
     /// running `mask_proximity::verify` on that same tree before
     /// accepting the round.
-    /// Shared transcript work: receive target commitment, verify source opening,
+    /// Shared transcript work: receive target commitment, verify source openings,
     /// sample batching coefficients, update `sum`. Returns the target commitment
     /// and the parameters needed to update a covector (explicitly or implicitly).
+    ///
+    /// `commitments` and `slot_weights` together define the in-domain row
+    /// reduction:
+    ///
+    /// ```text
+    ///   collapsed[query] = Σ_i slot_weights[i] · row[query, i]
+    /// ```
+    ///
+    /// `slot_weights` must have length `commitments.len() × source.num_cols()`,
+    /// matching the layout the prover uses in `prove_virtual`.
     fn verify_inner<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
         sum: &mut M::Target,
-        folding_randomness: &[M::Target],
-        commitment: &IrsCommitment,
+        commitments: &[&IrsCommitment],
+        slot_weights: &[M::Target],
     ) -> VerificationResult<(Commitment, CovectorUpdateParams<M::Target>)>
     where
         H: DuplexSpongeInterface,
@@ -430,8 +517,6 @@ impl<M: Embedding> Config<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let collapse_weights = eq_weights(folding_randomness);
-
         let target_commitment = self.target.receive_commitment(verifier_state)?;
         self.pow.verify(verifier_state)?;
 
@@ -440,13 +525,18 @@ impl<M: Embedding> Config<M> {
         let ood_answers: Vec<M::Target> =
             verifier_state.prover_messages_vec(self.out_domain_samples)?;
 
-        let source_evaluations = self.source.verify(verifier_state, &[commitment])?;
-        let collapsed_values: Vec<M::Target> = source_evaluations
-            .matrix
-            .to_slice()
-            .chunks_exact(self.source.interleaving_depth())
-            .map(|row| mixed_dot(self.source.embedding(), &collapse_weights, row))
-            .collect();
+        let source_evaluations = self.source.verify(verifier_state, commitments)?;
+        let stride = commitments.len() * self.source.num_cols();
+        let collapsed_values: Vec<M::Target> = if stride == 0 {
+            Vec::new()
+        } else {
+            source_evaluations
+                .matrix
+                .to_slice()
+                .chunks_exact(stride)
+                .map(|row| mixed_dot(self.source.embedding(), slot_weights, row))
+                .collect()
+        };
 
         let num_ood = self.out_domain_samples;
         let num_in_domain = source_evaluations.points.len();
@@ -491,10 +581,13 @@ impl<M: Embedding> Config<M> {
         Hash: ProverMessage<[H::U]>,
     {
         verify!(1 << folding_randomness.len() == self.source.interleaving_depth());
+        verify!(self.source.num_vectors() == 1);
         assert_eq!(covector.len(), self.covector_length());
 
+        let slot_weights = eq_weights(folding_randomness);
+        debug_assert_eq!(slot_weights.len(), self.source.num_cols());
         let (target_commitment, params) =
-            self.verify_inner(verifier_state, sum, folding_randomness, commitment)?;
+            self.verify_inner(verifier_state, sum, &[commitment], &slot_weights)?;
 
         scalar_mul(covector, params.original_sl_coeff);
         self.update_covector(
@@ -530,7 +623,38 @@ impl<M: Embedding> Config<M> {
         Hash: ProverMessage<[H::U]>,
     {
         verify!(1 << folding_randomness.len() == self.source.interleaving_depth());
-        self.verify_inner(verifier_state, sum, folding_randomness, commitment)
+        verify!(self.source.num_vectors() == 1);
+        let slot_weights = eq_weights(folding_randomness);
+        debug_assert_eq!(slot_weights.len(), self.source.num_cols());
+        self.verify_inner(verifier_state, sum, &[commitment], &slot_weights)
+    }
+
+    /// Verifier mirror of [`Self::prove_virtual`]. The caller supplies the
+    /// active source commitments and a flat `slot_weights` of length
+    /// `commitments.len() × source.num_cols()` — see `prove_virtual`'s doc
+    /// for the layout convention. Does NOT update an explicit covector;
+    /// returns [`CovectorUpdateParams`] so the caller can accumulate
+    /// constraint terms implicitly.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    pub fn verify_virtual_for_implicit<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        sum: &mut M::Target,
+        commitments: &[&IrsCommitment],
+        slot_weights: &[M::Target],
+    ) -> VerificationResult<(Commitment, CovectorUpdateParams<M::Target>)>
+    where
+        H: DuplexSpongeInterface,
+        Standard: Distribution<M::Target>,
+        M::Target: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        verify!(!commitments.is_empty());
+        verify!(slot_weights.len() == commitments.len() * self.source.num_cols());
+        self.verify_inner(verifier_state, sum, commitments, slot_weights)
     }
 }
 
@@ -597,6 +721,11 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{embedding::Identity, fields, ntt, random_vector},
+        hash,
+        protocols::{
+            irs_commit::{IrsMode, IrsParams},
+            params::spec::DecodingRegime,
+        },
         transcript::{codecs::U64, DomainSeparator},
     };
 
@@ -763,7 +892,7 @@ mod tests {
         let witness = config.prove(
             &mut prover_state,
             folded_message.clone(),
-            source_witness,
+            &source_witness,
             Claim {
                 covector: &mut covector,
                 sum: &mut prover_sum,
@@ -791,6 +920,41 @@ mod tests {
         verifier_state.check_eof().unwrap();
         assert_eq!(witness.message, folded_message);
         assert_eq!(covector, verifier_covector);
+    }
+
+    #[test]
+    fn config_allows_multi_vector_source_for_virtual_api() {
+        type F = fields::Field64;
+        let source = IrsConfig::<Identity<F>>::new(IrsParams {
+            security_target: 40.0,
+            decoding_regime: DecodingRegime::Johnson,
+            hash_id: hash::BLAKE3,
+            num_vectors: 2,
+            vector_size: 8,
+            interleaving_depth: 1,
+            rate: 0.5,
+            mode: IrsMode::Standard,
+        });
+        let target = IrsConfig::<Identity<F>>::new(IrsParams {
+            security_target: 40.0,
+            decoding_regime: DecodingRegime::Johnson,
+            hash_id: hash::BLAKE3,
+            num_vectors: 1,
+            vector_size: 8,
+            interleaving_depth: 1,
+            rate: 0.5,
+            mode: IrsMode::Standard,
+        });
+
+        let cfg = Config::new(
+            source,
+            target,
+            1,
+            CodeSwitchMode::Standard,
+            proof_of_work::Config::none(),
+        );
+        assert_eq!(cfg.source.num_vectors(), 2);
+        assert_eq!(cfg.source.num_cols(), 2);
     }
 
     fn test_ior_identity_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<Identity<F>>)
@@ -837,7 +1001,7 @@ mod tests {
         let _witness = config.prove(
             &mut prover_state,
             folded_message,
-            source_witness,
+            &source_witness,
             Claim {
                 covector: &mut covector,
                 sum: &mut prover_sum,
@@ -902,7 +1066,7 @@ mod tests {
         let _witness = config.prove(
             &mut prover_state,
             tampered,
-            source_witness,
+            &source_witness,
             Claim {
                 covector: &mut covector,
                 sum: &mut prover_sum,
