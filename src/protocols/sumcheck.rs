@@ -1,6 +1,6 @@
 //! Quadratic sumcheck protocol.
 
-use std::fmt;
+use std::{any::Any, fmt};
 
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    algebra::univariate_evaluate,
+    algebra::{embedding::Embedding, lift, univariate_evaluate},
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::proof_of_work,
     transcript::{
@@ -137,23 +137,33 @@ impl<F: Field> Config<F> {
     /// Runs the quadratic sumcheck protocol as configured.
     ///
     /// It reduces a claim of the form `dot(a, b) == sum` to an exponentially
-    /// smaller claim `dot(a', b') == sum'` where `a'` is `a` folded in place
-    /// and similarly for `b`.
+    /// smaller claim `dot(a', b') == sum'`, returning the folded `a'` (with
+    /// `b` folded in place).
+    ///
+    /// `a` lives in the embedding's source field, `b` (and the transcript) in
+    /// its target field `F`; pass `&Identity::new()` when both coincide. `a`
+    /// stays in the source field until the first fold lifts it into the target
+    /// field, so the first round's polynomial and fold run as source × target
+    /// products. When the fields coincide the first fold happens in place, so
+    /// no second buffer is held alongside `a`. The transcript is bit-identical
+    /// to lifting `a` up front (the embedding is a ring homomorphism).
     ///
     /// This function:
     /// - Samples random values to progressively reduce the polynomial.
     /// - Applies proof-of-work grinding if required.
     /// - Returns the sampled folding randomness values used in each reduction step.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn prove<H, R>(
+    pub fn prove<M, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        a: &mut Buffer<F>,
+        embedding: &M,
+        a: Buffer<M::Source>,
         b: &mut Buffer<F>,
         sum: &mut F,
         masks: &[F],
-    ) -> SumcheckOpening<F>
+    ) -> (Buffer<F>, SumcheckOpening<F>)
     where
+        M: Embedding<Target = F>,
         H: DuplexSpongeInterface,
         R: CryptoRng + RngCore,
         F: Codec<[H::U]>,
@@ -165,24 +175,52 @@ impl<F: Field> Config<F> {
         );
         assert_eq!(a.len(), self.initial_size);
         assert_eq!(b.len(), self.initial_size);
-        debug_assert_eq!(a.dot(b), *sum);
+        debug_assert_eq!(a.mixed_dot(embedding, b), *sum);
         assert_eq!(masks.len(), self.num_rounds * self.mask_length());
         let half = F::from(2).inverse().unwrap();
         let polynomial_len = self.mask_length().max(3);
+
+        // First fold: `a` crosses from the source to the target field. When
+        // the fields coincide (`Identity`) fold in place; only a genuine
+        // base → ext crossing allocates the target buffer while the source
+        // one is still alive.
+        let first_fold = |a: Buffer<M::Source>, w: F| -> Buffer<F> {
+            match same_field_buffer::<M>(a) {
+                Ok(mut same_field) => {
+                    same_field.fold(w);
+                    same_field
+                }
+                Err(a) => a.mixed_fold(embedding, w),
+            }
+        };
 
         let (mut mask_sum, mask_rlc) = self.maybe_send_initial_mask_sum(prover_state, masks);
 
         let mut univariate = Vec::with_capacity(polynomial_len);
         let mut round_challenges = Vec::with_capacity(self.num_rounds);
         let mut prev_round_challenge = None;
+        // `a` remains in the source field until the first fold consumes it;
+        // `a_folded` holds the target-field buffer from then on.
+        let mut a = Some(a);
+        let mut a_folded: Option<Buffer<F>> = None;
         for (round, mask) in
             chunks_exact_or_empty(masks, self.mask_length(), self.num_rounds).enumerate()
         {
             // Fold and compute sumcheck polynomial in one pass.
-            let (c0, c2) = if let Some(w) = prev_round_challenge {
-                a.fold_pair_sumcheck_polynomial(b, w)
+            let (c0, c2) = if let Some(folded) = a_folded.as_mut() {
+                let w = prev_round_challenge.expect("folded buffer implies a prior challenge");
+                folded.fold_pair_sumcheck_polynomial(b, w)
+            } else if let Some(w) = prev_round_challenge {
+                let folded = first_fold(a.take().expect("source buffer consumed once"), w);
+                b.fold(w);
+                let coefficients = folded.sumcheck_polynomial(b);
+                a_folded = Some(folded);
+                coefficients
             } else {
-                a.sumcheck_polynomial(b)
+                let a = a
+                    .as_ref()
+                    .expect("source buffer available before the first fold");
+                a.mixed_sumcheck_polynomial(embedding, b)
             };
             let c1 = *sum - c0.double() - c2;
 
@@ -211,16 +249,35 @@ impl<F: Field> Config<F> {
             mask_sum = univariate_evaluate(&univariate, r) - mask_rlc * *sum;
             prev_round_challenge = Some(r);
         }
-        if let Some(w) = prev_round_challenge {
-            // Final fold of the inputs (no polynomial computation).
-            a.fold_pair(b, w);
-        }
+        // Final fold of the inputs (no polynomial computation).
+        let a_folded = match (a_folded, prev_round_challenge) {
+            (Some(mut folded), Some(w)) => {
+                folded.fold_pair(b, w);
+                folded
+            }
+            (None, Some(w)) => {
+                // Single-round case: the only fold is the source → target one.
+                let folded = first_fold(a.take().expect("source buffer consumed once"), w);
+                b.fold(w);
+                folded
+            }
+            // No rounds: nothing folds, but the caller still expects a
+            // target-field buffer. Cold path; a plain lift is fine.
+            (None, None) => {
+                let a = a.take().expect("source buffer consumed once");
+                Buffer::from(lift(embedding, a.to_slice()))
+            }
+            (Some(_), None) => unreachable!("folded buffer implies a prior challenge"),
+        };
 
         *sum = mask_sum + mask_rlc * *sum;
-        SumcheckOpening {
-            round_challenges,
-            mask_rlc,
-        }
+        (
+            a_folded,
+            SumcheckOpening {
+                round_challenges,
+                mask_rlc,
+            },
+        )
     }
 
     fn maybe_send_initial_mask_sum<H, R>(
@@ -342,6 +399,18 @@ impl<F: Field> fmt::Display for Config<F> {
 }
 
 // Evaluated a univariate as p(0) + p(1)
+/// If the embedding's source and target fields coincide (e.g. `Identity`),
+/// recover the source buffer as a target-field buffer without copying;
+/// otherwise hand the buffer back.
+fn same_field_buffer<M: Embedding>(
+    a: Buffer<M::Source>,
+) -> Result<Buffer<M::Target>, Buffer<M::Source>> {
+    match (Box::new(a) as Box<dyn Any>).downcast::<Buffer<M::Target>>() {
+        Ok(same_field) => Ok(*same_field),
+        Err(a) => Err(*a.downcast::<Buffer<M::Source>>().expect("roundtrip")),
+    }
+}
+
 fn eval_01<F: Field>(coefficients: &[F]) -> F {
     if coefficients.is_empty() {
         return F::ZERO;
@@ -364,6 +433,7 @@ mod tests {
     use crate::{
         algebra::{
             dot,
+            embedding::Identity,
             fields::{self, Field64},
             multilinear_extend, random_vector,
         },
@@ -415,16 +485,20 @@ mod tests {
         let masks = random_vector(&mut rng, config.mask_length() * config.num_rounds);
 
         // Prover
-        let mut vector = Buffer::from(initial_vector.as_slice());
+        let vector = Buffer::from(initial_vector.as_slice());
         let mut covector = Buffer::from(initial_covector.as_slice());
         let mut sum = initial_sum;
         let mut prover_state = ProverState::new_std(&ds);
-        let SumcheckOpening {
-            round_challenges: point,
-            mask_rlc,
-        } = config.prove(
+        let (
+            vector,
+            SumcheckOpening {
+                round_challenges: point,
+                mask_rlc,
+            },
+        ) = config.prove(
             &mut prover_state,
-            &mut vector,
+            &Identity::new(),
+            vector,
             &mut covector,
             &mut sum,
             &masks,
@@ -483,6 +557,63 @@ mod tests {
         crate::tests::init();
         proptest!(|(seed: u64, config in Config::arbitrary())| {
             test_config(seed, &config);
+        });
+    }
+
+    /// The delayed lift's core claim: proving with a source-field `a` through
+    /// a real embedding is byte-identical (proof and outputs) to lifting `a`
+    /// up front and proving through `Identity`.
+    #[test]
+    fn mixed_prove_matches_lifted_transcript() {
+        use crate::algebra::{embedding::Basefield, fields::Field64_3, lift};
+        crate::tests::init();
+        let embedding = Basefield::<Field64_3>::new();
+        proptest!(|(seed: u64, config in Config::<Field64_3>::arbitrary())| {
+            let instance = U64(seed);
+            let ds = DomainSeparator::protocol(&config)
+                .session(&format!("Mixed vs lifted at {}:{}", file!(), line!()))
+                .instance(&instance);
+            let mut rng = StdRng::seed_from_u64(seed);
+            let a_source: Vec<Field64> = random_vector(&mut rng, config.initial_size);
+            let covector: Vec<Field64_3> = random_vector(&mut rng, config.initial_size);
+            let masks: Vec<Field64_3> =
+                random_vector(&mut rng, config.mask_length() * config.num_rounds);
+            let a_lifted = lift(&embedding, &a_source);
+            let initial_sum = dot(&a_lifted, &covector);
+
+            let run = |mixed: bool| {
+                let mut b = Buffer::from(covector.as_slice());
+                let mut sum = initial_sum;
+                let mut prover_state = ProverState::new_std(&ds);
+                let (folded, opening) = if mixed {
+                    config.prove(
+                        &mut prover_state,
+                        &embedding,
+                        Buffer::from(a_source.as_slice()),
+                        &mut b,
+                        &mut sum,
+                        &masks,
+                    )
+                } else {
+                    config.prove(
+                        &mut prover_state,
+                        &Identity::new(),
+                        Buffer::from(a_lifted.as_slice()),
+                        &mut b,
+                        &mut sum,
+                        &masks,
+                    )
+                };
+                (
+                    prover_state.proof(),
+                    folded.into_vec(),
+                    b.into_vec(),
+                    sum,
+                    opening.round_challenges,
+                    opening.mask_rlc,
+                )
+            };
+            assert_eq!(run(true), run(false));
         });
     }
 

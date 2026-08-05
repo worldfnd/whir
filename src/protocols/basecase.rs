@@ -132,10 +132,15 @@ impl<F: Field> Config<F> {
             .map_or_else(|| vec![witness], |b| vec![b, witness]);
         let _ = self.commit.open(prover_state, &witnesses);
 
-        let point = self
-            .sumcheck
-            .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
-            .round_challenges;
+        let (vector, opening) = self.sumcheck.prove(
+            prover_state,
+            &Identity::new(),
+            vector,
+            &mut covector,
+            &mut sum,
+            &[],
+        );
+        let point = opening.round_challenges;
 
         // Negligible event over a challenge-sized field; without it the verifier
         // cannot derive `l(r) = sum / vector_mle(r)`.

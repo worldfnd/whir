@@ -2,6 +2,8 @@
 
 use std::ops::Deref;
 
+use serde::{Deserialize, Serialize};
+
 use crate::bits::Bits;
 
 /// A sub-protocol config paired with the analytic-error floor the params
@@ -12,7 +14,7 @@ use crate::bits::Bits;
 /// config. Drift checks in
 /// [`super::protocol_config::ProtocolConfig::validate`] compare the recorded
 /// floor against a fresh recompute.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Solved<C> {
     config: C,
     analytic: Bits,

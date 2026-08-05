@@ -154,6 +154,16 @@ pub enum DeriveError {
         recorded: Bits,
         recompute: Bits,
     },
+
+    /// `RateSchedule::Adaptive` could not find any per-slot-feasible rate
+    /// schedule under the current spec. The pareto search exhausted its
+    /// candidates without any surviving the per-round PoW budget check.
+    #[error(
+        "adaptive rate planner found no feasible schedule under pow_budget; \
+         raise pow_budget, lower target_security_bits, or use \
+         RateSchedule::Capped/Stepping with a manual cap"
+    )]
+    AdaptiveNoFeasibleSchedule,
 }
 
 impl From<CodewordLengthError> for DeriveError {

@@ -4,6 +4,7 @@ use std::{any::Any, mem};
 
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
+use zeroize::Zeroize;
 
 use crate::{
     algebra::{
@@ -54,6 +55,10 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
         &self.data
     }
 
+    fn into_vec(self) -> Vec<T> {
+        self.data
+    }
+
     fn len(&self) -> usize {
         self.data.len()
     }
@@ -79,6 +84,13 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
         data.extend_from_slice(&self.data);
         data.extend_from_slice(&other.data);
         Self { data }
+    }
+
+    fn wipe(&mut self)
+    where
+        T: Zeroize,
+    {
+        self.data.zeroize();
     }
 }
 
@@ -230,6 +242,28 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         other: &CpuBuffer<M::Target>,
     ) -> M::Target {
         crate::algebra::mixed_dot(embedding, &other.data, &self.data)
+    }
+
+    fn mixed_sumcheck_polynomial<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        other: &CpuBuffer<M::Target>,
+    ) -> (M::Target, M::Target) {
+        crate::algebra::sumcheck::mixed_compute_sumcheck_polynomial(
+            embedding,
+            &self.data,
+            &other.data,
+        )
+    }
+
+    fn mixed_fold<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        weight: M::Target,
+    ) -> CpuBuffer<M::Target> {
+        CpuBuffer {
+            data: crate::algebra::sumcheck::mixed_fold(embedding, &self.data, weight),
+        }
     }
 
     fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(

@@ -38,7 +38,7 @@ use crate::{
         VerifierMessage, VerifierState,
     },
     type_info::Typed,
-    utils::zip_strict,
+    utils::{chunks_exact_or_empty, zip_strict},
 };
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
@@ -180,16 +180,37 @@ impl<M: Embedding> Config<M> {
         } = params;
         assert!(vector_size.is_multiple_of(interleaving_depth));
         assert!(rate > 0. && rate <= 1.);
-        let masked_message_length = vector_size / interleaving_depth + mode.mask_length();
-        // `interleaved_encode` requires `codeword_length` to divide the NTT root
-        // order. `masked_message_length` is allowed to be arbitrary (the coset
-        // NTT zero-extends internally), so we only round the codeword side here.
+        let message_length = vector_size / interleaving_depth;
+        let masked_message_length = message_length + mode.mask_length();
+        // `interleaved_encode` requires `codeword_length` to divide the NTT
+        // root order. `masked_message_length` is allowed to be arbitrary (the
+        // coset NTT zero-extends internally), so we only round the codeword
+        // side here. Use the unmasked codeword when it (a) fits the masked
+        // message and (b) keeps effective rate within 20% of the requested
+        // rate. This avoids a `next_order` jump caused by the small IRS
+        // randomness mask pushing the masked length past an NTT-smooth
+        // boundary (e.g. avoids 524288 → 589824, a 12.5% jump on a
+        // 2^17-message commit). When the mask is large enough that the
+        // effective rate would exceed 1.2 × requested (tail rounds at very low
+        // rates), fall back to sizing the codeword from the masked length.
         #[allow(clippy::cast_sign_loss)]
-        let raw_codeword_length = (masked_message_length as f64 / rate).ceil() as usize;
-        let codeword_length =
-            ntt::next_order::<M::Source>(raw_codeword_length).ok_or(CodewordLengthError {
-                length: raw_codeword_length,
-            })?;
+        let codeword_length = {
+            let unmasked_target = (message_length as f64 / rate).ceil() as usize;
+            let unmasked =
+                ntt::next_order::<M::Source>(unmasked_target).ok_or(CodewordLengthError {
+                    length: unmasked_target,
+                })?;
+            let fits_masked = unmasked >= masked_message_length;
+            let effective_rate = masked_message_length as f64 / unmasked as f64;
+            if fits_masked && effective_rate <= 1.2 * rate {
+                unmasked
+            } else {
+                let masked_target = (masked_message_length as f64 / rate).ceil() as usize;
+                ntt::next_order::<M::Source>(masked_target).ok_or(CodewordLengthError {
+                    length: masked_target,
+                })?
+            }
+        };
         let rate = masked_message_length as f64 / codeword_length as f64;
 
         let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
@@ -355,12 +376,35 @@ impl<M: Embedding> Config<M> {
         assert_eq!(vectors.len(), self.num_vectors);
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
-        let masks = Buffer::<M::Source>::random(
-            prover_state.rng(),
-            self.mask_length() * self.num_messages(),
-        );
-        let messages = ntt::Messages::new(vectors, self.message_length(), self.interleaving_depth);
-        let matrix = ntt::interleaved_rs_encode(messages, &masks, self.codeword_length);
+        // Sample masks in whir's canonical per-polynomial-contiguous layout:
+        // `masks[i * mask_length + c]` is polynomial `i`'s coefficient at
+        // column `c`. Downstream sites (mask_proximity discharge, code_switch
+        // fold) read masks back via this layout.
+        let mask_length = self.mask_length();
+        let num_polys = self.num_messages();
+        let masks = Buffer::<M::Source>::random(prover_state.rng(), mask_length * num_polys);
+
+        // Engine takes unified polynomial slices (message || mask); the
+        // message/mask split is an IRS-side concept, not part of the NTT API.
+        let message_length = self.message_length();
+        let poly_length = message_length + mask_length;
+        let masks_slice = masks.to_slice();
+        let mut poly_buf = Vec::with_capacity(num_polys * poly_length);
+        let mut poly_idx = 0;
+        for vector in vectors {
+            for message in
+                chunks_exact_or_empty(vector.to_slice(), message_length, self.interleaving_depth)
+            {
+                poly_buf.extend_from_slice(message);
+                poly_buf.extend_from_slice(
+                    &masks_slice[poly_idx * mask_length..(poly_idx + 1) * mask_length],
+                );
+                poly_idx += 1;
+            }
+        }
+        debug_assert_eq!(poly_idx, num_polys);
+        let polys: Vec<&[M::Source]> = poly_buf.chunks_exact(poly_length).collect();
+        let matrix = ntt::interleaved_rs_encode(&polys, self.codeword_length);
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);

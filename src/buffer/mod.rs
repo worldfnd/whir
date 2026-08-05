@@ -36,6 +36,14 @@ pub type DefaultRs<T> = crate::algebra::ntt::NttEngine<T>;
 pub trait BufferOps<T: Copy> {
     /// Read back the buffer contents as a host slice.
     fn to_slice(&self) -> &[T];
+    /// Consume the buffer and return its contents as an owned host `Vec`.
+    ///
+    /// The dual of the `From<Vec<T>>` constructor: on the CPU backend this is a
+    /// zero-copy move of the backing storage; an accelerator backend would copy
+    /// device memory back to the host once.
+    fn into_vec(self) -> Vec<T>
+    where
+        Self: Sized;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -49,6 +57,15 @@ pub trait BufferOps<T: Copy> {
     /// `self.len() + other.len()`.
     #[must_use]
     fn concat(&self, other: &Self) -> Self;
+
+    /// Best-effort in-place zeroization of the buffer's contents.
+    ///
+    /// Used to scrub secret material (blinding masks, witness randomness)
+    /// before the buffer is dropped. On the CPU backend this zeroizes the
+    /// backing storage; accelerator backends would override with a device wipe.
+    fn wipe(&mut self)
+    where
+        T: zeroize::Zeroize;
 }
 
 /// Field operations on owned buffers.
@@ -156,6 +173,29 @@ pub trait BufferMath<F: Field>: Clone {
         embedding: &M,
         other: &Self::TargetBuffer<M::Target>,
     ) -> M::Target;
+
+    /// Sumcheck round coefficients `(c0, c2)` for the mixed inner product of
+    /// source-field `self` against a target-field covector.
+    ///
+    /// Embedding-aware [`Self::sumcheck_polynomial`]: same result as lifting
+    /// `self` first, without materializing the lift.
+    fn mixed_sumcheck_polynomial<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        other: &Self::TargetBuffer<M::Target>,
+    ) -> (M::Target, M::Target);
+
+    /// Fold source-field `self` at a target-field weight, lifting the result
+    /// into the target field.
+    ///
+    /// Embedding-aware [`Self::fold`]: same result as lifting `self` first,
+    /// without materializing the lift.
+    #[must_use]
+    fn mixed_fold<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        weight: M::Target,
+    ) -> Self::TargetBuffer<M::Target>;
 
     /// `accumulator += weight * self`, lifted into the target field.
     fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(

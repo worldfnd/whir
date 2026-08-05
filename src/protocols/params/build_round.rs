@@ -51,13 +51,11 @@ pub(super) fn build_round_config<M: Embedding + Default>(
             zk_spec,
             c_zk_log_inv_rate,
         }) => {
-            let num_masks =
-                sumcheck_params::masks_required(&ctx) + code_switch_params::masks_required();
             let mask_oracle = build_mask_oracle::<M>(
                 zk_spec,
+                &ctx,
                 &source,
                 t_ood,
-                num_masks,
                 c_zk_log_inv_rate,
                 shape.round_index,
             )?;
@@ -101,11 +99,13 @@ fn solve_round_source<M: Embedding + Default>(
     ood_mode: OodMode,
 ) -> Result<(IrsConfig<M>, usize), DeriveError> {
     let src_ctx = round_context(shape);
-    let target_log_inv_rate = f64::from(
-        shape
-            .source_log_inv_rate
-            .saturating_add(shape.source_folding_factor.saturating_sub(1)),
-    );
+    // Use the rate the layout planner picked for this round's target IRS —
+    // `RateSchedule::{Capped, Adaptive}` may deviate from the unbounded
+    // `Stepping` formula (`source + folding − 1`). Recomputing inline here
+    // would silently disagree with `target_context`'s view, and the t_ood
+    // search would solve for a different target list size than the IRS the
+    // round actually builds.
+    let target_log_inv_rate = f64::from(shape.target_log_inv_rate);
     let target_log_degree = f64::from(
         shape
             .source_vector_size
@@ -124,38 +124,62 @@ fn solve_round_source<M: Embedding + Default>(
     )
 }
 
-/// ZK-only: assemble the per-round mask oracle (C_zk codeword + mask-proximity
-/// check).
-fn build_mask_oracle<M: Embedding>(
+/// ZK-only: assemble the per-round mask oracle, splitting masks across a
+/// `sumcheck_masks` tree (committed BEFORE sumcheck) and a `cs_mask` tree
+/// (committed AFTER sumcheck). Both trees use the same C_zk code rate.
+pub(super) fn build_mask_oracle<M: Embedding>(
     zk_spec: ZkSpec<'_>,
+    ctx: &RoundContext,
     source: &IrsConfig<M>,
     t_ood: usize,
-    num_masks: usize,
     c_zk_log_inv_rate: LogInvRate,
     round_index: usize,
 ) -> Result<MaskOracleConfig<M::Target>, DeriveError> {
     let spec = zk_spec.as_inner();
+    let k = sumcheck_params::masks_required(ctx);
+    let cs_masks = code_switch_params::masks_required();
     let l_zk = compute_l_zk(source, t_ood);
-    let c_zk: IrsConfig<Identity<M::Target>> = irs_params::solve_mask_code(
+
+    // Sumcheck-masks tree: tiny vector size (next_pow2(3) = 4), no padding to ℓ_zk.
+    let sumcheck_mask_vec_size =
+        MaskCodeMessageLen::new(sumcheck_params::zk_mask_length().get().next_power_of_two());
+    let sumcheck_c_zk: IrsConfig<Identity<M::Target>> = irs_params::solve_mask_code(
+        zk_spec,
+        sumcheck_mask_vec_size,
+        0,
+        c_zk_log_inv_rate,
+        MaskProximityConfig::<M::Target>::num_vectors_for(k),
+    )?;
+
+    // cs_mask tree: vector_size = ℓ_zk, holds the `(r ‖ s)` mask.
+    let cs_c_zk: IrsConfig<Identity<M::Target>> = irs_params::solve_mask_code(
         zk_spec,
         l_zk,
         source.mask_length(),
         c_zk_log_inv_rate,
-        MaskProximityConfig::<M::Target>::num_vectors_for(num_masks),
+        MaskProximityConfig::<M::Target>::num_vectors_for(cs_masks),
     )?;
+
     let c_zk_list_size_estimate = spec.decoding_regime.list_size_estimate(
         (l_zk.get() as f64).log2(),
         f64::from(c_zk_log_inv_rate.get()),
     );
     debug_assert!(
-        (c_zk.list_size() - c_zk_list_size_estimate).abs()
+        (cs_c_zk.list_size() - c_zk_list_size_estimate).abs()
             < 1e-9 * c_zk_list_size_estimate.max(1.0),
-        "c_zk.list_size() {} drifted from planner estimate {}",
-        c_zk.list_size(),
+        "cs_c_zk.list_size() {} drifted from planner estimate {}",
+        cs_c_zk.list_size(),
         c_zk_list_size_estimate,
     );
-    let mask_proximity = mask_proximity_params::solve(spec, c_zk.clone(), num_masks, round_index)?;
-    Ok(MaskOracleConfig::new(c_zk, l_zk, mask_proximity))
+
+    let sumcheck_masks = mask_proximity_params::solve(spec, sumcheck_c_zk, k, round_index)?;
+    let cs_mask = mask_proximity_params::solve(spec, cs_c_zk, cs_masks, round_index)?;
+    Ok(MaskOracleConfig::new(
+        sumcheck_masks,
+        cs_mask,
+        l_zk,
+        OodSampleBudget::new(t_ood),
+    ))
 }
 
 /// `ℓ_zk = next_pow2(r + t_ood)` (Theorem 9.6 + Lemma 9.3).

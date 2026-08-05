@@ -150,16 +150,35 @@ impl<M: Embedding> Config<M> {
         Ok(Commitment { irs, out_of_domain })
     }
 
-    /// Disable proof-of-work for test.
+    /// Disable proof-of-work for test. Sets every per-slot threshold to
+    /// `u64::MAX` so any nonce passes immediately.
+    ///
+    /// Note: `sumcheck::Config::round_pow` returns by value (Config is Copy),
+    /// so mutating through the getter would silently no-op. Sumcheck slots
+    /// are reset via the dedicated `override_round_pow_for_test` helper;
+    /// PoW fields with pub access (`initial_skip_pow`, round/final `pow`)
+    /// are reset directly.
     #[cfg(test)]
     pub(crate) fn disable_pow(&mut self) {
-        self.initial_sumcheck.round_pow().threshold = u64::MAX;
+        let off = proof_of_work::Config {
+            hash_id: self.initial_sumcheck.round_pow().hash_id,
+            threshold: u64::MAX,
+        };
+        self.initial_sumcheck.override_round_pow_for_test(off);
         self.initial_skip_pow.threshold = u64::MAX;
         for round in &mut self.round_configs {
-            round.sumcheck.round_pow().threshold = u64::MAX;
+            let off = proof_of_work::Config {
+                hash_id: round.sumcheck.round_pow().hash_id,
+                threshold: u64::MAX,
+            };
+            round.sumcheck.override_round_pow_for_test(off);
             round.pow.threshold = u64::MAX;
         }
-        self.final_sumcheck.round_pow().threshold = u64::MAX;
+        let off = proof_of_work::Config {
+            hash_id: self.final_sumcheck.round_pow().hash_id,
+            threshold: u64::MAX,
+        };
+        self.final_sumcheck.override_round_pow_for_test(off);
         self.final_pow.threshold = u64::MAX;
     }
 }
