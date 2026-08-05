@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use ark_std::rand::distributions::{Distribution, Standard};
 use divan::{black_box, AllocProfiler, Bencher};
 use spongefish::Codec;
@@ -9,10 +7,10 @@ use whir::{
         fields::Field64_3,
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
     },
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::{Buffer, BufferOps},
     cmdline_utils::AvailableHash::Blake3,
     parameters::ProtocolParameters,
-    protocols::whir::Config,
+    protocols::{params::DecodingRegime, whir::Config},
     transcript::{codecs::Empty, DomainSeparator, ProverState},
 };
 
@@ -25,7 +23,7 @@ const PROTOCOL_PARAMS: ProtocolParameters = ProtocolParameters {
     pow_bits: 20,
     initial_folding_factor: 4,
     folding_factor: 4,
-    unique_decoding: false,
+    decoding_regime: DecodingRegime::Johnson,
     starting_log_inv_rate: 1,
     batch_size: 1,
     hash_id: Blake3.hash_id(),
@@ -42,10 +40,10 @@ fn whir_ldt(bencher: Bencher, size: u64) {
             let vector = (0..size)
                 .map(<WhirEmbedding as Embedding>::Source::from)
                 .collect::<Vec<_>>();
-            ActiveBuffer::from_slice(&vector)
+            Buffer::from(vector)
         })
         .bench_values(|input| {
-            run_whir::<WhirEmbedding>(&input, vec![], Cow::Borrowed(&[]));
+            run_whir::<WhirEmbedding>(&input, vec![], Buffer::from(Vec::new()));
         });
 }
 
@@ -58,7 +56,6 @@ fn whir_pcs(bencher: Bencher, size: u64) {
             let vector = (0..size)
                 .map(<WhirEmbedding as Embedding>::Source::from)
                 .collect::<Vec<_>>();
-            let input = ActiveBuffer::from_slice(&vector);
             let points: Vec<_> = (0..2u64)
                 .map(|i| vec![Target::from(i); num_variables])
                 .collect();
@@ -74,17 +71,18 @@ fn whir_pcs(bencher: Bencher, size: u64) {
                 })
                 .collect();
 
+            let input = Buffer::from(vector);
             (input, linear_forms, evaluations)
         })
         .bench_values(|(input, linear_forms, evaluations)| {
-            run_whir::<WhirEmbedding>(&input, linear_forms, Cow::Borrowed(&evaluations));
+            run_whir::<WhirEmbedding>(&input, linear_forms, Buffer::from(evaluations));
         });
 }
 
 fn run_whir<M: Embedding + Default>(
-    input: &ActiveBuffer<M::Source>,
+    input: &Buffer<M::Source>,
     linear_forms: Vec<Box<dyn LinearForm<M::Target>>>,
-    evaluations: Cow<'_, [M::Target]>,
+    evaluations: Buffer<M::Target>,
 ) where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     M::Target: Codec,

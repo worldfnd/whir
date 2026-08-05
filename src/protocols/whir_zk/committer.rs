@@ -7,9 +7,10 @@ use tracing::instrument;
 
 use super::{utils::BlindingPolynomials, Config};
 use crate::{
-    buffer::{ActiveBuffer, BufferOps},
+    algebra::embedding::Identity,
+    buffer::{Buffer, BufferOps},
     hash::Hash,
-    protocols::{irs_commit, whir},
+    protocols::whir,
     transcript::{
         Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,
     },
@@ -29,10 +30,10 @@ pub struct Commitment<F: Field> {
 #[derive(Clone, Debug)]
 pub struct Witness<F: Field> {
     pub f_hat_vectors: Vec<Vec<F>>,
-    pub f_hat_witnesses: Vec<irs_commit::Witness<F, F>>,
+    pub f_hat_witnesses: Vec<whir::Witness<F, Identity<F>>>,
     pub blinding_polynomials: Vec<BlindingPolynomials<F>>,
     pub blinding_vectors: Vec<Vec<F>>,
-    pub blinding_witness: irs_commit::Witness<F, F>,
+    pub blinding_witness: whir::Witness<F, Identity<F>>,
 }
 
 impl<F: Field> Config<F> {
@@ -46,7 +47,7 @@ impl<F: Field> Config<F> {
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        polynomials: &[&ActiveBuffer<F>],
+        polynomials: &[&Buffer<F>],
     ) -> Witness<F>
     where
         Standard: Distribution<F>,
@@ -56,7 +57,8 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(
-            self.blinded_commitment.initial_committer.num_vectors, 1,
+            self.blinded_commitment.initial_committer.num_vectors(),
+            1,
             "zkWHIR currently expects one vector per commitment"
         );
 
@@ -90,7 +92,7 @@ impl<F: Field> Config<F> {
                 .zip(mask.iter().cycle())
                 .map(|(&coeff, &m)| coeff + m)
                 .collect::<Vec<_>>();
-            let f_hat_buffer = ActiveBuffer::from_slice(&f_hat_vec);
+            let f_hat_buffer = Buffer::from(f_hat_vec.as_slice());
             let witness = self
                 .blinded_commitment
                 .commit(prover_state, &[&f_hat_buffer]);
@@ -99,7 +101,7 @@ impl<F: Field> Config<F> {
             blinding_polynomials.push(blinding);
         }
 
-        let blinding_num_vectors = self.blinding_commitment.initial_committer.num_vectors;
+        let blinding_num_vectors = self.blinding_commitment.initial_committer.num_vectors();
         assert_eq!(
             blinding_num_vectors,
             polynomials.len() * (num_witness_variables + 1),
@@ -117,7 +119,7 @@ impl<F: Field> Config<F> {
         }
         let blinding_buffers = blinding_vectors
             .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
+            .map(|v| Buffer::from(v.as_slice()))
             .collect::<Vec<_>>();
         let blinding_vector_refs = blinding_buffers.iter().collect::<Vec<_>>();
         let blinding_witness = self

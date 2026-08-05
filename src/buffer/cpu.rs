@@ -4,17 +4,18 @@ use std::{any::Any, mem};
 
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
+use zeroize::Zeroize;
 
 use crate::{
     algebra::{
         embedding::Embedding,
         linear_form::{Covector, LinearForm, UnivariateEvaluation},
     },
-    buffer::{Buffer, BufferOps},
+    buffer::{BufferMath, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
     protocols::{
-        matrix_commit::{hash_rows, Encodable},
+        matrix_commit::{hash_rows, Encodable, Merklize},
         merkle_tree,
     },
 };
@@ -35,21 +36,27 @@ pub struct CpuBuffer<T> {
     data: Vec<T>,
 }
 
-impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
-    type Nodes = CpuBuffer<Hash>;
-
-    fn from_vec(source: Vec<T>) -> Self {
+impl<T> From<Vec<T>> for CpuBuffer<T> {
+    fn from(source: Vec<T>) -> Self {
         Self { data: source }
     }
+}
 
-    fn from_slice(source: &[T]) -> Self {
+impl<T: Clone> From<&[T]> for CpuBuffer<T> {
+    fn from(source: &[T]) -> Self {
         Self {
             data: source.to_vec(),
         }
     }
+}
 
+impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
     fn to_slice(&self) -> &[T] {
         &self.data
+    }
+
+    fn into_vec(self) -> Vec<T> {
+        self.data
     }
 
     fn len(&self) -> usize {
@@ -68,15 +75,27 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
         indices.iter().map(|&i| self.data[i]).collect()
     }
 
+    fn get(&self, index: usize) -> Option<&T> {
+        self.data.get(index)
+    }
+
+    fn wipe(&mut self)
+    where
+        T: Zeroize,
+    {
+        self.data.zeroize();
+    }
+}
+
+impl<T: Encodable + Copy + Send + Sync> Merklize<T> for CpuBuffer<T> {
+    type Nodes = CpuBuffer<Hash>;
+
     fn merklize(
         &self,
         num_cols: usize,
         leaf_hash: EngineId,
         merkle: &merkle_tree::Config,
-    ) -> (Self::Nodes, Hash)
-    where
-        T: Encodable + Send + Sync,
-    {
+    ) -> (Self::Nodes, Hash) {
         assert_eq!(self.len(), num_cols * merkle.num_leaves);
         let engine = hash::ENGINES
             .retrieve(leaf_hash)
@@ -92,12 +111,18 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
     }
 }
 
-impl<F: Field> Buffer<F> for CpuBuffer<F> {
+impl<F: Field> BufferMath<F> for CpuBuffer<F> {
     type TargetBuffer<T: Field> = CpuBuffer<T>;
 
     fn zeros(length: usize) -> Self {
         Self {
             data: vec![F::ZERO; length],
+        }
+    }
+
+    fn ones(length: usize) -> Self {
+        Self {
+            data: vec![F::ONE; length],
         }
     }
 
@@ -113,6 +138,59 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
 
     fn dot(&self, other: &Self) -> F {
         crate::algebra::dot(&self.data, &other.data)
+    }
+
+    fn bilinear_form(&self, rows: &Self, cols: &Self) -> F {
+        let expected = rows
+            .data
+            .len()
+            .checked_mul(cols.data.len())
+            .expect("matrix dimensions overflow");
+        assert_eq!(self.data.len(), expected, "matrix dimensions mismatch");
+        if cols.data.is_empty() {
+            return F::ZERO;
+        }
+        crate::utils::zip_strict(&rows.data, self.data.chunks_exact(cols.len()))
+            .map(|(r, row)| *r * crate::algebra::dot(&cols.data, row))
+            .sum()
+    }
+
+    fn tensor_product(&self, other: &Self) -> Self {
+        Self {
+            data: crate::algebra::tensor_product(&self.data, &other.data),
+        }
+    }
+
+    fn mat_vec(&self, vector: &Self) -> Self {
+        assert!(
+            !vector.data.is_empty(),
+            "matrix-vector product requires a non-empty vector"
+        );
+        assert_eq!(
+            self.data.len() % vector.data.len(),
+            0,
+            "matrix-vector dimensions mismatch"
+        );
+        Self {
+            data: self
+                .data
+                .chunks_exact(vector.data.len())
+                .map(|row| crate::algebra::dot(&vector.data, row))
+                .collect(),
+        }
+    }
+
+    fn concat(&self, other: &Self) -> Self {
+        let mut data = Vec::with_capacity(self.data.len() + other.data.len());
+        data.extend_from_slice(&self.data);
+        data.extend_from_slice(&other.data);
+        Self { data }
+    }
+
+    fn eq_weights(point: &[F]) -> Self {
+        Self {
+            data: crate::algebra::eq_weights(point),
+        }
     }
 
     fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
@@ -138,12 +216,16 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
     fn accumulate_univariate_evaluations(
         &mut self,
         evaluators: &[UnivariateEvaluation<F>],
-        scalars: &[F],
+        scalars: &Self,
     ) {
         let Some(size) = evaluators.first().map(|e| e.size) else {
             return;
         };
-        UnivariateEvaluation::accumulate_many(evaluators, &mut self.data[..size], scalars);
+        UnivariateEvaluation::accumulate_many(
+            evaluators,
+            &mut self.data[..size],
+            scalars.to_slice(),
+        );
     }
 
     fn mixed_univariate_evaluate<M: Embedding<Source = F>>(
@@ -162,6 +244,28 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
         crate::algebra::mixed_dot(embedding, &other.data, &self.data)
     }
 
+    fn mixed_sumcheck_polynomial<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        other: &CpuBuffer<M::Target>,
+    ) -> (M::Target, M::Target) {
+        crate::algebra::sumcheck::mixed_compute_sumcheck_polynomial(
+            embedding,
+            &self.data,
+            &other.data,
+        )
+    }
+
+    fn mixed_fold<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        weight: M::Target,
+    ) -> CpuBuffer<M::Target> {
+        CpuBuffer {
+            data: crate::algebra::sumcheck::mixed_fold(embedding, &self.data, weight),
+        }
+    }
+
     fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
         &self,
         embedding: &M,
@@ -171,12 +275,19 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
         crate::algebra::mixed_scalar_mul_add(embedding, &mut accumulator.data, weight, &self.data);
     }
 
+    fn geometric_challenge<G: Field>(current: G, base: G, length: usize) -> CpuBuffer<G> {
+        CpuBuffer {
+            data: crate::algebra::geometric_sequence(current, base, length),
+        }
+    }
+
     fn linear_forms_rlc(
         size: usize,
         linear_forms: &mut [Box<dyn LinearForm<F>>],
-        rlc_coeffs: &[F],
+        rlc_coeffs: &Self,
     ) -> Self {
         assert_eq!(linear_forms.len(), rlc_coeffs.len());
+        let rlc_coeffs = rlc_coeffs.to_slice();
         let mut covector = vec![F::ZERO; size];
         if let Some((first, linear_forms)) = linear_forms.split_first_mut() {
             debug_assert_eq!(rlc_coeffs[0], F::ONE);
@@ -197,8 +308,9 @@ impl<F: Field> Buffer<F> for CpuBuffer<F> {
     fn mixed_linear_combination<M: Embedding<Source = F>>(
         embedding: &M,
         vectors: &[&Self],
-        coeffs: &[M::Target],
+        coeffs: &Self::TargetBuffer<M::Target>,
     ) -> CpuBuffer<M::Target> {
+        let coeffs = coeffs.to_slice();
         assert_eq!(vectors.len(), coeffs.len());
         let Some((first, vectors)) = vectors.split_first() else {
             return CpuBuffer { data: Vec::new() };
@@ -225,7 +337,7 @@ mod tests {
     fn scalar_mul_multiplies_in_place() {
         let values = vec![F::from(1u64), F::from(2u64), F::from(3u64), F::from(4u64)];
         let weight = F::from(5u64);
-        let mut buffer = CpuBuffer::from_vec(values.clone());
+        let mut buffer = CpuBuffer::from(values.clone());
         buffer.scalar_mul(weight);
         let expected: Vec<F> = values.iter().map(|&v| v * weight).collect();
         assert_eq!(buffer.to_slice(), expected.as_slice());
@@ -239,12 +351,13 @@ mod tests {
 
         // Full-length and prefix accumulation.
         for size in [len, 5] {
-            let mut buffer = CpuBuffer::from_vec(vec![F::ZERO; len]);
+            let mut buffer = CpuBuffer::from(vec![F::ZERO; len]);
             let evaluators: Vec<_> = points
                 .iter()
                 .map(|&point| UnivariateEvaluation::new(point, size))
                 .collect();
-            buffer.accumulate_univariate_evaluations(&evaluators, &scalars);
+            buffer
+                .accumulate_univariate_evaluations(&evaluators, &CpuBuffer::from(scalars.clone()));
 
             // Reference: accumulate Σ_j scalars[j]·points[j]^i into the prefix
             // of a plain vector.

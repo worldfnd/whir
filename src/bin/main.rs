@@ -1,4 +1,6 @@
-use std::{borrow::Cow, time::Instant};
+#[cfg(feature = "rs_in_order")]
+use std::borrow::Cow;
+use std::time::Instant;
 
 #[cfg(feature = "rs_in_order")]
 use ark_ff::Field;
@@ -11,10 +13,11 @@ use whir::{
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
     },
     bits::Bits,
-    buffer::{ActiveBuffer, BufferOps},
+    buffer::Buffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
     parameters::ProtocolParameters,
+    protocols::params::DecodingRegime,
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -49,9 +52,9 @@ struct Args {
     #[arg(short = 'k', long = "fold", default_value = "4")]
     folding_factor: usize,
 
-    /// Restrict PCS to the Unique Decoding regime. LDT is always UD.
-    #[arg(long = "unique-decoding", default_value_t = false)]
-    unique_decoding: bool,
+    /// Reed–Solomon decoding regime: Unique or Johnson (list-decoding).
+    #[arg(long = "decoding-regime", default_value = "Johnson")]
+    decoding_regime: DecodingRegime,
 
     #[arg(short = 'f', long = "field", default_value = "Goldilocks3")]
     field: AvailableFields,
@@ -110,7 +113,7 @@ where
     let reps = args.verifier_repetitions;
     let first_round_folding_factor = args.first_round_folding_factor;
     let folding_factor = args.folding_factor;
-    let unique_decoding = args.unique_decoding;
+    let decoding_regime = args.decoding_regime;
     let num_evaluations = args.num_evaluations;
     let num_linear_constraints = args.num_linear_constraints;
     let hash_id = args.hash.hash_id();
@@ -126,7 +129,7 @@ where
         pow_bits,
         initial_folding_factor: first_round_folding_factor,
         folding_factor,
-        unique_decoding,
+        decoding_regime,
         starting_log_inv_rate: starting_rate,
         batch_size: 1,
         hash_id,
@@ -149,7 +152,7 @@ where
     }
 
     let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
-    let vector_buffer = ActiveBuffer::from_slice(&vector);
+    let vector_buffer = Buffer::from(vector.as_slice());
 
     let whir_commit_time = Instant::now();
     let witness = params.commit(&mut prover_state, &[&vector_buffer]);
@@ -188,7 +191,7 @@ where
         &[&vector_buffer],
         vec![&witness],
         prove_linear_forms,
-        Cow::Borrowed(evaluations.as_slice()),
+        Buffer::from(evaluations.as_slice()),
     );
     let whir_prove_time = whir_prove_time.elapsed();
 
@@ -256,7 +259,7 @@ where
     let num_coeffs = 1 << num_variables;
 
     let whir_params = ProtocolParameters {
-        unique_decoding: args.unique_decoding,
+        decoding_regime: args.decoding_regime,
         security_level,
         pow_bits,
         initial_folding_factor: first_round_folding_factor,
@@ -316,7 +319,7 @@ where
     }
 
     let whir_commit_time = Instant::now();
-    let vector_buffer = ActiveBuffer::from_slice(&vector);
+    let vector_buffer = Buffer::from(vector.as_slice());
     let witness = params.commit(&mut prover_state, &[&vector_buffer]);
     let whir_commit_time = whir_commit_time.elapsed();
 

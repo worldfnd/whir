@@ -7,9 +7,25 @@ use crate::{
     algebra::{embedding::Embedding, fields::FieldWithSize},
     bits::Bits,
     parameters::ProtocolParameters,
-    protocols::{irs_commit, proof_of_work, sumcheck},
-    type_info::Type,
+    protocols::{
+        irs_commit::{self, num_ood_samples, IrsMode},
+        proof_of_work, sumcheck,
+    },
 };
+
+/// log2 round-by-round soundness of `t_ood` OOD samples against a code with
+/// the given list size — formerly `irs_commit::Config::rbr_ood_sample`.
+fn rbr_ood_sample(
+    list_size: f64,
+    log_field_size: f64,
+    vector_size: usize,
+    out_domain_samples: usize,
+) -> f64 {
+    // [STIR] Lemma 4.5.
+    let l_choose_2 = list_size * (list_size - 1.) / 2.;
+    let log_per_sample = ((vector_size - 1) as f64).log2() - log_field_size;
+    -l_choose_2.log2() - out_domain_samples as f64 * log_per_sample
+}
 
 impl<M: Embedding> Config<M> {
     #[allow(clippy::too_many_lines)]
@@ -37,14 +53,22 @@ impl<M: Embedding> Config<M> {
         let mut num_variables = size.trailing_zeros() as usize;
 
         #[allow(clippy::cast_possible_wrap)]
-        let initial_committer = irs_commit::Config::new(
+        let initial_committer = irs_commit::Config::new(irs_commit::IrsParams {
+            security_target: protocol_security_level,
+            decoding_regime: whir_parameters.decoding_regime,
+            hash_id: whir_parameters.hash_id,
+            num_vectors: whir_parameters.batch_size,
+            vector_size: size,
+            interleaving_depth: 1 << whir_parameters.initial_folding_factor,
+            rate: 0.5_f64.powi(whir_parameters.starting_log_inv_rate as i32),
+            mode: IrsMode::Standard,
+        });
+        let initial_out_domain_samples = num_ood_samples(
+            whir_parameters.decoding_regime,
             protocol_security_level,
-            whir_parameters.unique_decoding,
-            whir_parameters.hash_id,
-            whir_parameters.batch_size,
+            field_size_bits,
+            initial_committer.list_size(),
             size,
-            1 << whir_parameters.initial_folding_factor,
-            0.5_f64.powi(whir_parameters.starting_log_inv_rate as i32),
         );
 
         // Initial sumcheck round pow bits.
@@ -64,7 +88,7 @@ impl<M: Embedding> Config<M> {
 
         let mut round_configs = Vec::new();
         let mut round = 0;
-        let mut in_domain_samples = initial_committer.in_domain_samples;
+        let mut in_domain_samples = initial_committer.in_domain_samples();
         let mut query_error = initial_committer.rbr_queries();
         num_variables -= whir_parameters.initial_folding_factor;
         while num_variables >= whir_parameters.folding_factor {
@@ -77,18 +101,26 @@ impl<M: Embedding> Config<M> {
             let next_rate = log_inv_rate + (round_folding_factor - 1);
 
             #[allow(clippy::cast_possible_wrap)]
-            let irs_committer = irs_commit::Config::new(
+            let irs_committer = irs_commit::Config::new(irs_commit::IrsParams {
+                security_target: protocol_security_level,
+                decoding_regime: whir_parameters.decoding_regime,
+                hash_id: whir_parameters.hash_id,
+                num_vectors: 1,
+                vector_size: 1 << num_variables,
+                interleaving_depth: 1 << whir_parameters.folding_factor,
+                rate: 0.5_f64.powi(next_rate as i32),
+                mode: IrsMode::Standard,
+            });
+            let round_out_domain_samples = num_ood_samples(
+                whir_parameters.decoding_regime,
                 protocol_security_level,
-                whir_parameters.unique_decoding,
-                whir_parameters.hash_id,
-                1,
+                field_size_bits,
+                irs_committer.list_size(),
                 1 << num_variables,
-                1 << whir_parameters.folding_factor,
-                0.5_f64.powi(next_rate as i32),
             );
             let combination_error = {
                 let log_list_size = irs_committer.list_size().log2();
-                let count = irs_committer.out_domain_samples + in_domain_samples;
+                let count = round_out_domain_samples + in_domain_samples;
                 let log_combination = (count as f64).log2();
                 field_size_bits - (log_combination + log_list_size + 1.)
             };
@@ -103,20 +135,20 @@ impl<M: Embedding> Config<M> {
 
             let config = RoundConfig {
                 irs_committer,
-                sumcheck: sumcheck::Config {
-                    field: Type::new(),
-                    initial_size: 1 << num_variables,
-                    round_pow: pow(folding_pow_bits),
-                    num_rounds: whir_parameters.folding_factor,
-                    mask_length: 0,
-                },
+                out_domain_samples: round_out_domain_samples,
+                sumcheck: sumcheck::Config::new(
+                    1 << num_variables,
+                    pow(folding_pow_bits),
+                    whir_parameters.folding_factor,
+                    sumcheck::SumcheckMode::Standard,
+                ),
                 pow: pow(pow_bits),
             };
 
             round += 1;
             num_variables -= whir_parameters.folding_factor;
             log_inv_rate = next_rate;
-            in_domain_samples = config.irs_committer.in_domain_samples;
+            in_domain_samples = config.irs_committer.in_domain_samples();
             query_error = config.irs_committer.rbr_queries();
             round_configs.push(config);
         }
@@ -131,22 +163,21 @@ impl<M: Embedding> Config<M> {
 
         Self {
             initial_committer,
-            initial_sumcheck: sumcheck::Config {
-                field: Type::new(),
-                initial_size: size,
-                round_pow: pow(starting_folding_pow_bits),
-                num_rounds: whir_parameters.initial_folding_factor,
-                mask_length: 0,
-            },
+            initial_out_domain_samples,
+            initial_sumcheck: sumcheck::Config::new(
+                size,
+                pow(starting_folding_pow_bits),
+                whir_parameters.initial_folding_factor,
+                sumcheck::SumcheckMode::Standard,
+            ),
             initial_skip_pow: pow(initial_skip_pow_bits),
             round_configs,
-            final_sumcheck: sumcheck::Config {
-                field: Type::new(),
-                initial_size: 1 << num_variables,
-                round_pow: pow(final_folding_pow_bits),
-                num_rounds: num_variables,
-                mask_length: 0,
-            },
+            final_sumcheck: sumcheck::Config::new(
+                1 << num_variables,
+                pow(final_folding_pow_bits),
+                num_variables,
+                sumcheck::SumcheckMode::Standard,
+            ),
             final_pow: pow(final_pow_bits),
         }
     }
@@ -171,11 +202,15 @@ impl<M: Embedding> Config<M> {
             security_level =
                 security_level.min(field_size_bits - ((num_linear_forms - 1) as f64).log2());
         }
-        let has_initial_constraints =
-            num_linear_forms > 0 || self.initial_committer.out_domain_samples > 0;
+        let has_initial_constraints = num_linear_forms > 0 || self.initial_out_domain_samples > 0;
 
         if !self.initial_committer.unique_decoding() {
-            security_level = security_level.min(self.initial_committer.rbr_ood_sample());
+            security_level = security_level.min(rbr_ood_sample(
+                self.initial_committer.list_size(),
+                field_size_bits,
+                self.initial_committer.vector_size(),
+                self.initial_out_domain_samples,
+            ));
         }
 
         // Initial sumcheck error (or the skipped version for LDT).
@@ -184,29 +219,34 @@ impl<M: Embedding> Config<M> {
             let log_list_size = self.initial_committer.list_size().log2();
             let initial_sumcheck_error = field_size_bits - (log_list_size + 1.);
             let initial_fold_error = initial_prox_gaps_error.min(initial_sumcheck_error)
-                + f64::from(self.initial_sumcheck.round_pow.difficulty());
+                + f64::from(self.initial_sumcheck.round_pow().difficulty());
             security_level = security_level.min(initial_fold_error);
         } else {
             let skipped_initial_fold_error = initial_prox_gaps_error
-                + (self.initial_sumcheck.num_rounds as f64).log2()
+                + (self.initial_sumcheck.num_rounds() as f64).log2()
                 + f64::from(self.initial_skip_pow.difficulty());
             security_level = security_level.min(skipped_initial_fold_error);
         }
 
         let mut rbr_queries = self.initial_committer.rbr_queries();
-        let mut old_in_domain_samples = self.initial_committer.in_domain_samples;
+        let mut old_in_domain_samples = self.initial_committer.in_domain_samples();
         for round in &self.round_configs {
             // Query soundness is computed at the old rate, while all fold and OOD terms use the new rate.
             let new_unique_decoding = round.irs_committer.unique_decoding();
 
             if !new_unique_decoding {
-                let ood_error = round.irs_committer.rbr_ood_sample();
+                let ood_error = rbr_ood_sample(
+                    round.irs_committer.list_size(),
+                    field_size_bits,
+                    round.irs_committer.vector_size(),
+                    round.out_domain_samples,
+                );
                 security_level = security_level.min(ood_error);
             }
 
             let log_list_size = round.irs_committer.list_size().log2();
             let combination_error = {
-                let count = round.irs_committer.out_domain_samples + old_in_domain_samples;
+                let count = round.out_domain_samples + old_in_domain_samples;
                 let log_combination = (count as f64).log2();
                 field_size_bits - (log_combination + log_list_size + 1.)
             };
@@ -217,19 +257,19 @@ impl<M: Embedding> Config<M> {
             let prox_gaps_error = round.irs_committer.rbr_soundness_fold_prox_gaps();
             let sumcheck_error = field_size_bits - (log_list_size + 1.);
             let round_fold_error = prox_gaps_error.min(sumcheck_error)
-                + f64::from(round.sumcheck.round_pow.difficulty());
+                + f64::from(round.sumcheck.round_pow().difficulty());
             security_level = security_level.min(round_fold_error);
 
-            old_in_domain_samples = round.irs_committer.in_domain_samples;
+            old_in_domain_samples = round.irs_committer.in_domain_samples();
             rbr_queries = round.irs_committer.rbr_queries();
         }
 
         let final_query_error = rbr_queries + f64::from(self.final_pow.difficulty());
         security_level = security_level.min(final_query_error);
 
-        if self.final_sumcheck.num_rounds > 0 {
+        if self.final_sumcheck.num_rounds() > 0 {
             let final_combination_error =
-                field_size_bits - 1. + f64::from(self.final_sumcheck.round_pow.difficulty());
+                field_size_bits - 1. + f64::from(self.final_sumcheck.round_pow().difficulty());
             security_level = security_level.min(final_combination_error);
         }
 
@@ -241,21 +281,21 @@ impl<M: Embedding> Config<M> {
     }
 
     pub fn check_max_pow_bits(&self, max_bits: Bits) -> bool {
-        if self.initial_sumcheck.round_pow.difficulty() > max_bits {
+        if self.initial_sumcheck.round_pow().difficulty() > max_bits {
             return false;
         }
         for round_config in &self.round_configs {
             if round_config.pow.difficulty() > max_bits {
                 return false;
             }
-            if round_config.sumcheck.round_pow.difficulty() > max_bits {
+            if round_config.sumcheck.round_pow().difficulty() > max_bits {
                 return false;
             }
         }
         if self.final_pow.difficulty() > max_bits {
             return false;
         }
-        if self.final_sumcheck.round_pow.difficulty() > max_bits {
+        if self.final_sumcheck.round_pow().difficulty() > max_bits {
             return false;
         }
         true
@@ -266,7 +306,7 @@ impl<M: Embedding> Config<M> {
     }
 
     pub const fn initial_size(&self) -> usize {
-        self.initial_committer.vector_size
+        self.initial_committer.vector_size()
     }
 
     pub fn initial_num_variables(&self) -> usize {
@@ -289,7 +329,7 @@ impl<M: Embedding> Display for Config<M> {
         writeln!(
             f,
             "Security level: {:.2} bits using {} decoding",
-            self.security_level(self.initial_committer.num_vectors, 1),
+            self.security_level(self.initial_committer.num_vectors(), 1),
             if self.unique_decoding() {
                 "unique"
             } else {
@@ -319,7 +359,7 @@ impl<M: Embedding> Display for Config<M> {
         writeln!(f, "------------------------------------")?;
 
         let field_size_bits = M::Target::field_size_bits();
-        let num_vectors = self.initial_committer.num_vectors;
+        let num_vectors = self.initial_committer.num_vectors();
         let num_linear_forms = 10; // TODO
         if num_vectors > 1 {
             let rlc_error = field_size_bits - ((num_vectors - 1) as f64).log2();
@@ -347,7 +387,12 @@ impl<M: Embedding> Display for Config<M> {
             writeln!(
                 f,
                 "{:.1} bits -- OOD commitment",
-                self.initial_committer.rbr_ood_sample()
+                rbr_ood_sample(
+                    self.initial_committer.list_size(),
+                    field_size_bits,
+                    self.initial_committer.vector_size(),
+                    self.initial_out_domain_samples,
+                )
             )?;
         }
         let prox_gaps_error = self.initial_committer.rbr_soundness_fold_prox_gaps();
@@ -357,28 +402,33 @@ impl<M: Embedding> Display for Config<M> {
             f,
             "{:.1} bits -- (x{}) prox gaps: {:.1}, sumcheck: {:.1}, pow: {:.1}, list size 2^{:.1}",
             prox_gaps_error.min(sumcheck_error)
-                + f64::from(self.initial_sumcheck.round_pow.difficulty()),
-            self.initial_sumcheck.num_rounds,
+                + f64::from(self.initial_sumcheck.round_pow().difficulty()),
+            self.initial_sumcheck.num_rounds(),
             prox_gaps_error,
             sumcheck_error,
-            self.initial_sumcheck.round_pow.difficulty(),
+            self.initial_sumcheck.round_pow().difficulty(),
             log_list_size,
         )?;
 
         let mut query_error = self.initial_committer.rbr_queries();
-        let mut old_in_domain_samples = self.initial_committer.in_domain_samples;
+        let mut old_in_domain_samples = self.initial_committer.in_domain_samples();
         for r in &self.round_configs {
             if !r.irs_committer.unique_decoding() {
                 writeln!(
                     f,
                     "{:.1} bits -- OOD sample",
-                    r.irs_committer.rbr_ood_sample()
+                    rbr_ood_sample(
+                        r.irs_committer.list_size(),
+                        field_size_bits,
+                        r.irs_committer.vector_size(),
+                        r.out_domain_samples,
+                    )
                 )?;
             }
 
             let log_list_size = r.irs_committer.list_size().log2();
             let combination_error = {
-                let count = r.irs_committer.out_domain_samples + old_in_domain_samples;
+                let count = r.out_domain_samples + old_in_domain_samples;
                 let log_combination = (count as f64).log2();
                 field_size_bits - (log_combination + log_list_size + 1.)
             };
@@ -396,15 +446,15 @@ impl<M: Embedding> Display for Config<M> {
             writeln!(
                 f,
                 "{:.1} bits -- (x{}) prox gaps: {:.1}, sumcheck: {:.1}, pow: {:.1}, list size 2^{:.1}",
-                prox_gaps_error.min(sumcheck_error) + f64::from(r.sumcheck.round_pow.difficulty()),
-                r.sumcheck.num_rounds,
+                prox_gaps_error.min(sumcheck_error) + f64::from(r.sumcheck.round_pow().difficulty()),
+                r.sumcheck.num_rounds(),
                 prox_gaps_error,
                 sumcheck_error,
-                r.sumcheck.round_pow.difficulty(),
+                r.sumcheck.round_pow().difficulty(),
                 log_list_size
             )?;
 
-            old_in_domain_samples = r.irs_committer.in_domain_samples;
+            old_in_domain_samples = r.irs_committer.in_domain_samples();
             query_error = r.irs_committer.rbr_queries();
         }
 
@@ -416,15 +466,15 @@ impl<M: Embedding> Display for Config<M> {
             self.final_pow.difficulty(),
         )?;
 
-        if self.final_sumcheck.num_rounds > 0 {
+        if self.final_sumcheck.num_rounds() > 0 {
             let combination_error = field_size_bits - 1.;
             writeln!(
                 f,
                 "{:.1} bits -- (x{}) combination: {:.1}, pow: {:.1}",
-                combination_error + f64::from(self.final_sumcheck.round_pow.difficulty()),
-                self.final_sumcheck.num_rounds,
+                combination_error + f64::from(self.final_sumcheck.round_pow().difficulty()),
+                self.final_sumcheck.num_rounds(),
                 combination_error,
-                self.final_sumcheck.round_pow.difficulty(),
+                self.final_sumcheck.round_pow().difficulty(),
             )?;
         }
 
@@ -434,8 +484,11 @@ impl<M: Embedding> Display for Config<M> {
 
 impl<F: Field> RoundConfig<F> {
     pub fn initial_size(&self) -> usize {
-        assert_eq!(self.irs_committer.vector_size, self.sumcheck.initial_size);
-        self.sumcheck.initial_size
+        assert_eq!(
+            self.irs_committer.vector_size(),
+            self.sumcheck.initial_size()
+        );
+        self.sumcheck.initial_size()
     }
 
     pub fn final_size(&self) -> usize {
@@ -443,12 +496,12 @@ impl<F: Field> RoundConfig<F> {
     }
 
     pub fn initial_num_variables(&self) -> usize {
-        assert!(self.irs_committer.vector_size.is_power_of_two());
-        self.irs_committer.vector_size.ilog2() as usize
+        assert!(self.irs_committer.vector_size().is_power_of_two());
+        self.irs_committer.vector_size().ilog2() as usize
     }
 
     pub fn final_num_variables(&self) -> usize {
-        self.initial_num_variables() - self.sumcheck.num_rounds
+        self.initial_num_variables() - self.sumcheck.num_rounds()
     }
 }
 
@@ -462,8 +515,6 @@ impl<F: Field> Display for RoundConfig<F> {
 
 #[cfg(test)]
 mod tests {
-    use ordered_float::OrderedFloat;
-
     use super::*;
     use crate::{
         algebra::{
@@ -472,10 +523,23 @@ mod tests {
         },
         bits::Bits,
         hash,
-        protocols::matrix_commit,
-        type_info::Typed,
         utils::test_serde,
     };
+
+    /// IRS committer fixture for pow-bit tests; `check_max_pow_bits` never
+    /// inspects it, so any well-formed config works.
+    fn test_irs_committer(log_inv_rate: i32) -> irs_commit::Config<embedding::Identity<Field64_3>> {
+        irs_commit::Config::new(irs_commit::IrsParams {
+            security_target: 60.0,
+            decoding_regime: crate::protocols::params::DecodingRegime::Unique,
+            hash_id: hash::BLAKE3,
+            num_vectors: 1,
+            vector_size: 1 << 10,
+            interleaving_depth: 1 << 2,
+            rate: 0.5_f64.powi(log_inv_rate),
+            mode: IrsMode::Standard,
+        })
+    }
 
     /// Generates default WHIR parameters
     fn default_whir_params() -> ProtocolParameters {
@@ -484,7 +548,7 @@ mod tests {
             pow_bits: 20,
             initial_folding_factor: 4,
             folding_factor: 4,
-            unique_decoding: false,
+            decoding_regime: crate::protocols::params::DecodingRegime::Johnson,
             starting_log_inv_rate: 1,
             batch_size: 1,
             hash_id: hash::BLAKE3,
@@ -519,56 +583,36 @@ mod tests {
         let mut config = Config::<Basefield<Field64_3>>::new(1 << 10, &params);
 
         // Set all values within limits
-        config.initial_sumcheck.round_pow = proof_of_work::Config::from_difficulty(Bits::new(15.0));
+        config
+            .initial_sumcheck
+            .override_round_pow_for_test(proof_of_work::Config::from_difficulty(Bits::new(15.0)));
         config.final_pow = proof_of_work::Config::from_difficulty(Bits::new(18.0));
-        config.final_sumcheck.round_pow = proof_of_work::Config::from_difficulty(Bits::new(19.5));
+        config
+            .final_sumcheck
+            .override_round_pow_for_test(proof_of_work::Config::from_difficulty(Bits::new(19.5)));
 
         // Ensure all rounds are within limits
         config.round_configs = vec![
             RoundConfig {
-                irs_committer: irs_commit::Config {
-                    embedding: Typed::new(embedding::Identity::new()),
-                    num_vectors: 1,
-                    vector_size: 1 << 10,
-                    mask_length: 0,
-                    codeword_length: 1 << (10 + 3 - 2),
-                    interleaving_depth: 1 << 2,
-                    matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),
-                    johnson_slack: OrderedFloat::default(),
-                    in_domain_samples: 5,
-                    out_domain_samples: 2,
-                    deduplicate_in_domain: true,
-                },
-                sumcheck: sumcheck::Config {
-                    field: Type::<Field64_3>::new(),
-                    initial_size: 1 << 10,
-                    round_pow: proof_of_work::Config::from_difficulty(Bits::new(19.0)),
-                    num_rounds: 2,
-                    mask_length: 0,
-                },
+                irs_committer: test_irs_committer(3),
+                out_domain_samples: 2,
+                sumcheck: sumcheck::Config::<Field64_3>::new(
+                    1 << 10,
+                    proof_of_work::Config::from_difficulty(Bits::new(19.0)),
+                    2,
+                    sumcheck::SumcheckMode::Standard,
+                ),
                 pow: proof_of_work::Config::from_difficulty(Bits::new(17.0)),
             },
             RoundConfig {
-                irs_committer: irs_commit::Config {
-                    embedding: Typed::new(embedding::Identity::new()),
-                    num_vectors: 1,
-                    vector_size: 1 << 10,
-                    mask_length: 0,
-                    codeword_length: 1 << (10 + 4 - 2),
-                    interleaving_depth: 1 << 2,
-                    matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),
-                    johnson_slack: OrderedFloat::default(),
-                    in_domain_samples: 6,
-                    out_domain_samples: 2,
-                    deduplicate_in_domain: true,
-                },
-                sumcheck: sumcheck::Config {
-                    field: Type::<Field64_3>::new(),
-                    initial_size: 1 << 10,
-                    round_pow: proof_of_work::Config::from_difficulty(Bits::new(19.5)),
-                    num_rounds: 2,
-                    mask_length: 0,
-                },
+                irs_committer: test_irs_committer(4),
+                out_domain_samples: 2,
+                sumcheck: sumcheck::Config::<Field64_3>::new(
+                    1 << 10,
+                    proof_of_work::Config::from_difficulty(Bits::new(19.5)),
+                    2,
+                    sumcheck::SumcheckMode::Standard,
+                ),
                 pow: proof_of_work::Config::from_difficulty(Bits::new(18.0)),
             },
         ];
@@ -584,9 +628,13 @@ mod tests {
         let params = default_whir_params();
         let mut config = Config::<Basefield<Field64_3>>::new(1 << 10, &params);
 
-        config.initial_sumcheck.round_pow = proof_of_work::Config::from_difficulty(Bits::new(21.0));
+        config
+            .initial_sumcheck
+            .override_round_pow_for_test(proof_of_work::Config::from_difficulty(Bits::new(21.0)));
         config.final_pow = proof_of_work::Config::from_difficulty(Bits::new(18.0));
-        config.final_sumcheck.round_pow = proof_of_work::Config::from_difficulty(Bits::new(19.5));
+        config
+            .final_sumcheck
+            .override_round_pow_for_test(proof_of_work::Config::from_difficulty(Bits::new(19.5)));
 
         assert!(
             !config.check_max_pow_bits(Bits::new(20.0)),

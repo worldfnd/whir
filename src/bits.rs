@@ -2,6 +2,8 @@ use std::{
     cmp::Ordering,
     fmt::{self, Display},
     hash::Hash,
+    iter::Sum,
+    ops::{Add, Sub},
 };
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,32 @@ impl Bits {
 
     pub fn is_zero(&self) -> bool {
         self.0 == 0.0
+    }
+
+    /// Absolute difference, e.g. for tolerance comparisons.
+    #[must_use]
+    pub fn abs_diff(self, other: Self) -> Self {
+        Self::new((self.0 - other.0).abs())
+    }
+}
+
+impl Add for Bits {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self::new(self.0 + rhs.0)
+    }
+}
+
+impl Sub for Bits {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self::new(self.0 - rhs.0)
+    }
+}
+
+impl Sum for Bits {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self(0.0), Add::add)
     }
 }
 

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b6e8ae0b3e6a9769901e0e0e489da34965bf0a8df7dd049aef66e0541bf10baf # shrinks to spec = SecuritySpec { mode: ZeroKnowledge, decoding_regime: Johnson, target_security_bits: 30, pow_budget: Forbidden, hash_id: 03e01749ebcc0477924254eb482066b864a8dd4d77252464ca6f5b6f5cc05b4c }, (log_size, log_inv_rate) = (1, 1)
+cc a2f771fc5031440200810b95ea2d347da895f8eb2e1a87f53fd69ad224287e84 # shrinks to spec = SecuritySpec { mode: Standard, decoding_regime: Johnson, target_security_bits: 30, pow_budget: Forbidden, hash_id: 03e01749ebcc0477924254eb482066b864a8dd4d77252464ca6f5b6f5cc05b4c }, (log_size, log_inv_rate) = (2, 2)
+cc f66c89bc700c79bca5f4b7234f1345129962c78e5a2036a6430564f615f19b30 # shrinks to spec = SecuritySpec { mode: ZeroKnowledge, decoding_regime: Johnson, target_security_bits: 30, pow_budget: Forbidden, hash_id: 03e01749ebcc0477924254eb482066b864a8dd4d77252464ca6f5b6f5cc05b4c }, (log_size, log_inv_rate) = (1, 1)
+cc 312fec8a96f6f55f5d3c0346bdb85690f23150aadf88888d453041e99b05d414 # shrinks to spec = SecuritySpec { mode: Standard, decoding_regime: Johnson, target_security_bits: 39, pow_budget: Forbidden, hash_id: 03e01749ebcc0477924254eb482066b864a8dd4d77252464ca6f5b6f5cc05b4c }, (log_size, log_inv_rate) = (1, 1)

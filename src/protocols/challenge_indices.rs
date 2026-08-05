@@ -16,37 +16,85 @@ where
     if count == 0 {
         return Vec::new();
     }
-    // TODO: This is blocking non-power-of-two support.
-    assert!(
-        num_leaves.is_power_of_two(),
-        "Number of leaves must be a power of two for unbiased results."
-    );
-    if num_leaves == 1 {
-        // `size_bytes` would be zero, making `chunks_exact` panic.
+    if num_leaves <= 1 {
+        // `size_bytes` would be zero; short-circuit before the entropy loop.
         return if deduplicate { vec![0] } else { vec![0; count] };
     }
 
-    // Calculate the required bytes of entropy
-    // TODO: Round total to bytes, instead of per index.
-    let size_bytes = (num_leaves.ilog2() as usize).div_ceil(8);
+    let domain = IndexDomain::new(num_leaves);
+    let mut indices = Vec::with_capacity(count);
+    for _ in 0..count {
+        indices.push(domain.sample(transcript));
+    }
 
-    // Get required entropy bits.
-    let entropy: Vec<u8> = (0..count * size_bytes)
-        .map(|_| transcript.verifier_message())
-        .collect();
-
-    // Convert bytes into indices
-    let mut indices = entropy
-        .chunks_exact(size_bytes)
-        .map(|chunk| chunk.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize) % num_leaves)
-        .collect::<Vec<usize>>();
-
-    // Sort and deduplicate indices if requested
     if deduplicate {
         indices.sort_unstable();
         indices.dedup();
     }
     indices
+}
+
+/// Rejection-sampling domain for transcript-derived row indices.
+///
+/// For power-of-two domains, `entropy_space` is an exact multiple of
+/// `num_leaves`, so rejection never triggers and sampling is bit-identical to
+/// the legacy `% num_leaves` implementation. For non-power-of-two domains,
+/// candidates in the biased tail are rejected and redrawn.
+#[derive(Clone, Copy, Debug)]
+struct IndexDomain {
+    num_leaves: usize,
+    size_bytes: usize,
+    threshold: u128,
+}
+
+impl IndexDomain {
+    fn new(num_leaves: usize) -> Self {
+        debug_assert!(num_leaves > 1);
+        let bits_needed = ceil_log2(num_leaves);
+        let size_bytes = bits_needed.div_ceil(8);
+        let entropy_bits = 8 * size_bytes;
+        debug_assert!(entropy_bits < u128::BITS as usize);
+
+        let entropy_space = 1u128 << entropy_bits;
+        let num_leaves_u = num_leaves as u128;
+        let threshold = (entropy_space / num_leaves_u) * num_leaves_u;
+
+        Self {
+            num_leaves,
+            size_bytes,
+            threshold,
+        }
+    }
+
+    fn sample<T>(&self, transcript: &mut T) -> usize
+    where
+        T: VerifierMessage,
+        u8: Decoding<[T::U]>,
+    {
+        loop {
+            let candidate = self.draw_candidate(transcript);
+            if candidate < self.threshold {
+                return (candidate % self.num_leaves as u128) as usize;
+            }
+        }
+    }
+
+    fn draw_candidate<T>(&self, transcript: &mut T) -> u128
+    where
+        T: VerifierMessage,
+        u8: Decoding<[T::U]>,
+    {
+        let mut candidate = 0u128;
+        for _ in 0..self.size_bytes {
+            candidate = (candidate << 8) | u128::from(transcript.verifier_message::<u8>());
+        }
+        candidate
+    }
+}
+
+fn ceil_log2(n: usize) -> usize {
+    debug_assert!(n > 1);
+    usize::BITS as usize - (n - 1).leading_zeros() as usize
 }
 
 #[cfg(test)]
@@ -200,5 +248,74 @@ mod tests {
             result, expected_indices,
             "Mismatch in computed indices for deduplication test"
         );
+    }
+
+    /// Non-pow2 `num_leaves`. With `num_leaves = 589824 = 2^16 · 9`:
+    ///   `bits_needed = 20`, `size_bytes = 3`, entropy_space = 2^24 = 16_777_216,
+    ///   `threshold = floor(2^24 / 589824) · 589824 = 28 · 589824 = 16_515_072`.
+    ///
+    /// The first 3-byte chunk decodes to 0xFFFFFF = 16_777_215, which is ≥
+    /// threshold and must be rejected. The second chunk decodes to a small
+    /// value < threshold and is returned.
+    #[test]
+    fn test_challenge_indices_non_pow2_rejection_retry() {
+        let num_leaves: usize = 589_824;
+        let ds = DomainSeparator::protocol(&module_path!())
+            .session(&format!("Test at {}:{}", file!(), line!()))
+            .instance(&Empty);
+        let sponge = MockSponge {
+            absorb: None,
+            squeeze: &[
+                0xFF, 0xFF, 0xFF, // candidate = 16_777_215 ≥ threshold → reject
+                0x00, 0x00, 0x05, // candidate = 5 < threshold → accept
+            ],
+        };
+        let mut prover_state = ProverState::new(&ds, sponge);
+
+        let result = challenge_indices(&mut prover_state, num_leaves, 1, false);
+        assert_eq!(result, vec![5]);
+    }
+
+    /// All indices returned for a non-pow2 `num_leaves` lie in `[0, num_leaves)`,
+    /// and the function is deterministic (same sponge bytes → same result).
+    #[test]
+    fn test_challenge_indices_non_pow2_in_range_and_deterministic() {
+        let num_leaves: usize = 589_824;
+        let count = 5;
+        let bytes: &[u8] = &[
+            0x12, 0x34, 0x56, // candidate 1_193_046 < threshold
+            0x78, 0x9A, 0xBC, // candidate 7_904_956 < threshold
+            0xDE, 0xF0, 0x11, // candidate 14_610_449 < threshold
+            0x22, 0x33, 0x44, // candidate 2_241_348 < threshold
+            0x55, 0x66, 0x77, // candidate 5_596_791 < threshold
+        ];
+        let make_state = || {
+            let ds = DomainSeparator::protocol(&module_path!())
+                .session(&format!("Test at {}:{}", file!(), line!()))
+                .instance(&Empty);
+            ProverState::new(
+                &ds,
+                MockSponge {
+                    absorb: None,
+                    squeeze: bytes,
+                },
+            )
+        };
+
+        let mut first = make_state();
+        let mut second = make_state();
+        let r1 = challenge_indices(&mut first, num_leaves, count, false);
+        let r2 = challenge_indices(&mut second, num_leaves, count, false);
+
+        assert_eq!(r1, r2, "challenge_indices must be deterministic");
+        assert_eq!(r1.len(), count);
+        assert!(
+            r1.iter().all(|&i| i < num_leaves),
+            "all indices must lie in [0, {num_leaves}): got {r1:?}",
+        );
+
+        // Spot-check the first index: 0x123456 = 1_193_046 < threshold 16_515_072
+        // → accepted, index = 1_193_046 % 589_824 = 13_398.
+        assert_eq!(r1[0], 1_193_046 % num_leaves);
     }
 }

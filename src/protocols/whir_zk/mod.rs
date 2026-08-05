@@ -45,16 +45,18 @@ impl BlindingSizePolicy {
             .saturating_sub(main_whir_params.pow_bits);
         #[allow(clippy::cast_possible_wrap)]
         let q_delta_1 = irs_commit::num_in_domain_queries(
-            main_whir_params.unique_decoding,
+            main_whir_params.decoding_regime,
             protocol_security_level_main as f64,
             0.5_f64.powi(main_whir_params.starting_log_inv_rate as i32),
-        );
+        )
+        .get();
         #[allow(clippy::cast_possible_wrap)]
         let q_delta_2 = irs_commit::num_in_domain_queries(
-            main_whir_params.unique_decoding,
+            main_whir_params.decoding_regime,
             main_whir_params.security_level as f64,
             0.5_f64.powi(main_whir_params.starting_log_inv_rate as i32),
-        );
+        )
+        .get();
 
         // Default send-in-clear thresholds match query complexities.
         Self {
@@ -134,7 +136,7 @@ impl<F: Field> Config<F> {
             size_policy.t2 >= size_policy.q_delta_2,
             "invalid blinding size policy: T2 must satisfy T2 >= q(delta2)"
         );
-        let k1 = 1usize << blinded.initial_sumcheck.num_rounds;
+        let k1 = 1usize << blinded.initial_sumcheck.num_rounds();
         let k2 = blinding_first_round_interleaving_depth;
         let sumcheck_coeff_leakage = size_policy
             .sumcheck_round_degree
@@ -173,12 +175,14 @@ impl<F: Field> Config<F> {
 
     /// Interleaving depth of the initial IRS commitment (= 2^folding_factor).
     pub(crate) const fn interleaving_depth(&self) -> usize {
-        self.blinded_commitment.initial_committer.interleaving_depth
+        self.blinded_commitment
+            .initial_committer
+            .interleaving_depth()
     }
 
     /// Generator ω of the full NTT domain (size = num_rows × interleaving_depth).
     pub(crate) fn omega_full(&self) -> F {
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
         let full_domain_size = codeword_length * self.interleaving_depth();
         crate::algebra::ntt::generator(full_domain_size)
     }
@@ -187,20 +191,20 @@ impl<F: Field> Config<F> {
     // #[deprecated = "RS codes do not necessarily have a generator."]
     fn omega_sub(&self) -> F {
         // Assume it has a generator, and the evaluation order is 1, g, g^2, ...
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
         crate::algebra::ntt::generator(codeword_length)
     }
 
     /// ζ = ω^num_rows — the interleaving_depth-th root of unity.
     pub(crate) fn zeta(&self) -> F {
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
         self.omega_full().pow([codeword_length as u64])
     }
 
     /// Precomputed sub-domain powers [1, ω_sub, ω_sub², ..., ω_sub^(num_rows-1)].
     pub(crate) fn omega_powers(&self) -> Vec<F> {
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
-        crate::algebra::geometric_sequence(self.omega_sub(), codeword_length)
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
+        crate::algebra::geometric_sequence(F::ONE, self.omega_sub(), codeword_length)
     }
 
     /// Find the index of `alpha_base` in the sub-domain powers.
@@ -216,7 +220,8 @@ impl<F: Field> Config<F> {
         let omega_powers = self.omega_powers();
         let interleaving_depth = self.interleaving_depth();
         let omega_full = self.omega_full();
-        let zeta_powers = crate::algebra::geometric_sequence(self.zeta(), interleaving_depth);
+        let zeta_powers =
+            crate::algebra::geometric_sequence(F::ONE, self.zeta(), interleaving_depth);
         let embedding = self.blinded_commitment.embedding();
 
         let mut gammas = Vec::with_capacity(query_points.len() * interleaving_depth);
@@ -255,9 +260,10 @@ mod tests {
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
-        buffer::{ActiveBuffer, BufferOps},
+        buffer::Buffer,
         hash,
         parameters::ProtocolParameters,
+        protocols::params::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
     };
 
@@ -278,7 +284,7 @@ mod tests {
 
     fn make_test_config(num_polynomials: usize) -> Config<F> {
         let whir_params = ProtocolParameters {
-            unique_decoding: false,
+            decoding_regime: DecodingRegime::Johnson,
             security_level: 16,
             pow_bits: 0,
             initial_folding_factor: 2,
@@ -353,10 +359,7 @@ mod tests {
             .session(&tag)
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -447,10 +450,7 @@ mod tests {
             .session(&format!("zk-stage1-negative {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -503,10 +503,7 @@ mod tests {
             .session(&format!("zk-stage1-tamper {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let vector_buffers = vectors
-            .iter()
-            .map(|v| ActiveBuffer::from_slice(v))
-            .collect::<Vec<_>>();
+        let vector_buffers = vectors.iter().map(|v| Buffer::from(*v)).collect::<Vec<_>>();
         let vector_refs = vector_buffers.iter().collect::<Vec<_>>();
         let witness = params.commit(&mut prover_state, &vector_refs);
         let _ = params.prove(
@@ -566,7 +563,7 @@ mod tests {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut prover_state = ProverState::new_std(&ds);
-            let vector_buffer = ActiveBuffer::from_slice(&vector);
+            let vector_buffer = Buffer::from(vector.as_slice());
             let witness = params.commit(&mut prover_state, &[&vector_buffer]);
             let _ = params.prove(
                 &mut prover_state,
@@ -591,5 +588,85 @@ mod tests {
              (correct={correct_evaluation:?}, claimed={wrong_evaluation:?})"
             );
         }
+    }
+
+    /// 1 polynomial of size 2^19 with 3 multilinear-extension claims on BN254,
+    /// target_security 128 with a 10-bit PoW budget. Used to compare
+    /// prove/verify wall-clock against the zook orchestrator under the same
+    /// workload shape.
+    ///
+    /// Run with: `cargo test --release --features tracing,rs_in_order --lib \
+    /// protocols::whir_zk::tests::roundtrip_2_pow_20_three_claims_whir_zk -- --nocapture`
+    #[test]
+    fn roundtrip_2_pow_20_three_claims_whir_zk() {
+        use crate::algebra::fields::Field256;
+        type FB = Field256;
+
+        const NV: usize = 19;
+        const NC: usize = 1 << NV;
+
+        let mut rng = ark_std::test_rng();
+
+        let whir_params = ProtocolParameters {
+            decoding_regime: DecodingRegime::Johnson,
+            security_level: 128,
+            pow_bits: 10,
+            initial_folding_factor: 3,
+            folding_factor: 3,
+            starting_log_inv_rate: 2,
+            batch_size: 1,
+            hash_id: hash::SHA2,
+        };
+        let params = Config::<FB>::new(1 << NV, &whir_params, 1);
+
+        let vector: Vec<FB> = random_vector(&mut rng, NC);
+        let f0 = MultilinearExtension {
+            point: random_vector::<FB>(&mut rng, NV),
+        };
+        let f1 = MultilinearExtension {
+            point: random_vector::<FB>(&mut rng, NV),
+        };
+        let f2 = MultilinearExtension {
+            point: random_vector::<FB>(&mut rng, NV),
+        };
+        let embedding = params.blinded_commitment.embedding();
+        let evaluations = vec![
+            f0.evaluate(embedding, &vector),
+            f1.evaluate(embedding, &vector),
+            f2.evaluate(embedding, &vector),
+        ];
+
+        let forms: Vec<Box<dyn LinearForm<FB>>> = vec![Box::new(f0), Box::new(f1), Box::new(f2)];
+        let refs: Vec<&dyn LinearForm<FB>> = forms.iter().map(|w| w.as_ref()).collect();
+        let prove_forms: Vec<Box<dyn LinearForm<FB>>> = forms
+            .iter()
+            .map(|f| {
+                let mut cv = vec![FB::ZERO; params.blinded_commitment.initial_size()];
+                f.accumulate(&mut cv, FB::ONE);
+                Box::new(Covector { vector: cv }) as Box<dyn LinearForm<FB>>
+            })
+            .collect();
+
+        let ds = DomainSeparator::protocol(&params)
+            .session(&format!("whir-zk-bench-2^20 {}:{}", file!(), line!()))
+            .instance(&Empty);
+        let mut prover_state = ProverState::new_std(&ds);
+        let vector_buffer = Buffer::from(vector.as_slice());
+        let witness = params.commit(&mut prover_state, &[&vector_buffer]);
+        let _ = params.prove(
+            &mut prover_state,
+            &[&vector_buffer],
+            witness,
+            prove_forms,
+            Cow::Borrowed(&evaluations),
+        );
+        let proof = prover_state.proof();
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+        let commitment = params
+            .receive_commitments(&mut verifier_state, 1)
+            .expect("receive_commitments");
+        params
+            .verify(&mut verifier_state, &refs, &evaluations, &commitment)
+            .expect("verify");
     }
 }
