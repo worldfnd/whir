@@ -454,6 +454,7 @@ impl<M: Embedding> Config<M> {
         let num_in_domain = source_evaluations.points.len();
         let coeffs = geometric_challenge(verifier_state, 1 + num_ood + num_in_domain);
         let (&original_sl_coeff, all_rlc_coeffs) = coeffs.split_first().unwrap();
+        debug_assert_eq!(original_sl_coeff, M::Target::ONE);
         let (ood_rlc_coeffs, in_domain_rlc_coeffs) = all_rlc_coeffs.split_at(num_ood);
 
         *sum = original_sl_coeff * *sum
