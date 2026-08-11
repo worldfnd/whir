@@ -116,12 +116,6 @@ pub trait BufferMath<F: Field>: Clone {
     #[must_use]
     fn tensor_product(&self, other: &Self) -> Self;
 
-    /// Matrix-vector product. `self` is a row-major matrix with `vector.len()`
-    /// columns; returns a buffer of length `self.len() / vector.len()` where
-    /// `out[i] = dot(row_i, vector)`. `vector` must be non-empty.
-    #[must_use]
-    fn mat_vec(&self, vector: &Self) -> Self;
-
     /// Equality-polynomial weights `eq(point, ·)` over the Boolean hypercube
     /// `{0,1}^{point.len()}`, as a buffer of length `1 << point.len()`.
     ///

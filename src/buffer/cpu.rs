@@ -172,25 +172,6 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         }
     }
 
-    fn mat_vec(&self, vector: &Self) -> Self {
-        assert!(
-            !vector.data.is_empty(),
-            "matrix-vector product requires a non-empty vector"
-        );
-        assert_eq!(
-            self.data.len() % vector.data.len(),
-            0,
-            "matrix-vector dimensions mismatch"
-        );
-        Self {
-            data: self
-                .data
-                .chunks_exact(vector.data.len())
-                .map(|row| crate::algebra::dot(&vector.data, row))
-                .collect(),
-        }
-    }
-
     fn eq_weights(point: &[F]) -> Self {
         Self {
             data: crate::algebra::eq_weights(point),
