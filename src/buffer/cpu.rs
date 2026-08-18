@@ -63,6 +63,10 @@ impl<T: Copy> BufferOps<T> for CpuBuffer<T> {
         self.data.len()
     }
 
+    fn read_range(&self, range: std::ops::Range<usize>) -> Vec<T> {
+        self.data[range].to_vec()
+    }
+
     fn read_rows(&self, num_cols: usize, indices: &[usize]) -> Vec<T> {
         let mut result = Vec::with_capacity(indices.len() * num_cols);
         for i in indices {
@@ -347,6 +351,14 @@ mod tests {
     };
 
     type F = Field64;
+
+    #[test]
+    fn read_range_copies_contiguous_values() {
+        let buffer = CpuBuffer::from(vec![1u64, 2, 3, 4, 5]);
+        assert_eq!(buffer.read_range(1..4), vec![2, 3, 4]);
+        assert_eq!(buffer.read_range(0..buffer.len()), vec![1, 2, 3, 4, 5]);
+        assert!(buffer.read_range(buffer.len()..buffer.len()).is_empty());
+    }
 
     #[test]
     fn scalar_mul_multiplies_in_place() {

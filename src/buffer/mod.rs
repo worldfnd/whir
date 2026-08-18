@@ -54,6 +54,8 @@ pub trait BufferOps<T: Copy> {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Read the contiguous range `range` into a host `Vec`.
+    fn read_range(&self, range: std::ops::Range<usize>) -> Vec<T>;
     /// Gather full rows `indices[i] * num_cols .. (indices[i] + 1) * num_cols`.
     fn read_rows(&self, num_cols: usize, indices: &[usize]) -> Vec<T>;
     /// Gather elements at arbitrary indices.
