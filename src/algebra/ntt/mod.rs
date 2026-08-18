@@ -62,42 +62,175 @@ impl type_map::Family for NttFamily {
     type Dyn<F: 'static> = dyn ReedSolomon<F>;
 }
 
-/// Buffer-native description of interleaved Reed-Solomon messages.
+/// One coefficient segment from every logical polynomial.
 ///
-/// Each vector contains `interleaving_depth` consecutive messages of
-/// `message_length` elements. The encoder decides how to gather those chunks,
-/// append masks, and pad them for the NTT.
-// TODO: Generalize `Messages` plus the separate mask buffer into an
-// IRS-agnostic segmented-polynomial batch so the encoder sees only resident
-// prefix/suffix segments, not message/mask protocol semantics.
-#[derive(Clone)]
-pub struct Messages<'a, F> {
-    pub vectors: &'a [&'a Buffer<F>],
-    pub message_length: usize,
-    pub interleaving_depth: usize,
+/// Each buffer stores `rows_per_buffer` consecutive polynomial rows. Every
+/// row contains `row_width` coefficients. Buffer order defines polynomial
+/// order, and segment order defines coefficient order.
+pub struct PolynomialSegment<'a, F> {
+    buffers: &'a [&'a Buffer<F>],
+    rows_per_buffer: usize,
+    row_width: usize,
 }
 
-impl<'a, F: Copy> Messages<'a, F> {
-    pub fn new(
-        vectors: &'a [&'a Buffer<F>],
-        message_length: usize,
-        interleaving_depth: usize,
-    ) -> Self {
-        assert!(vectors
-            .iter()
-            .all(|vector| vector.len() == message_length * interleaving_depth));
+impl<'a, F: Copy> PolynomialSegment<'a, F> {
+    /// Create a segment from a contiguous slice of buffer references.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `rows_per_buffer * row_width` overflows or does not equal
+    /// every buffer length.
+    pub fn new(buffers: &'a [&'a Buffer<F>], rows_per_buffer: usize, row_width: usize) -> Self {
+        let buffer_length = rows_per_buffer
+            .checked_mul(row_width)
+            .expect("Polynomial segment length overflow.");
+        assert!(
+            buffers.iter().all(|buffer| buffer.len() == buffer_length),
+            "Polynomial segment buffer has the wrong length."
+        );
         Self {
-            vectors,
-            message_length,
-            interleaving_depth,
+            buffers,
+            rows_per_buffer,
+            row_width,
         }
+    }
+
+    /// Create a segment and infer its row width from the buffer length.
+    ///
+    /// Empty buffer lists and zero-row buffers have an inferred width of zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the first buffer length is not divisible by
+    /// `rows_per_buffer`, or if buffer lengths differ.
+    pub fn from_rows(buffers: &'a [&'a Buffer<F>], rows_per_buffer: usize) -> Self {
+        let buffer_length = buffers.first().map_or(0, |buffer| buffer.len());
+        let row_width = if rows_per_buffer == 0 {
+            assert_eq!(
+                buffer_length, 0,
+                "A zero-row polynomial segment must contain empty buffers."
+            );
+            0
+        } else {
+            assert!(
+                buffer_length.is_multiple_of(rows_per_buffer),
+                "Polynomial segment buffer length is not divisible by its row count."
+            );
+            buffer_length / rows_per_buffer
+        };
+        Self::new(buffers, rows_per_buffer, row_width)
+    }
+}
+
+impl<'a, F> PolynomialSegment<'a, F> {
+    /// Number of physical buffers in this segment.
+    pub const fn buffer_count(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// Physical buffer at `index`.
+    pub fn buffer(&self, index: usize) -> &'a Buffer<F> {
+        self.buffers[index]
+    }
+
+    /// Number of consecutive polynomial rows in every physical buffer.
+    pub const fn rows_per_buffer(&self) -> usize {
+        self.rows_per_buffer
+    }
+
+    /// Number of coefficients contributed to every polynomial.
+    pub const fn row_width(&self) -> usize {
+        self.row_width
+    }
+
+    /// Number of logical polynomials covered by this segment.
+    pub const fn polynomial_count(&self) -> usize {
+        self.buffer_count()
+            .checked_mul(self.rows_per_buffer())
+            .expect("Polynomial segment row count overflow.")
+    }
+}
+
+/// Complete logical polynomials stored across backend-resident buffers.
+///
+/// Every segment covers all polynomials. Concatenating one row from each
+/// segment produces one complete polynomial.
+pub struct Polynomials<'a, F> {
+    segments: &'a [PolynomialSegment<'a, F>],
+    polynomial_count: usize,
+    polynomial_length: usize,
+}
+
+impl<'a, F> Polynomials<'a, F> {
+    /// Create a validated view from coefficient segments.
+    ///
+    /// The first segment determines the polynomial count. An empty segment
+    /// list represents no polynomials. Zero-width edge segments are removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any segment has a different polynomial count or the total
+    /// polynomial length overflows.
+    pub fn from_segments(segments: &'a [PolynomialSegment<'a, F>]) -> Self {
+        let polynomial_count = segments
+            .first()
+            .map_or(0, PolynomialSegment::polynomial_count);
+        let mut polynomial_length = 0usize;
+        for segment in segments {
+            assert_eq!(
+                segment.polynomial_count(),
+                polynomial_count,
+                "Polynomial segment has the wrong row count."
+            );
+            polynomial_length = polynomial_length
+                .checked_add(segment.row_width())
+                .expect("Polynomial length overflow.");
+        }
+
+        let first = segments
+            .iter()
+            .position(|segment| segment.row_width() != 0)
+            .unwrap_or(segments.len());
+        let last = segments
+            .iter()
+            .rposition(|segment| segment.row_width() != 0)
+            .map_or(first, |last| last + 1);
+        let segments = &segments[first..last];
+
+        Self {
+            segments,
+            polynomial_count,
+            polynomial_length,
+        }
+    }
+
+    /// Number of logical polynomials.
+    pub const fn len(&self) -> usize {
+        self.polynomial_count
+    }
+
+    /// Whether this view contains no logical polynomials.
+    pub const fn is_empty(&self) -> bool {
+        self.polynomial_count == 0
+    }
+
+    /// Number of coefficients in every logical polynomial.
+    pub const fn polynomial_length(&self) -> usize {
+        self.polynomial_length
+    }
+
+    /// Ordered coefficient segments for every logical polynomial.
+    pub const fn segments(&self) -> &'a [PolynomialSegment<'a, F>] {
+        self.segments
     }
 }
 
 /// Reed-Solomon encoder for a given field `F`.
 ///
-/// The input remains buffer-native so each backend can gather messages, append
-/// masks, and pad without forcing protocol code through host slices.
+/// Pure-NTT abstraction: encodes complete logical polynomials and knows
+/// nothing about how callers construct them. The polynomial view remains
+/// buffer-native, so each backend can materialize its preferred layout without
+/// forcing a host transfer.
 pub trait ReedSolomon<F>: Debug + Send + Sync {
     /// Smallest supported codeword length `>= size`, or `None` if `size`
     /// exceeds the engine's maximum order. The returned length is always
@@ -126,17 +259,15 @@ pub trait ReedSolomon<F>: Debug + Send + Sync {
         indices: &[usize],
     ) -> Vec<F>;
 
-    /// Batch-encode masked polynomials in parallel.
+    /// Batch-encode polynomials in parallel.
     ///
-    /// Each logical polynomial is a message chunk followed by its mask row.
     /// Output is a flat buffer in row-major `(eval_index, polynomial)` layout.
     ///
     /// `codeword_length` must be NTT-smooth for this engine and at least the
     /// polynomial length.
     fn interleaved_encode(
         &self,
-        messages: Messages<'_, F>,
-        masks: &Buffer<F>,
+        polynomials: Polynomials<'_, F>,
         codeword_length: usize,
     ) -> Buffer<F>;
 }
@@ -160,13 +291,12 @@ pub fn evaluation_points<F: 'static>(
 }
 
 pub fn interleaved_rs_encode<F: 'static>(
-    messages: Messages<'_, F>,
-    masks: &Buffer<F>,
+    polynomials: Polynomials<'_, F>,
     codeword_length: usize,
 ) -> Buffer<F> {
     NTT.get::<F>()
         .expect("Unsupported NTT field.")
-        .interleaved_encode(messages, masks, codeword_length)
+        .interleaved_encode(polynomials, codeword_length)
 }
 
 pub fn generator<F: 'static>(codeword_length: usize) -> F {
@@ -179,6 +309,7 @@ pub fn generator<F: 'static>(codeword_length: usize) -> F {
 mod tests {
     use std::iter;
 
+    use ark_ff::AdditiveGroup;
     use ark_std::rand::{
         distributions::Standard, prelude::Distribution, rngs::StdRng, SeedableRng,
     };
@@ -232,8 +363,13 @@ mod tests {
                 .collect::<Vec<_>>();
             let masks = Buffer::random(&mut rng, mask_length * num_messages);
             let message_refs = messages.iter().collect::<Vec<_>>();
-            let input = Messages::new(&message_refs, message_length, 1);
-            let codeword = ntt.interleaved_encode(input, &masks, codeword_length);
+            let mask_refs = [&masks];
+            let segments = [
+                PolynomialSegment::new(&message_refs, 1, message_length),
+                PolynomialSegment::new(&mask_refs, num_messages, mask_length),
+            ];
+            let polynomials = Polynomials::from_segments(&segments);
+            let codeword = ntt.interleaved_encode(polynomials, codeword_length);
 
             // Output must be the right size.
             assert_eq!(codeword.len(), codeword_length * num_messages);
@@ -265,5 +401,89 @@ mod tests {
     #[test]
     fn test_field64_1() {
         test::<fields::Field64>(NTT.get().unwrap().as_ref());
+    }
+
+    #[test]
+    fn segmented_polynomials_match_contiguous_polynomials() {
+        type F = fields::Field64;
+
+        let prefixes = [
+            Buffer::from(vec![F::from(1), F::from(2)]),
+            Buffer::from(vec![F::from(3), F::from(4)]),
+        ];
+        let prefix_refs = [&prefixes[0], &prefixes[1]];
+        let suffix = Buffer::from(vec![F::from(5), F::from(6)]);
+        let suffix_refs = [&suffix];
+        let endings = Buffer::from(vec![F::from(7), F::from(8)]);
+        let ending_refs = [&endings];
+        let empty = Buffer::from(Vec::<F>::new());
+        let empty_refs = [&empty];
+        let segmented = [
+            PolynomialSegment::new(&prefix_refs, 1, 2),
+            PolynomialSegment::new(&suffix_refs, 2, 1),
+            PolynomialSegment::new(&ending_refs, 2, 1),
+            PolynomialSegment::new(&empty_refs, 2, 0),
+        ];
+
+        let contiguous_buffers = [
+            Buffer::from(vec![F::from(1), F::from(2), F::from(5), F::from(7)]),
+            Buffer::from(vec![F::from(3), F::from(4), F::from(6), F::from(8)]),
+        ];
+        let contiguous_refs = [&contiguous_buffers[0], &contiguous_buffers[1]];
+        let contiguous = [PolynomialSegment::from_rows(&contiguous_refs, 1)];
+        let ntt = NTT.get::<F>().unwrap();
+        let codeword_length = ntt.next_order(6).unwrap();
+        let segmented =
+            ntt.interleaved_encode(Polynomials::from_segments(&segmented), codeword_length);
+        let contiguous =
+            ntt.interleaved_encode(Polynomials::from_segments(&contiguous), codeword_length);
+        assert_eq!(segmented.to_slice(), contiguous.to_slice());
+    }
+
+    #[test]
+    fn empty_segments_encode_zero_length_polynomials() {
+        type F = fields::Field64;
+
+        let buffers = [Buffer::from(Vec::<F>::new())];
+        let buffer_refs = [&buffers[0]];
+        let segments = [PolynomialSegment::from_rows(&buffer_refs, 2)];
+        let ntt = NTT.get::<F>().unwrap();
+        let codeword = ntt.interleaved_encode(Polynomials::from_segments(&segments), 4);
+        assert_eq!(codeword.to_slice(), vec![F::ZERO; 8]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_batch_validates_polynomial_length() {
+        type F = fields::Field64;
+
+        let buffers: [&Buffer<F>; 0] = [];
+        let segments = [PolynomialSegment::new(&buffers, 0, 5)];
+        let ntt = NTT.get::<F>().unwrap();
+        let _ = ntt.interleaved_encode(Polynomials::from_segments(&segments), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "Polynomial segment buffer has the wrong length.")]
+    fn polynomial_segment_rejects_wrong_buffer_length() {
+        type F = fields::Field64;
+
+        let buffers = [Buffer::from(vec![F::ZERO; 3])];
+        let buffer_refs = [&buffers[0]];
+        let _ = PolynomialSegment::new(&buffer_refs, 2, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Polynomial segment has the wrong row count.")]
+    fn polynomials_reject_wrong_segment_row_count() {
+        type F = fields::Field64;
+
+        let buffers = [Buffer::from(vec![F::ZERO; 2])];
+        let buffer_refs = [&buffers[0]];
+        let segments = [
+            PolynomialSegment::new(&buffer_refs, 1, 2),
+            PolynomialSegment::new(&buffer_refs, 2, 1),
+        ];
+        let _ = Polynomials::from_segments(&segments);
     }
 }

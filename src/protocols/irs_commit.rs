@@ -384,8 +384,15 @@ impl<M: Embedding> Config<M> {
         let num_polys = self.num_messages();
         let masks = Buffer::<M::Source>::random(prover_state.rng(), mask_length * num_polys);
 
-        let messages = ntt::Messages::new(vectors, self.message_length(), self.interleaving_depth);
-        let matrix = ntt::interleaved_rs_encode(messages, &masks, self.codeword_length);
+        let matrix = {
+            let mask_buffers = [&masks];
+            let segments = [
+                ntt::PolynomialSegment::from_rows(vectors, self.interleaving_depth),
+                ntt::PolynomialSegment::from_rows(&mask_buffers, num_polys),
+            ];
+            let polynomials = ntt::Polynomials::from_segments(&segments);
+            ntt::interleaved_rs_encode(polynomials, self.codeword_length)
+        };
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);

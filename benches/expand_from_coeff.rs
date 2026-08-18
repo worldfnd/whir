@@ -1,7 +1,7 @@
 use divan::{black_box, AllocProfiler, Bencher};
 use whir::{
     algebra::{fields::Field64, ntt, random_vector},
-    buffer::{Buffer, BufferMath, BufferOps},
+    buffer::{Buffer, BufferOps},
 };
 
 #[global_allocator]
@@ -34,15 +34,14 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
             let coeffs: Vec<Buffer<Field64>> = (0..num_messages)
                 .map(|_| Buffer::from(random_vector(&mut rng, message_length)))
                 .collect();
-            let masks = Buffer::zeros(0);
-            (coeffs, masks, expansion, coset_sz)
+            (coeffs, expansion)
         })
-        .bench_values(|(coeffs, masks, expansion, _coset_sz)| {
-            let coeffs_refs = coeffs.iter().collect::<Vec<_>>();
-            let messages = ntt::Messages::new(&coeffs_refs, coeffs[0].len(), 1);
+        .bench_values(|(coeffs, expansion)| {
+            let coefficient_refs = coeffs.iter().collect::<Vec<_>>();
+            let segments = [ntt::PolynomialSegment::from_rows(&coefficient_refs, 1)];
+            let polynomials = ntt::Polynomials::from_segments(&segments);
             black_box(ntt::interleaved_rs_encode(
-                messages,
-                &masks,
+                polynomials,
                 coeffs[0].len() * expansion,
             ))
         });

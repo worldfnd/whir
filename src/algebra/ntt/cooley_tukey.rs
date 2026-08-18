@@ -14,14 +14,13 @@ use {crate::utils::workload_size, rayon::prelude::*, std::cmp::max};
 use super::{
     transpose,
     utils::{lcm, sqrt_factor},
-    Messages, ReedSolomon,
+    PolynomialSegment, Polynomials, ReedSolomon,
 };
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
     algebra::ntt::utils::divisors,
     buffer::{Buffer, BufferOps},
-    utils::{chunks_exact_or_empty, zip_strict},
 };
 
 // Supported primes
@@ -47,6 +46,43 @@ pub struct NttEngine<F: Field> {
 
     // Root lookup table (extended on demand)
     roots: RwLock<Vec<F>>,
+}
+
+struct SegmentRows<'segment, 'buffer, F> {
+    segment: &'segment PolynomialSegment<'buffer, F>,
+    buffer_index: usize,
+    row_index: usize,
+    source: Option<&'buffer [F]>,
+}
+
+impl<'segment, 'buffer, F: Copy> SegmentRows<'segment, 'buffer, F> {
+    const fn new(segment: &'segment PolynomialSegment<'buffer, F>) -> Self {
+        Self {
+            segment,
+            buffer_index: 0,
+            row_index: 0,
+            source: None,
+        }
+    }
+
+    fn next_row(&mut self) -> &'buffer [F] {
+        if self.source.is_none() {
+            self.source = Some(self.segment.buffer(self.buffer_index).to_slice());
+        }
+
+        let source = self.source.expect("Polynomial segment has no buffer.");
+        let row_width = self.segment.row_width();
+        let start = self.row_index * row_width;
+        let row = &source[start..start + row_width];
+
+        self.row_index += 1;
+        if self.row_index == self.segment.rows_per_buffer() {
+            self.row_index = 0;
+            self.buffer_index += 1;
+            self.source = None;
+        }
+        row
+    }
 }
 
 impl<F: FftField> NttEngine<F> {
@@ -402,41 +438,23 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         result
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, messages, masks), fields(
-        num_polys = messages.vectors.len() * messages.interleaving_depth,
-        message_length = messages.message_length,
+    #[cfg_attr(feature = "tracing", instrument(skip(self, polynomials), fields(
+        num_polys = polynomials.len(),
+        poly_length = polynomials.polynomial_length(),
         codeword_length = codeword_length,
     )))]
     fn interleaved_encode(
         &self,
-        messages: Messages<'_, F>,
-        masks: &Buffer<F>,
+        polynomials: Polynomials<'_, F>,
         codeword_length: usize,
     ) -> Buffer<F> {
-        let vectors = messages
-            .vectors
-            .iter()
-            .map(|vector| vector.to_slice())
-            .collect::<Vec<_>>();
-        let messages = vectors
-            .iter()
-            .flat_map(|vector| {
-                chunks_exact_or_empty(vector, messages.message_length, messages.interleaving_depth)
-            })
-            .collect::<Vec<_>>();
         assert!(self.order.is_multiple_of(codeword_length));
-        if messages.is_empty() {
-            assert!(masks.is_empty());
+        let num_polys = polynomials.len();
+        let poly_length = polynomials.polynomial_length();
+        assert!(poly_length <= codeword_length);
+        if num_polys == 0 {
             return Buffer::from(Vec::new());
         }
-        let num_polys = messages.len();
-        let message_length = messages[0].len();
-        assert!(messages
-            .iter()
-            .all(|message| message.len() == message_length));
-        let mask_length = masks.len() / num_polys;
-        let poly_length = message_length + mask_length;
-        assert!(poly_length <= codeword_length);
 
         // Coset-NTT: instead of doing one codeword-length NTT on mostly zeros,
         // do `num_cosets` many `coset_size`-point NTTs on twisted coefficient
@@ -458,19 +476,57 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
 
         // Lay out twisted coefficients in contiguous coset blocks of length
         // `coset_size`, zero-padding each block as needed.
-        let mut result = Vec::with_capacity(num_polys * codeword_length);
-        for (message, mask) in zip_strict(
-            messages,
-            chunks_exact_or_empty(masks.to_slice(), mask_length, num_polys),
-        ) {
-            // FFT[a 0 0 0] = [a a a a], so just replicate input in coset dimension.
-            for _ in 0..num_cosets {
-                result.extend_from_slice(message);
-                result.extend_from_slice(mask);
-                result.resize(result.len() + coset_padding, F::ZERO);
+        let output_length = num_polys
+            .checked_mul(codeword_length)
+            .expect("Encoded polynomial length overflow.");
+        let mut result = Vec::with_capacity(output_length);
+        match polynomials.segments() {
+            [] => {
+                for _ in 0..num_polys * num_cosets {
+                    result.resize(result.len() + coset_size, F::ZERO);
+                }
+            }
+            [segment] => {
+                let mut rows = SegmentRows::new(segment);
+                for _ in 0..num_polys {
+                    let polynomial = rows.next_row();
+                    // FFT[a 0 0 0] = [a a a a], so replicate the input
+                    // in the coset dimension.
+                    for _ in 0..num_cosets {
+                        result.extend_from_slice(polynomial);
+                        result.resize(result.len() + coset_padding, F::ZERO);
+                    }
+                }
+            }
+            [first, second] => {
+                let mut first_rows = SegmentRows::new(first);
+                let mut second_rows = SegmentRows::new(second);
+                for _ in 0..num_polys {
+                    let first = first_rows.next_row();
+                    let second = second_rows.next_row();
+                    for _ in 0..num_cosets {
+                        result.extend_from_slice(first);
+                        result.extend_from_slice(second);
+                        result.resize(result.len() + coset_padding, F::ZERO);
+                    }
+                }
+            }
+            segments => {
+                let mut segments = segments.iter().map(SegmentRows::new).collect::<Vec<_>>();
+                let mut rows = Vec::with_capacity(segments.len());
+                for _ in 0..num_polys {
+                    rows.clear();
+                    rows.extend(segments.iter_mut().map(SegmentRows::next_row));
+                    for _ in 0..num_cosets {
+                        for row in &rows {
+                            result.extend_from_slice(row);
+                        }
+                        result.resize(result.len() + coset_padding, F::ZERO);
+                    }
+                }
             }
         }
-        assert_eq!(result.len(), num_polys * codeword_length);
+        assert_eq!(result.len(), output_length);
 
         // NTT each coset block, then transpose each codeword block from
         // coset-major `(num_cosets × coset_size)` layout into standard codeword
