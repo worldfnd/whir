@@ -199,7 +199,7 @@ where
     let ProverRoundState {
         message,
         irs_witness,
-        covector,
+        mut covector,
         mut sum,
     } = state;
 
@@ -216,7 +216,6 @@ where
 
     // Sumcheck lifts the source-field message into `M::Target` at its first
     // fold. Both outputs remain resident for code-switch and the next round.
-    let mut covector = covector;
     let (message, opening) = round.sumcheck().prove(
         ps,
         embedding,
@@ -257,8 +256,7 @@ where
     );
 
     // Prove both mask trees; subtract cs_mask contribution to project sum to f-only.
-    let cs_mask_indices = (msg_len..covector.len()).collect::<Vec<_>>();
-    let cs_mask_covector = covector.gather_at_indices(&cs_mask_indices);
+    let cs_mask_covector = covector.read_range(msg_len..covector.len());
     masker.finish(&opening.round_challenges, &cs_mask_covector, &mut sum, ps);
     drop(opening);
 
