@@ -434,7 +434,6 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         assert!(messages
             .iter()
             .all(|message| message.len() == message_length));
-        assert!(masks.len().is_multiple_of(num_polys));
         let mask_length = masks.len() / num_polys;
         let poly_length = message_length + mask_length;
         assert!(poly_length <= codeword_length);
