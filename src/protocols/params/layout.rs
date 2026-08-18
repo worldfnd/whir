@@ -277,7 +277,7 @@ mod tests {
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
         let tuning = tuning_with(vector_size);
         let layout = layout(&tuning).unwrap();
-        assert!(layout.shapes.is_empty());
+        assert_eq!(layout.shapes.len(), 0);
         assert_eq!(layout.basecase_vector_size, vector_size);
         assert_eq!(layout.basecase_log_inv_rate, FIXTURE_LOG_INV_RATE);
     }

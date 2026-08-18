@@ -357,7 +357,10 @@ mod tests {
         let buffer = CpuBuffer::from(vec![1u64, 2, 3, 4, 5]);
         assert_eq!(buffer.read_range(1..4), vec![2, 3, 4]);
         assert_eq!(buffer.read_range(0..buffer.len()), vec![1, 2, 3, 4, 5]);
-        assert!(buffer.read_range(buffer.len()..buffer.len()).is_empty());
+        assert_eq!(
+            buffer.read_range(buffer.len()..buffer.len()),
+            Vec::<u64>::new()
+        );
     }
 
     #[test]

@@ -129,7 +129,7 @@ impl<'a, F> PolynomialSegment<'a, F> {
     }
 
     /// Physical buffer at `index`.
-    pub fn buffer(&self, index: usize) -> &'a Buffer<F> {
+    pub const fn buffer(&self, index: usize) -> &'a Buffer<F> {
         self.buffers[index]
     }
 

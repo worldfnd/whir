@@ -153,7 +153,7 @@ mod tests {
         let spec = test_spec(Mode::Standard);
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
         let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size)).unwrap();
-        assert!(plan.rounds().is_empty());
+        assert_eq!(plan.rounds().len(), 0);
         assert_eq!(plan.basecase().commit().vector_size(), vector_size);
     }
 
@@ -178,7 +178,7 @@ mod tests {
             tuning_with(1 << LOG_VECTOR_SIZE_NO_ROUNDS),
         )
         .unwrap();
-        assert!(plan.rounds().is_empty());
+        assert_eq!(plan.rounds().len(), 0);
         assert!(matches!(
             plan.basecase().mode(),
             BasecaseMode::ZeroKnowledge
@@ -743,7 +743,7 @@ mod tests {
             tuning_with(1 << LOG_VECTOR_SIZE_NO_ROUNDS),
         )
         .unwrap();
-        assert!(plan.rounds().is_empty());
+        assert_eq!(plan.rounds().len(), 0);
         assert!(plan.basecase().commit().unique_decoding());
     }
 
@@ -758,7 +758,7 @@ mod tests {
             tuning_with(1 << LOG_VECTOR_SIZE_NO_ROUNDS),
         )
         .unwrap();
-        assert!(plan.rounds().is_empty());
+        assert_eq!(plan.rounds().len(), 0);
         assert!(plan.basecase().commit().unique_decoding());
     }
 

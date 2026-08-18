@@ -192,7 +192,7 @@ mod tests {
             tuning_with_rounds(),
         )
         .unwrap();
-        assert!(!config.rounds().is_empty());
+        assert_ne!(config.rounds().len(), 0);
         let committed = roundtrip(&config, 0);
         assert!(matches!(committed.state, CommittedState::Round { .. }));
     }
@@ -215,7 +215,7 @@ mod tests {
             tuning_basecase_only(),
         )
         .unwrap();
-        assert!(config.rounds().is_empty());
+        assert_eq!(config.rounds().len(), 0);
         let committed = roundtrip(&config, 2);
         assert!(matches!(committed.state, CommittedState::Basecase { .. }));
     }

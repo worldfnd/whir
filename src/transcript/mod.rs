@@ -293,7 +293,7 @@ where
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn check_eof(self) -> VerificationResult<()> {
         #[cfg(debug_assertions)]
-        assert!(self.pattern.is_empty());
+        assert_eq!(self.pattern, []);
         verify!(self.inner.check_eof().is_ok());
         verify!(self.hints.is_empty());
         Ok(())
@@ -340,7 +340,7 @@ where
     #[cfg(debug_assertions)]
     #[track_caller]
     fn pop_pattern(&mut self, interaction: &Interaction) {
-        assert!(!self.pattern.is_empty());
+        assert_ne!(self.pattern, []);
         let (expected, tail) = self.pattern.split_first().unwrap();
         assert_eq!(
             interaction, expected,
