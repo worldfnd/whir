@@ -63,7 +63,10 @@ use crate::{
         mask_proximity::Config as MaskProximityConfig,
         params::protocol_config::{MaskOracleConfig, ProtocolConfig, RoundConfig},
         sumcheck::{SumcheckMode, SumcheckOpening},
-        zook::commit::{CommittedState, CommittedWitness},
+        zook::{
+            commit::{CommittedState, CommittedWitness},
+            ProverClaim,
+        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
@@ -78,6 +81,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Round 0's code-switch folds the base witness (`IrsWitness<M::Source>`)
     /// into an ext IRS, so only it is embedding-aware; later rounds are ext→ext.
     /// Message, covector, and sum are in `M::Target` throughout.
+    /// Returns the transcript-derived evaluation point and RLC coefficients.
     #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds(), num_claims = linear_forms.len())))]
     pub fn prove<H, R>(
         &self,
@@ -85,7 +89,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         committed: CommittedWitness<M>,
         linear_forms: &[&dyn LinearForm<M::Target>],
         evaluations: &[M::Target],
-    ) where
+    ) -> ProverClaim<M::Target>
+    where
         M::Target: Field + Default + Zeroize + Codec<[H::U]>,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface,
@@ -122,14 +127,20 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             .sum();
         let covector = Buffer::from(covector);
 
-        // Reduce to basecase inputs `(message, witness, covector, sum)`. The
-        // two arms differ only in how those are obtained.
-        let (message, basecase_witness, covector, sum) = match committed.state {
+        // Reduce to basecase inputs while retaining the round challenges.
+        let (message, basecase_witness, covector, sum, mut evaluation_point) = match committed.state
+        {
             // Basecase-only plan: use the committed witness directly.
             CommittedState::Basecase {
                 message,
                 irs_witness,
-            } => (message, irs_witness, covector, batched_evaluation),
+            } => (
+                message,
+                irs_witness,
+                covector,
+                batched_evaluation,
+                Vec::new(),
+            ),
             CommittedState::Round {
                 message,
                 irs_witness,
@@ -139,6 +150,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                     irs_witness,
                     covector,
                     sum: batched_evaluation,
+                    all_round_challenges: Vec::new(),
                 };
                 let first = self
                     .first_round()
@@ -150,16 +162,34 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                 // After per-round reconciliation, state.sum is bound to
                 // dot(state.message, state.covector) — no extra transcript
                 // send needed entering basecase.
-                (state.message, state.irs_witness, state.covector, state.sum)
+                (
+                    state.message,
+                    state.irs_witness,
+                    state.covector,
+                    state.sum,
+                    state.all_round_challenges,
+                )
             }
         };
 
         // Standard mode (BasecaseMode::Standard) sends the full witness vector
         // and IRS randomness cleartext. Only call with Mode::ZeroKnowledge if
         // end-to-end hiding is required.
-        let _ = self
+        let basecase_opening = self
             .basecase()
             .prove(ps, message, &basecase_witness, covector, sum);
+
+        evaluation_point.extend(basecase_opening.evaluation_points);
+        debug_assert_eq!(
+            evaluation_point.len(),
+            self.tuning().vector_size.trailing_zeros() as usize,
+            "evaluation_point length must equal log2(vector_size)"
+        );
+
+        ProverClaim {
+            evaluation_point,
+            rlc_coefficients: claim_weights,
+        }
     }
 }
 
@@ -173,6 +203,8 @@ struct ProverRoundState<M: Embedding> {
     irs_witness: IrsWitness<M::Source>,
     covector: Buffer<M::Target>,
     sum: M::Target,
+    // Sumcheck challenges from completed rounds, in transcript order.
+    all_round_challenges: Vec<M::Target>,
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove_round", fields(msg_len = round.code_switch().source().message_length(), message_len = state.message.len())))]
@@ -201,6 +233,7 @@ where
         irs_witness,
         mut covector,
         mut sum,
+        mut all_round_challenges,
     } = state;
 
     let embedding = round.code_switch().source().embedding();
@@ -224,6 +257,7 @@ where
         &mut sum,
         masker.sumcheck_blinding(),
     );
+    all_round_challenges.extend_from_slice(&opening.round_challenges);
 
     // Build cs_mask = (folded_irs_masks ‖ cs_fresh_padding), commit its tree,
     // send mask_eval_sum cleartext, reconcile sum to the unmasked dot.
@@ -274,6 +308,7 @@ where
         irs_witness: cs_witness.target_witness,
         covector,
         sum,
+        all_round_challenges,
     }
 }
 

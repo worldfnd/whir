@@ -59,11 +59,20 @@ impl<F: ark_ff::Field> FinalClaim<F> {
     }
 }
 
+/// Values derived by [`ProtocolConfig::prove`] from the prover transcript.
+#[derive(Clone, Debug)]
+pub struct ProverClaim<F: ark_ff::Field> {
+    /// Sumcheck challenges followed by the basecase evaluation points.
+    pub evaluation_point: Vec<F>,
+    /// Fiat-Shamir RLC coefficients for the input forms.
+    pub rlc_coefficients: Vec<F>,
+}
+
 #[cfg(test)]
 mod tests {
     use ark_std::rand::{rngs::StdRng, SeedableRng};
 
-    use super::ProtocolConfig;
+    use super::{FinalClaim, ProtocolConfig, ProverClaim};
     use crate::{
         algebra::{
             embedding::{Basefield, Embedding, Identity},
@@ -127,19 +136,21 @@ mod tests {
             .instance(&EMPTY)
     }
 
-    /// Build a witness, compute true evaluations, prove, and return the proof
-    /// along with the domain separator, forms, and values for further checks.
+    struct Proven {
+        proof: crate::transcript::Proof,
+        ds: DomainSeparator<'static, Empty>,
+        forms: Vec<MultilinearExtension<SmallF>>,
+        values: Vec<SmallF>,
+        prover_claim: ProverClaim<SmallF>,
+    }
+
+    /// Build a witness, compute its evaluations, and prove them.
     fn build_and_prove(
         config: &ProtocolConfig<SmallEmbed>,
         num_claims: usize,
         seed: u64,
         label: &str,
-    ) -> (
-        crate::transcript::Proof,
-        DomainSeparator<'static, Empty>,
-        Vec<MultilinearExtension<SmallF>>,
-        Vec<SmallF>,
-    ) {
+    ) -> Proven {
         let embedding = <SmallEmbed as Default>::default();
         let mut rng = StdRng::seed_from_u64(seed);
         let witness = Buffer::<SmallF>::random(&mut rng, config.tuning().vector_size);
@@ -160,10 +171,16 @@ mod tests {
         let ds = make_ds(label);
         let mut ps = ProverState::new_std(&ds);
         let committed = config.commit(&mut ps, witness);
-        config.prove(&mut ps, committed, &form_refs, &values);
+        let prover_claim = config.prove(&mut ps, committed, &form_refs, &values);
         let proof = ps.proof();
 
-        (proof, ds, forms, values)
+        Proven {
+            proof,
+            ds,
+            forms,
+            values,
+            prover_claim,
+        }
     }
 
     /// Run a full roundtrip: commit → prove → verify → FinalClaim::verify.
@@ -174,7 +191,13 @@ mod tests {
         seed: u64,
         label: &str,
     ) {
-        let (proof, ds, forms, values) = build_and_prove(config, num_claims, seed, label);
+        let Proven {
+            proof,
+            ds,
+            forms,
+            values,
+            prover_claim,
+        } = build_and_prove(config, num_claims, seed, label);
         let form_refs: Vec<&dyn LinearForm<SmallF>> =
             forms.iter().map(|f| f as &dyn LinearForm<SmallF>).collect();
 
@@ -184,7 +207,22 @@ mod tests {
             .verify(&mut vs, commitment, &form_refs, &values)
             .unwrap();
         claim.verify(&form_refs).expect("FinalClaim::verify failed");
+        assert_prover_claim_matches(&prover_claim, &claim);
         vs.check_eof().unwrap();
+    }
+
+    fn assert_prover_claim_matches<F: ark_ff::Field>(
+        prover_claim: &ProverClaim<F>,
+        claim: &FinalClaim<F>,
+    ) {
+        assert_eq!(
+            prover_claim.evaluation_point, claim.evaluation_point,
+            "prover and verifier evaluation points diverged"
+        );
+        assert_eq!(
+            prover_claim.rlc_coefficients, claim.rlc_coefficients,
+            "prover and verifier RLC coefficients diverged"
+        );
     }
 
     // ── Base-field embedding (witness over base prime field, claims over ext) ──
@@ -225,7 +263,7 @@ mod tests {
         let ds = make_ds(label);
         let mut ps = ProverState::new_std(&ds);
         let committed = config.commit(&mut ps, witness);
-        config.prove(&mut ps, committed, &form_refs, &values);
+        let prover_claim = config.prove(&mut ps, committed, &form_refs, &values);
         let proof = ps.proof();
 
         let mut vs = VerifierState::new_std(&ds, &proof);
@@ -234,6 +272,7 @@ mod tests {
             .verify(&mut vs, commitment, &form_refs, &values)
             .unwrap();
         claim.verify(&form_refs).expect("FinalClaim::verify failed");
+        assert_prover_claim_matches(&prover_claim, &claim);
         vs.check_eof().unwrap();
     }
 
@@ -380,8 +419,13 @@ mod tests {
             multi_round_tuning(),
         )
         .unwrap();
-        let (proof, ds, forms, true_values) =
-            build_and_prove(&config, 1, 10, "verify_rejects_wrong_evaluation_zk");
+        let Proven {
+            proof,
+            ds,
+            forms,
+            values: true_values,
+            ..
+        } = build_and_prove(&config, 1, 10, "verify_rejects_wrong_evaluation_zk");
 
         let form_refs: Vec<&dyn LinearForm<SmallF>> =
             forms.iter().map(|f| f as &dyn LinearForm<SmallF>).collect();
@@ -402,8 +446,13 @@ mod tests {
         let config =
             ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
                 .unwrap();
-        let (proof, ds, forms, true_values) =
-            build_and_prove(&config, 1, 11, "verify_rejects_wrong_evaluation_standard");
+        let Proven {
+            proof,
+            ds,
+            forms,
+            values: true_values,
+            ..
+        } = build_and_prove(&config, 1, 11, "verify_rejects_wrong_evaluation_standard");
 
         let form_refs: Vec<&dyn LinearForm<SmallF>> =
             forms.iter().map(|f| f as &dyn LinearForm<SmallF>).collect();
@@ -425,7 +474,13 @@ mod tests {
             multi_round_tuning(),
         )
         .unwrap();
-        let (proof, ds, forms, mut values) = build_and_prove(
+        let Proven {
+            proof,
+            ds,
+            forms,
+            mut values,
+            ..
+        } = build_and_prove(
             &config,
             3,
             12,
@@ -455,8 +510,13 @@ mod tests {
             multi_round_tuning(),
         )
         .unwrap();
-        let (proof, ds, forms, values) =
-            build_and_prove(&config, 1, 20, "final_claim_rejects_wrong_form");
+        let Proven {
+            proof,
+            ds,
+            forms,
+            values,
+            ..
+        } = build_and_prove(&config, 1, 20, "final_claim_rejects_wrong_form");
 
         let form_refs: Vec<&dyn LinearForm<SmallF>> =
             forms.iter().map(|f| f as &dyn LinearForm<SmallF>).collect();
@@ -486,8 +546,13 @@ mod tests {
             multi_round_tuning(),
         )
         .unwrap();
-        let (mut proof, ds, forms, values) =
-            build_and_prove(&config, 1, 30, "verify_rejects_tampered_proof");
+        let Proven {
+            mut proof,
+            ds,
+            forms,
+            values,
+            ..
+        } = build_and_prove(&config, 1, 30, "verify_rejects_tampered_proof");
 
         let form_refs: Vec<&dyn LinearForm<SmallF>> =
             forms.iter().map(|f| f as &dyn LinearForm<SmallF>).collect();
@@ -562,7 +627,7 @@ mod tests {
 
         let mut ps = ProverState::new_std(&ds);
         let committed = config.commit(&mut ps, witness);
-        config.prove(&mut ps, committed, &form_refs, &values);
+        let prover_claim = config.prove(&mut ps, committed, &form_refs, &values);
         let proof = ps.proof();
 
         let mut vs = VerifierState::new_std(&ds, &proof);
@@ -571,6 +636,7 @@ mod tests {
             .verify(&mut vs, commitment, &form_refs, &values)
             .unwrap();
         claim.verify(&form_refs).expect("FinalClaim::verify failed");
+        assert_prover_claim_matches(&prover_claim, &claim);
         vs.check_eof().unwrap();
     }
 
