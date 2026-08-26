@@ -349,7 +349,7 @@ mod tests {
     fn test_expand_randomness_zero_length() {
         // If len = 0, should return an empty vector
         let base = Field64::from(3);
-        assert!(expand_randomness(base, 0).is_empty());
+        assert_eq!(expand_randomness(base, 0), Vec::<Field64>::new());
     }
 
     #[test]

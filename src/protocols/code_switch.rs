@@ -5,7 +5,7 @@
 
 use std::{fmt, num::NonZeroUsize};
 
-use ark_ff::Field;
+use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
@@ -15,12 +15,12 @@ use crate::{
     algebra::{
         dot,
         embedding::{Embedding, Identity},
-        eq_weights, geometric_accumulate, lift, mixed_dot, scalar_mul, univariate_evaluate,
+        eq_weights, lift, mixed_dot, univariate_evaluate,
     },
-    buffer::{Buffer, BufferOps},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
-        geometric_challenge::geometric_challenge,
+        geometric_challenge::{geometric_challenge, geometric_challenge_groups_with_offset},
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
         proof_of_work,
     },
@@ -54,7 +54,7 @@ pub struct Config<M: Embedding> {
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct Witness<F: Field> {
-    pub message: Vec<F>,
+    pub message: Buffer<F>,
     pub target_witness: IrsWitness<F>,
 }
 
@@ -62,7 +62,7 @@ pub struct Witness<F: Field> {
 /// with `ℓ_zk` slack in ZK mode) paired with the running sum `μ` such that
 /// `μ = ⟨vector, covector⟩` after each protocol step.
 pub struct Claim<'a, F: Field> {
-    pub covector: &'a mut [F],
+    pub covector: &'a mut Buffer<F>,
     pub sum: &'a mut F,
 }
 
@@ -237,7 +237,7 @@ impl<M: Embedding> Config<M> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        message: Vec<M::Target>,
+        message: Buffer<M::Target>,
         witness: IrsWitness<M::Source>,
         claim: Claim<'_, M::Target>,
         folding_randomness: &[M::Target],
@@ -266,8 +266,7 @@ impl<M: Embedding> Config<M> {
         );
 
         // Step 1: g := Enc_{C'}(f, r') — Construction 9.7 Step 1, p.55
-        let message_buffer = Buffer::from(message.as_slice());
-        let target_witness = self.target.commit(prover_state, &[&message_buffer]);
+        let target_witness = self.target.commit(prover_state, &[&message]);
 
         // Grind Lemma 9.9 OOD gap before α is sampled.
         self.pow.prove(prover_state);
@@ -281,35 +280,42 @@ impl<M: Embedding> Config<M> {
         // Source IRS matrix is no longer needed; release it before the trailing
         // arithmetic and the caller's mask-discharge phase.
         drop(witness);
-        let collapse_weights = eq_weights(folding_randomness);
-        let collapsed_values: Vec<M::Target> = source_evaluations
-            .matrix
-            .to_slice()
-            .chunks_exact(self.source.interleaving_depth())
-            .map(|row| mixed_dot(self.source.embedding(), &collapse_weights, row))
-            .collect();
+        let collapse_weights = Buffer::<M::Target>::eq_weights(folding_randomness);
+        let collapsed_values =
+            source_evaluations.values_buffer(self.source.embedding(), &collapse_weights);
 
         // Step 4.1: batching — Construction 9.7 Step 4, p.55
         let num_ood = self.out_domain_samples;
         let num_in_domain = source_evaluations.points.len();
-        let batching_coeffs =
-            geometric_challenge::<_, M::Target>(prover_state, 1 + num_ood + num_in_domain);
-        let (&original_sl_coeff, constraint_rlc_coeffs) = batching_coeffs.split_first().unwrap();
-        let (ood_rlc_coeffs, in_domain_rlc_coeffs) = constraint_rlc_coeffs.split_at(num_ood);
+        let (batching_base, batching_coeffs) = geometric_challenge_groups_with_offset::<_, M::Target>(
+            prover_state,
+            1,
+            &[num_ood, num_in_domain],
+        );
+        let mut batching_coeffs = batching_coeffs.into_iter();
+
+        // x⁰ belongs to the original claim. OOD answers are already
+        // transcript-sized host values, while their covector weights must stay
+        // resident, so derive both runs from the same Fiat–Shamir base.
+        let ood_rlc_coeffs = batching_coeffs.next().unwrap();
+        let in_domain_rlc_coeffs = batching_coeffs.next().unwrap();
+        let mut next_coeff = batching_base;
+        let mut ood_sum = M::Target::ZERO;
+        for answer in ood_answers {
+            ood_sum += next_coeff * answer;
+            next_coeff *= batching_base;
+        }
 
         // Mirror verifier's sum update — Construction 9.7 Decision phase, p.55.
-        *sum = original_sl_coeff * *sum
-            + dot(ood_rlc_coeffs, &ood_answers)
-            + dot(in_domain_rlc_coeffs, &collapsed_values);
+        *sum += ood_sum + in_domain_rlc_coeffs.dot(&collapsed_values);
 
         // Covector update — sl' from Completeness proof (p.55-56)
         let eval_points = lift(self.source.embedding(), &source_evaluations.points);
-        scalar_mul(covector, original_sl_coeff);
         self.update_covector(
             covector,
-            ood_rlc_coeffs,
+            &ood_rlc_coeffs,
             &ood_points,
-            in_domain_rlc_coeffs,
+            &in_domain_rlc_coeffs,
             &eval_points,
         );
 
@@ -325,7 +331,7 @@ impl<M: Embedding> Config<M> {
     fn maybe_send_ood_answers<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        message: &[M::Target],
+        message: &Buffer<M::Target>,
         mask: &[M::Target],
         ood_points: &[M::Target],
     ) -> Vec<M::Target>
@@ -337,7 +343,7 @@ impl<M: Embedding> Config<M> {
         let msg_len = message.len();
         let mut answers = Vec::with_capacity(ood_points.len());
         for &point in ood_points {
-            let f_eval = univariate_evaluate(message, point);
+            let f_eval = message.mixed_univariate_evaluate(&Identity::<M::Target>::new(), point);
             let answer = match &self.mode {
                 CodeSwitchMode::Standard => f_eval,
                 CodeSwitchMode::ZeroKnowledge { .. } => {
@@ -352,34 +358,30 @@ impl<M: Embedding> Config<M> {
         answers
     }
 
-    /// Accumulate OOD and in-domain weights into the covector.
-    /// Standard mode treats all points uniformly; ZK mode applies OOD over
-    /// the full `[f; r; s]` and in-domain over the `[f; r]` prefix only.
+    /// Update the resident covector. Constraint metadata is transcript-sized;
+    /// only the witness-sized covector remains on the selected backend.
     fn update_covector(
         &self,
-        covector: &mut [M::Target],
-        ood_rlc_coeffs: &[M::Target],
+        covector: &mut Buffer<M::Target>,
+        ood_rlc_coeffs: &Buffer<M::Target>,
         ood_points: &[M::Target],
-        in_domain_rlc_coeffs: &[M::Target],
+        in_domain_rlc_coeffs: &Buffer<M::Target>,
         in_domain_points: &[M::Target],
     ) {
         match &self.mode {
             CodeSwitchMode::Standard => {
-                let all_points: Vec<_> =
-                    ood_points.iter().chain(in_domain_points).copied().collect();
-                let pows: Vec<_> = ood_rlc_coeffs
-                    .iter()
-                    .chain(in_domain_rlc_coeffs)
-                    .copied()
-                    .collect();
-                geometric_accumulate(covector, pows, &all_points);
+                let mut points = Vec::with_capacity(ood_points.len() + in_domain_points.len());
+                points.extend_from_slice(ood_points);
+                points.extend_from_slice(in_domain_points);
+                let scalars = ood_rlc_coeffs.concat(in_domain_rlc_coeffs);
+                covector.accumulate_geometric(&points, &scalars, covector.len());
             }
             CodeSwitchMode::ZeroKnowledge { .. } => {
-                geometric_accumulate(covector, ood_rlc_coeffs.to_vec(), ood_points);
-                geometric_accumulate(
-                    &mut covector[..self.source.masked_message_length()],
-                    in_domain_rlc_coeffs.to_vec(),
+                covector.accumulate_geometric(ood_points, ood_rlc_coeffs, covector.len());
+                covector.accumulate_geometric(
                     in_domain_points,
+                    in_domain_rlc_coeffs,
+                    self.source.masked_message_length(),
                 );
             }
         }
@@ -452,6 +454,7 @@ impl<M: Embedding> Config<M> {
         let num_in_domain = source_evaluations.points.len();
         let coeffs = geometric_challenge(verifier_state, 1 + num_ood + num_in_domain);
         let (&original_sl_coeff, all_rlc_coeffs) = coeffs.split_first().unwrap();
+        debug_assert_eq!(original_sl_coeff, M::Target::ONE);
         let (ood_rlc_coeffs, in_domain_rlc_coeffs) = all_rlc_coeffs.split_at(num_ood);
 
         *sum = original_sl_coeff * *sum
@@ -477,7 +480,7 @@ impl<M: Embedding> Config<M> {
         &self,
         verifier_state: &mut VerifierState<H>,
         sum: &mut M::Target,
-        covector: &mut [M::Target],
+        covector: &mut Buffer<M::Target>,
         folding_randomness: &[M::Target],
         commitment: &IrsCommitment,
     ) -> VerificationResult<Commitment>
@@ -496,12 +499,14 @@ impl<M: Embedding> Config<M> {
         let (target_commitment, params) =
             self.verify_inner(verifier_state, sum, folding_randomness, commitment)?;
 
-        scalar_mul(covector, params.original_sl_coeff);
+        covector.scalar_mul(params.original_sl_coeff);
+        let ood_rlc_coeffs = Buffer::from(params.ood_rlc_coeffs);
+        let in_domain_rlc_coeffs = Buffer::from(params.in_domain_rlc_coeffs);
         self.update_covector(
             covector,
-            &params.ood_rlc_coeffs,
+            &ood_rlc_coeffs,
             &params.ood_eval_points,
-            &params.in_domain_rlc_coeffs,
+            &in_domain_rlc_coeffs,
             &params.in_domain_eval_points,
         );
 
@@ -742,7 +747,7 @@ mod tests {
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
-        let mut verifier_covector = covector.clone();
+        let mut verifier_covector = Buffer::from(covector.clone());
         let mut prover_sum = initial_sum;
 
         let instance = U64(seed);
@@ -759,10 +764,12 @@ mod tests {
         let folded_message =
             fold_chunks(&f_full, config.source.message_length(), &folding_randomness);
         let mask_msg = build_mask_msg(config, &source_witness, &folding_randomness, &mut rng);
+        let folded_message_buffer = Buffer::from(folded_message.as_slice());
+        let mut covector = Buffer::from(covector);
 
         let witness = config.prove(
             &mut prover_state,
-            folded_message.clone(),
+            folded_message_buffer,
             source_witness,
             Claim {
                 covector: &mut covector,
@@ -789,7 +796,7 @@ mod tests {
             )
             .unwrap();
         verifier_state.check_eof().unwrap();
-        assert_eq!(witness.message, folded_message);
+        assert_eq!(witness.message.to_slice(), folded_message);
         assert_eq!(covector, verifier_covector);
     }
 
@@ -803,7 +810,7 @@ mod tests {
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
-        let mut verifier_covector = covector.clone();
+        let mut verifier_covector = Buffer::from(covector.clone());
 
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -833,6 +840,8 @@ mod tests {
         };
         let initial_mu = dot(&h, &covector);
         let mut prover_sum = initial_mu;
+        let folded_message = Buffer::from(folded_message);
+        let mut covector = Buffer::from(covector);
 
         let _witness = config.prove(
             &mut prover_state,
@@ -865,7 +874,7 @@ mod tests {
         verifier_state.check_eof().unwrap();
 
         assert_eq!(covector, verifier_covector);
-        assert_eq!(dot(&h, &verifier_covector), verifier_sum);
+        assert_eq!(dot(&h, verifier_covector.to_slice()), verifier_sum);
     }
 
     fn test_tampered_ood_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<Identity<F>>)
@@ -882,7 +891,7 @@ mod tests {
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
-        let mut verifier_covector = covector.clone();
+        let mut verifier_covector = Buffer::from(covector.clone());
 
         // Commit honest f_full, fold to get the honest post-fold message.
         let mut prover_state = ProverState::new_std(&ds);
@@ -899,6 +908,8 @@ mod tests {
         // Tamper the post-fold message before proving.
         let mut tampered = folded_message.clone();
         tampered[0] += F::ONE;
+        let tampered = Buffer::from(tampered);
+        let mut covector = Buffer::from(covector);
         let _witness = config.prove(
             &mut prover_state,
             tampered,
@@ -930,7 +941,10 @@ mod tests {
         verifier_state.check_eof().unwrap();
 
         // Sum diverges — downstream sumcheck would reject
-        assert_ne!(dot(&folded_message, &verifier_covector), verifier_sum);
+        assert_ne!(
+            dot(&folded_message, verifier_covector.to_slice()),
+            verifier_sum
+        );
     }
 
     fn test<F: Field + Codec<[u8]> + 'static>()

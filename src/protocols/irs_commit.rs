@@ -38,7 +38,7 @@ use crate::{
         VerifierMessage, VerifierState,
     },
     type_info::Typed,
-    utils::{chunks_exact_or_empty, zip_strict},
+    utils::zip_strict,
 };
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
@@ -384,27 +384,15 @@ impl<M: Embedding> Config<M> {
         let num_polys = self.num_messages();
         let masks = Buffer::<M::Source>::random(prover_state.rng(), mask_length * num_polys);
 
-        // Engine takes unified polynomial slices (message || mask); the
-        // message/mask split is an IRS-side concept, not part of the NTT API.
-        let message_length = self.message_length();
-        let poly_length = message_length + mask_length;
-        let masks_slice = masks.to_slice();
-        let mut poly_buf = Vec::with_capacity(num_polys * poly_length);
-        let mut poly_idx = 0;
-        for vector in vectors {
-            for message in
-                chunks_exact_or_empty(vector.to_slice(), message_length, self.interleaving_depth)
-            {
-                poly_buf.extend_from_slice(message);
-                poly_buf.extend_from_slice(
-                    &masks_slice[poly_idx * mask_length..(poly_idx + 1) * mask_length],
-                );
-                poly_idx += 1;
-            }
-        }
-        debug_assert_eq!(poly_idx, num_polys);
-        let polys: Vec<&[M::Source]> = poly_buf.chunks_exact(poly_length).collect();
-        let matrix = ntt::interleaved_rs_encode(&polys, self.codeword_length);
+        let matrix = {
+            let mask_buffers = [&masks];
+            let segments = [
+                ntt::PolynomialSegment::from_rows(vectors, self.interleaving_depth),
+                ntt::PolynomialSegment::from_rows(&mask_buffers, num_polys),
+            ];
+            let polynomials = ntt::Polynomials::from_segments(&segments);
+            ntt::interleaved_rs_encode(polynomials, self.codeword_length)
+        };
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
@@ -653,11 +641,14 @@ impl<F: Field> Evaluations<F> {
         self.rows().map(|row| dot(weights, row))
     }
 
-    /// Buffer-native [`values`](Self::values): a matrix-vector product on the
-    /// backend, returning one value per point. Both the matrix and the weights
-    /// stay on-device, so no readback of the (potentially large) weights is
-    /// forced. Used by the prover.
-    pub fn values_buffer(&self, weights: &Buffer<F>) -> Buffer<F> {
+    /// Reduce each row against resident `weights` through `embedding`, yielding
+    /// one resident target-field value per point. An [`Identity`](crate::algebra::embedding::Identity)
+    /// embedding covers the same-field case, so prover code has one path for
+    /// both same- and mixed-field reductions.
+    pub fn values_buffer<M>(&self, embedding: &M, weights: &Buffer<M::Target>) -> Buffer<M::Target>
+    where
+        M: Embedding<Source = F>,
+    {
         let num_points = self.num_points();
         if num_points == 0 {
             assert!(self.matrix.is_empty(), "evaluation matrix has no points");
@@ -677,7 +668,7 @@ impl<F: Field> Evaluations<F> {
         if num_columns == 0 {
             return Buffer::zeros(num_points);
         }
-        self.matrix.mat_vec(weights)
+        self.matrix.mixed_mat_vec(embedding, weights)
     }
 }
 

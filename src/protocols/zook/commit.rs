@@ -8,8 +8,8 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, R
 use tracing::instrument;
 
 use crate::{
-    algebra::{embedding::Embedding, lift},
-    buffer::Buffer,
+    algebra::embedding::Embedding,
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
         irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
@@ -34,12 +34,12 @@ pub(crate) enum CommittedState<M: Embedding> {
     /// The message stays in `M::Source`: the first round's sumcheck lifts it
     /// into `M::Target` at its first fold.
     Round {
-        message: Vec<M::Source>,
+        message: Buffer<M::Source>,
         irs_witness: IrsWitness<M::Source>,
     },
     /// Basecase-only plan; witness was lifted into `M::Target` first.
     Basecase {
-        message: Vec<M::Target>,
+        message: Buffer<M::Target>,
         irs_witness: IrsWitness<M::Target>,
     },
 }
@@ -52,12 +52,12 @@ pub struct Commitment {
 }
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    /// Commit the initial witness to the protocol's first IRS codeword.
+    /// Commit an already-resident witness to the protocol's first IRS codeword.
     #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::commit", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds())))]
     pub fn commit<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
-        witness: &[M::Source],
+        witness: Buffer<M::Source>,
     ) -> CommittedWitness<M>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
@@ -73,18 +73,16 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         );
 
         let state = if let Some(round) = self.first_round() {
-            let witness_buffer = Buffer::from(witness);
-            let irs_witness = round.code_switch().source().commit(ps, &[&witness_buffer]);
+            let irs_witness = round.code_switch().source().commit(ps, &[&witness]);
             CommittedState::Round {
-                message: witness.to_vec(),
+                message: witness,
                 irs_witness,
             }
         } else {
             // Basecase IRS is over `M::Target`; lift before committing.
             let embedding = M::default();
-            let message = lift(&embedding, witness);
-            let message_buffer = Buffer::from(message.as_slice());
-            let irs_witness = self.basecase().commit().commit(ps, &[&message_buffer]);
+            let message = witness.mixed_lift(&embedding);
+            let irs_witness = self.basecase().commit().commit(ps, &[&message]);
             CommittedState::Basecase {
                 message,
                 irs_witness,
@@ -115,7 +113,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        algebra::random_vector,
         hash,
         protocols::params::{
             spec::{
@@ -167,14 +164,14 @@ mod tests {
         seed: u64,
     ) -> CommittedWitness<TestEmbedding> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let witness = random_vector::<F>(&mut rng, config.tuning().vector_size);
+        let witness = Buffer::<F>::random(&mut rng, config.tuning().vector_size);
 
         let ds = DomainSeparator::protocol(&"zook-commit-test")
             .session(&format!("commit roundtrip {}:{}", file!(), line!()))
             .instance(&Empty);
 
         let mut prover_state = ProverState::new_std(&ds);
-        let committed = config.commit(&mut prover_state, &witness);
+        let committed = config.commit(&mut prover_state, witness);
         let proof = prover_state.proof();
 
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
@@ -195,7 +192,7 @@ mod tests {
             tuning_with_rounds(),
         )
         .unwrap();
-        assert!(!config.rounds().is_empty());
+        assert_ne!(config.rounds().len(), 0);
         let committed = roundtrip(&config, 0);
         assert!(matches!(committed.state, CommittedState::Round { .. }));
     }
@@ -218,7 +215,7 @@ mod tests {
             tuning_basecase_only(),
         )
         .unwrap();
-        assert!(config.rounds().is_empty());
+        assert_eq!(config.rounds().len(), 0);
         let committed = roundtrip(&config, 2);
         assert!(matches!(committed.state, CommittedState::Basecase { .. }));
     }
@@ -232,12 +229,12 @@ mod tests {
         )
         .unwrap();
         let mut rng = StdRng::seed_from_u64(3);
-        let too_short = random_vector::<F>(&mut rng, config.tuning().vector_size - 1);
+        let too_short = Buffer::<F>::random(&mut rng, config.tuning().vector_size - 1);
 
         let ds = DomainSeparator::protocol(&"zook-commit-test")
             .session(&format!("wrong size {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
-        let _ = config.commit(&mut prover_state, &too_short);
+        let _ = config.commit(&mut prover_state, too_short);
     }
 }

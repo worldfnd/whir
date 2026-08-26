@@ -1,5 +1,8 @@
 use divan::{black_box, AllocProfiler, Bencher};
-use whir::algebra::{fields::Field64, ntt, random_vector};
+use whir::{
+    algebra::{fields::Field64, ntt, random_vector},
+    buffer::{Buffer, BufferOps},
+};
 
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
@@ -28,15 +31,17 @@ fn interleaved_rs_encode(bencher: Bencher, case: &(usize, usize, usize)) {
             let message_length = 1 << (exp - coset_sz);
             let num_messages = 1 << coset_sz;
             let mut rng = ark_std::rand::thread_rng();
-            let coeffs: Vec<Vec<Field64>> = (0..num_messages)
-                .map(|_| random_vector(&mut rng, message_length))
+            let coeffs: Vec<Buffer<Field64>> = (0..num_messages)
+                .map(|_| Buffer::from(random_vector(&mut rng, message_length)))
                 .collect();
-            (coeffs, expansion, coset_sz)
+            (coeffs, expansion)
         })
-        .bench_values(|(coeffs, expansion, _coset_sz)| {
-            let coeffs_refs = coeffs.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+        .bench_values(|(coeffs, expansion)| {
+            let coefficient_refs = coeffs.iter().collect::<Vec<_>>();
+            let segments = [ntt::PolynomialSegment::from_rows(&coefficient_refs, 1)];
+            let polynomials = ntt::Polynomials::from_segments(&segments);
             black_box(ntt::interleaved_rs_encode(
-                &coeffs_refs,
+                polynomials,
                 coeffs[0].len() * expansion,
             ))
         });

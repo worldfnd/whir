@@ -1,9 +1,7 @@
 use ark_ff::Field;
 
 use super::LinearForm;
-use crate::algebra::{
-    embedding::Embedding, geometric_accumulate, linear_form::Evaluate, mixed_univariate_evaluate,
-};
+use crate::algebra::{embedding::Embedding, linear_form::Evaluate, mixed_univariate_evaluate};
 
 /// Linear form to represent univariate polynomial evaluation.
 ///
@@ -20,21 +18,6 @@ pub struct UnivariateEvaluation<F: Field> {
 impl<F: Field> UnivariateEvaluation<F> {
     pub const fn new(point: F, size: usize) -> Self {
         Self { size, point }
-    }
-
-    /// Batched version of [`LinearForm::accumulate`] for many [`UnivariateEvaluation`]s.
-    pub fn accumulate_many(evaluators: &[Self], accumulator: &mut [F], scalars: &[F]) {
-        assert_eq!(evaluators.len(), scalars.len());
-        let Some(size) = evaluators.first().map(|e| e.size) else {
-            return;
-        };
-        assert_eq!(accumulator.len(), size);
-        for evaluator in evaluators {
-            assert_eq!(evaluator.size, size);
-        }
-        let points = evaluators.iter().map(|e| e.point).collect::<Vec<F>>();
-        let scalars = scalars.to_vec();
-        geometric_accumulate(accumulator, scalars, &points);
     }
 }
 
@@ -55,7 +38,6 @@ impl<F: Field> LinearForm<F> for UnivariateEvaluation<F> {
         result
     }
 
-    /// See also [`Self::accumulate_many`] for a more efficient batched version.
     fn accumulate(&self, accumulator: &mut [F], scalar: F) {
         assert_eq!(accumulator.len(), self.size);
         let mut power = scalar;

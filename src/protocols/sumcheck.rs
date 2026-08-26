@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    algebra::{embedding::Embedding, lift, univariate_evaluate},
+    algebra::{embedding::Embedding, univariate_evaluate},
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::proof_of_work,
     transcript::{
@@ -262,10 +262,10 @@ impl<F: Field> Config<F> {
                 folded
             }
             // No rounds: nothing folds, but the caller still expects a
-            // target-field buffer. Cold path; a plain lift is fine.
+            // target-field buffer. Keep the lift on the selected backend.
             (None, None) => {
                 let a = a.take().expect("source buffer consumed once");
-                Buffer::from(lift(embedding, a.to_slice()))
+                a.mixed_lift(embedding)
             }
             (Some(_), None) => unreachable!("folded buffer implies a prior challenge"),
         };
