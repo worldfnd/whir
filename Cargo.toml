@@ -1,10 +1,16 @@
 [package]
-name = "whir"
-version = "0.1.0"
+name = "provekit-whir"
+version = "0.2.0"
 edition = "2021"
+description = "An implementation of the WHIR polynomial commitment scheme"
+license = "MIT"
+repository = "https://github.com/worldfnd/whir"
 
 default-run = "main"
 rust-version = "1.87.0"
+
+[lib]
+name = "whir"
 
 [lints.clippy]
 # all lints that are on by default (correctness, suspicious, style, complexity, perf)
@@ -33,15 +39,15 @@ similar_names = "allow"
 redundant_closure_for_method_calls = "allow"
 
 [dependencies]
-ark-std = { version = "0.5", features = ["std"] }
-ark-ff = { version = "0.5", features = ["asm", "std"] }
-ark-serialize = "0.5"
-blake3 = { version = "1.5", features = ["digest", "traits-preview"] }
+ark-std = { version = "0.6", features = ["std"] }
+ark-ff = { version = "0.6", features = ["asm", "std"] }
+ark-serialize = "0.6"
+blake3 = { version = "=1.8.3", features = ["digest", "traits-preview"] }
 sha3 = { version = "0.10.7", features = ["asm", "oid"] }
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-spongefish = { git = "https://github.com/arkworks-rs/spongefish", features = ["ark-ff"], rev = "fcc277f8a857fdeeadd7cca92ab08de63b1ff1a1"}
+spongefish = { package = "provekit-spongefish", version = "0.2.0", features = ["ark-ff"] }
 rayon = { version = "1.10", optional = true }
 itertools = "0.14"
 tracing = { version = "0.1", features = ["attributes"], optional = true }
