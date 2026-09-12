@@ -465,6 +465,114 @@ where
         self.verify_inner(verifier_state, commitments, indices, points)
     }
 
+    /// Opens the commitment without requiring `witness.matrix` to be
+    /// populated.
+    ///
+    /// Functionally identical to [`open`]: same in-domain challenges, same
+    /// transcript bytes (submatrix hint + Merkle paths), same returned
+    /// [`Evaluations`]. The difference is that the queried codeword rows
+    /// are reconstructed from the supplied polynomial coefficients via an
+    /// output-pruned NTT (see [`ntt::partial_interleaved_rs_encode`]), so
+    /// the prover never materialises the full `(num_cols × codeword_length)`
+    /// codeword matrix held in `witness.matrix`.
+    ///
+    /// `coeffs_per_witness[i]` must be the same polynomial slice set that
+    /// would have produced `witnesses[i].matrix` via
+    /// [`interleaved_rs_encode`]. Mismatch results in verifier rejection.
+    pub fn open_from_coeffs<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        coeffs_per_witness: &[&[&[M::Source]]],
+        witnesses: &[&Witness<M::Source, M::Target>],
+    ) -> Evaluations<M::Source>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        u8: Decoding<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        assert_eq!(coeffs_per_witness.len(), witnesses.len());
+        for witness in witnesses {
+            assert_eq!(witness.out_of_domain.points.len(), self.out_domain_samples);
+            assert_eq!(
+                witness.out_of_domain.matrix.len(),
+                self.out_domain_samples * self.num_vectors
+            );
+        }
+        let (indices, points) = self.in_domain_challenges(prover_state);
+        self.open_inner_from_coeffs(
+            prover_state,
+            coeffs_per_witness,
+            witnesses,
+            &indices,
+            points,
+        )
+    }
+
+    /// Like [`open_from_coeffs`] but with caller-provided indices, mirroring
+    /// [`open_at_indices`]. Used for the Γ consistency check.
+    pub fn open_at_indices_from_coeffs<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        coeffs_per_witness: &[&[&[M::Source]]],
+        witnesses: &[&Witness<M::Source, M::Target>],
+        indices: &[usize],
+    ) -> Evaluations<M::Source>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Hash: ProverMessage<[H::U]>,
+    {
+        assert!(
+            indices.iter().all(|&i| i < self.codeword_length),
+            "index out of bounds: all indices must be < codeword_length ({})",
+            self.codeword_length
+        );
+        assert_eq!(coeffs_per_witness.len(), witnesses.len());
+        let generator = self.generator();
+        let points: Vec<M::Source> = indices.iter().map(|&i| generator.pow([i as u64])).collect();
+        self.open_inner_from_coeffs(prover_state, coeffs_per_witness, witnesses, indices, points)
+    }
+
+    /// Shared open logic for [`open_from_coeffs`] and [`open_at_indices_from_coeffs`].
+    fn open_inner_from_coeffs<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        coeffs_per_witness: &[&[&[M::Source]]],
+        witnesses: &[&Witness<M::Source, M::Target>],
+        indices: &[usize],
+        points: Vec<M::Source>,
+    ) -> Evaluations<M::Source>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Hash: ProverMessage<[H::U]>,
+    {
+        let num_cols = self.num_cols();
+        let stride = witnesses.len() * num_cols;
+        let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
+        let mut matrix_col_offset = 0;
+        for (coeffs, witness) in coeffs_per_witness.iter().zip(witnesses) {
+            let submatrix = ntt::partial_interleaved_rs_encode(
+                coeffs,
+                self.codeword_length,
+                self.interleaving_depth,
+                indices,
+            );
+            debug_assert_eq!(submatrix.len(), indices.len() * num_cols);
+            for (row, src) in submatrix.chunks_exact(num_cols).enumerate() {
+                let dst = &mut matrix[row * stride + matrix_col_offset
+                    ..row * stride + matrix_col_offset + num_cols];
+                dst.copy_from_slice(src);
+            }
+            prover_state.prover_hint_ark(&submatrix);
+            self.matrix_commit
+                .open(prover_state, &witness.matrix_witness, indices);
+            matrix_col_offset += num_cols;
+        }
+        Evaluations { points, matrix }
+    }
+
     /// Shared open logic for [`open`] and [`open_at_indices`].
     fn open_inner<H, R>(
         &self,

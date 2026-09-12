@@ -103,7 +103,14 @@ impl<F: FftField> Config<F> {
 
         // Step 1b: Commit [[f̂]] via first WHIR instance.
         let f_hat_refs: Vec<&[F]> = f_hat_polys.iter().map(|p| p.as_slice()).collect();
-        let f_hat_witness = self.blinded_polynomial.commit(prover_state, &f_hat_refs);
+        let mut f_hat_witness = self.blinded_polynomial.commit(prover_state, &f_hat_refs);
+
+        // Drop the encoded codeword; will be re-encoded immediately before each
+        // open in prove_blinded_polynomial (Steps 4 and 6). This keeps the
+        // ~codeword_length × interleaving_depth field elements out of the
+        // resident set during the prepare_and_sumcheck rounds where global peak
+        // hits.
+        f_hat_witness.matrix = Vec::new();
 
         // Step 1c: Sample ν + 1 random ℓ-variate blinding polynomials ĝ₀..ĝ_ν.
         let num_blinding_polys = dims.num_g_polys();
@@ -138,9 +145,16 @@ impl<F: FftField> Config<F> {
         }
         let blinding_refs: Vec<&[F]> = blinding_vectors.iter().map(|v| v.as_slice()).collect();
 
-        let blinding_poly_witness = self
+        let mut blinding_poly_witness = self
             .blinding_polynomial
             .commit(prover_state, &blinding_refs);
+
+        // The encoded codeword is only needed when [[M, ĝ]] is opened in
+        // Step 7. Until then it is dead weight (held resident through all of
+        // prove_blinded_polynomial, where global peak hits). Drop the matrix
+        // here; the prover re-encodes from `secrets.blinding_vectors` just
+        // before calling `blinding_polynomial.prove`.
+        blinding_poly_witness.matrix = Vec::new();
 
         Witness {
             f_hat_witness,

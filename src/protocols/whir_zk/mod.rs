@@ -964,10 +964,11 @@ mod tests {
             .irs_committer
             .commit(&mut prover_state, &[&f_zk]);
         round_config.pow.prove(&mut prover_state);
+        let f_hat_refs: Vec<&[F]> = f_hat_polys.iter().map(Vec::as_slice).collect();
         let in_domain = config
             .blinded_polynomial
             .initial_committer
-            .open(&mut prover_state, &[&f_hat_witness]);
+            .open_from_coeffs(&mut prover_state, &[&f_hat_refs], &[&f_hat_witness]);
 
         let mut lambda_z_points: Vec<F> = Vec::new();
         let send_blinding = |ps: &mut ProverState<_, _>, z: F| {
@@ -989,7 +990,6 @@ mod tests {
             send_blinding(&mut prover_state, z);
             lambda_z_points.push(z);
         }
-        drop(f_hat_polys);
         for &z in &in_domain.points {
             send_blinding(&mut prover_state, z);
             lambda_z_points.push(z);
@@ -1034,11 +1034,16 @@ mod tests {
             &round0_folding,
         );
         let gamma_points = remaining.first_in_domain_points;
-        let _ = config.blinded_polynomial.initial_committer.open_at_indices(
-            &mut prover_state,
-            &[&f_hat_witness],
-            &gamma_to_f_hat_indices(&gamma_points, &config),
-        );
+        let _ = config
+            .blinded_polynomial
+            .initial_committer
+            .open_at_indices_from_coeffs(
+                &mut prover_state,
+                &[&f_hat_refs],
+                &[&f_hat_witness],
+                &gamma_to_f_hat_indices(&gamma_points, &config),
+            );
+        drop(f_hat_polys);
         for &gamma in &gamma_points {
             send_blinding(&mut prover_state, gamma);
             lambda_z_points.push(gamma);
@@ -1068,6 +1073,21 @@ mod tests {
             .iter()
             .map(|v| Cow::Borrowed(v.as_slice()))
             .collect();
+        // Re-encode blinding_poly_witness.matrix (cleared at commit time);
+        // mirrors prover.rs::prove_blinded_polynomial before
+        // `prove_blinding_polynomial`.
+        let blinding_refs: Vec<&[F]> = secrets
+            .blinding_vectors
+            .iter()
+            .map(|v| v.as_slice())
+            .collect();
+        let mut blinding_poly_witness = blinding_poly_witness;
+        blinding_poly_witness.matrix = crate::algebra::ntt::interleaved_rs_encode(
+            &blinding_refs,
+            config.blinding_polynomial.initial_committer.codeword_length,
+            config.blinding_polynomial.initial_committer.interleaving_depth,
+        );
+        drop(blinding_refs);
         let _ = config.blinding_polynomial.prove(
             &mut prover_state,
             blinding_cows,

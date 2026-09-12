@@ -17,13 +17,15 @@ use std::{
 };
 
 use ark_ff::{FftField, Field};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use static_assertions::assert_obj_safe;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
-use self::matrix::MatrixMut;
+use self::{cooley_tukey::NttEngine, matrix::MatrixMut};
 pub use self::{
-    cooley_tukey::{generator, intt, intt_batch, ntt, ntt_batch},
+    cooley_tukey::{generator, intt, intt_batch, ntt, ntt_batch, PartialNttPlan},
     transpose::transpose,
     wavelet::{inverse_wavelet_transform, wavelet_transform},
 };
@@ -91,6 +93,76 @@ pub fn interleaved_rs_encode<F: 'static>(
 ) -> Vec<F> {
     let engine = NTT.get::<F>().expect("Unsupported field");
     engine.interleaved_encode(interleaved_coeffs, codeword_length, interleaving_depth)
+}
+
+/// Partial Reed-Solomon encode that materialises only the rows at `indices`.
+///
+/// Equivalent to taking [`interleaved_rs_encode`]'s output (a row-major
+/// `(codeword_length, num_polys * interleaving_depth)` matrix) and
+/// extracting the rows whose row index is in `indices`. Output layout is
+/// row-major `(indices.len(), num_polys * interleaving_depth)`, byte-exact
+/// against the full encode.
+///
+/// Uses an output-pruned NTT (see [`PartialNttPlan`]) so peak memory and
+/// flop count are both proportional to `indices.len()`, not
+/// `codeword_length`. The pruning plan is built once for the index set and
+/// reused across every polynomial × interleaving slot.
+#[cfg_attr(feature = "tracing", instrument(level = "debug", skip(coeffs, indices), fields(size = coeffs.len(), k = indices.len())))]
+pub fn partial_interleaved_rs_encode<F: FftField>(
+    coeffs: &[&[F]],
+    codeword_length: usize,
+    interleaving_depth: usize,
+    indices: &[usize],
+) -> Vec<F> {
+    if coeffs.is_empty() || indices.is_empty() {
+        return Vec::new();
+    }
+    let poly_size = coeffs[0].len();
+    for poly in coeffs {
+        assert_eq!(poly.len(), poly_size);
+    }
+    assert!(poly_size.is_multiple_of(interleaving_depth));
+    let message_length = poly_size / interleaving_depth;
+    assert!(codeword_length.is_multiple_of(message_length));
+
+    let num_polys = coeffs.len();
+    let num_cols = num_polys * interleaving_depth;
+    let k = indices.len();
+
+    let engine = NttEngine::<F>::new_from_cache();
+    let plan = PartialNttPlan::new(codeword_length, indices);
+
+    // Build the submatrix in batch-major layout (`(num_cols, k)`): each
+    // contiguous k-chunk is one NTT's outputs. Batches are independent, so
+    // populate in parallel across (poly_idx, slot_idx). Final transpose
+    // converts to the row-major `(k, num_cols)` layout that
+    // `irs_commit::open_inner_from_coeffs` expects.
+    let mut batch_major = vec![F::ZERO; num_cols * k];
+
+    #[cfg(feature = "parallel")]
+    {
+        batch_major
+            .par_chunks_exact_mut(k)
+            .enumerate()
+            .for_each(|(col, dst)| {
+                let poly_idx = col / interleaving_depth;
+                let slot_idx = col % interleaving_depth;
+                let block = &coeffs[poly_idx]
+                    [slot_idx * message_length..(slot_idx + 1) * message_length];
+                engine.ntt_partial_with_plan_into(block, &plan, dst, 1);
+            });
+    }
+    #[cfg(not(feature = "parallel"))]
+    for (col, dst) in batch_major.chunks_exact_mut(k).enumerate() {
+        let poly_idx = col / interleaving_depth;
+        let slot_idx = col % interleaving_depth;
+        let block =
+            &coeffs[poly_idx][slot_idx * message_length..(slot_idx + 1) * message_length];
+        engine.ntt_partial_with_plan_into(block, &plan, dst, 1);
+    }
+
+    transpose(&mut batch_major, num_cols, k);
+    batch_major
 }
 
 ///
@@ -349,5 +421,59 @@ mod tests {
         let interleaved_ntt =
             interleaved_rs_encode(&[poly.as_slice()], codeword_length, 1 << folding_factor);
         assert_eq!(expected, interleaved_ntt);
+    }
+
+    #[test]
+    fn test_partial_interleaved_rs_encode_matches_full() {
+        use ark_std::{rand::Rng, UniformRand};
+
+        let mut rng = ark_std::test_rng();
+
+        // Span several (num_polys, interleaving_depth, M, N) shapes covering
+        // the regimes that actually appear in whir_zk (single witness with
+        // depth 8, multi-witness with depth 1, M = N/4 blowup).
+        let cases = [
+            (1usize, 1usize, 64usize, 256usize),
+            (1, 8, 16, 64),
+            (2, 4, 32, 128),
+            (1, 8, 1 << 10, 1 << 12),
+        ];
+
+        for (num_polys, interleaving_depth, message_length, codeword_length) in cases {
+            let poly_size = message_length * interleaving_depth;
+            let polys: Vec<Vec<Field64>> = (0..num_polys)
+                .map(|_| (0..poly_size).map(|_| Field64::rand(&mut rng)).collect())
+                .collect();
+            let poly_slices: Vec<&[Field64]> = polys.iter().map(Vec::as_slice).collect();
+
+            let full = interleaved_rs_encode(&poly_slices, codeword_length, interleaving_depth);
+            let num_cols = num_polys * interleaving_depth;
+            assert_eq!(full.len(), codeword_length * num_cols);
+
+            // Random subset including 0, last, and a sprinkling in between.
+            let k = rng.gen_range(1..=codeword_length.min(16));
+            let mut perm: Vec<usize> = (0..codeword_length).collect();
+            for i in (1..codeword_length).rev() {
+                perm.swap(i, rng.gen_range(0..=i));
+            }
+            let indices: Vec<usize> = perm.into_iter().take(k).collect();
+
+            let partial = partial_interleaved_rs_encode(
+                &poly_slices,
+                codeword_length,
+                interleaving_depth,
+                &indices,
+            );
+            assert_eq!(partial.len(), k * num_cols);
+
+            for (row, &idx) in indices.iter().enumerate() {
+                let full_row = &full[idx * num_cols..(idx + 1) * num_cols];
+                let partial_row = &partial[row * num_cols..(row + 1) * num_cols];
+                assert_eq!(
+                    partial_row, full_row,
+                    "shape=({num_polys},{interleaving_depth},{message_length},{codeword_length}) row idx={idx}"
+                );
+            }
+        }
     }
 }
