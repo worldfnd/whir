@@ -111,6 +111,7 @@ impl DomainSeparator<'static, ()> {
     pub fn protocol<C: Serialize>(config: &C) -> Self {
         const INSTANCE: &() = &();
         let mut hash = Sha3_512::new();
+        hash.update(b"whir-protocol-v2");
         ciborium::into_writer(config, &mut hash).expect("Computing protocol hash failed");
         let protocol_id: [u8; 64] = hash.finalize().into();
         Self {

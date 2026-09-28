@@ -101,7 +101,7 @@ where
         .chain(in_domain.values(&folding_randomness.eq_weights()))
         .collect();
 
-    let stir_rlc_coeffs: Vec<F> = geometric_challenge(prover_state, stir_challenges.len());
+    let stir_rlc_coeffs: Vec<F> = geometric_challenge(prover_state, 1, stir_challenges.len());
     UnivariateEvaluation::accumulate_many(&stir_challenges, state.covector, &stir_rlc_coeffs);
     *state.the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
     debug_assert_eq!(dot(state.vector, state.covector), *state.the_sum);
@@ -198,7 +198,7 @@ where
         .chain(in_domain.values(&folding_randomness.eq_weights()))
         .collect();
 
-    let stir_rlc_coeffs: Vec<F> = geometric_challenge(verifier_state, stir_challenges.len());
+    let stir_rlc_coeffs: Vec<F> = geometric_challenge(verifier_state, 1, stir_challenges.len());
     *the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
 
     let folding_randomness = round_config.sumcheck.verify(verifier_state, the_sum)?;
