@@ -87,9 +87,10 @@ impl<F: FftField> Config<F> {
     /// - `blinding_security` is for the blinding instance (M and ĝ vectors)
     pub fn security_levels(&self, num_vectors: usize, num_linear_forms: usize) -> (f64, f64) {
         let num_blinding_vecs = self.blinding_polynomial.initial_committer.num_vectors;
-        let blinded_sec = self
-            .blinded_polynomial
-            .security_level(num_vectors, num_linear_forms);
+        let blinded_sec = self.blinded_polynomial.security_level(
+            num_vectors,
+            num_linear_forms + self.blinded_polynomial.initial_committer.out_domain_samples,
+        );
         let blinding_sec = self
             .blinding_polynomial
             .security_level(num_blinding_vecs, num_blinding_vecs);
@@ -377,6 +378,19 @@ mod tests {
         let evaluation = form.evaluate(config.embedding(), &vector);
 
         prove_and_verify(&config, vec![vector], vec![Box::new(form)], &[evaluation]);
+    }
+
+    #[test]
+    fn test_zk_prove_verify_with_only_initial_ood_claims() {
+        let config = make_test_config();
+        let initial_ood_samples = config
+            .blinded_polynomial
+            .initial_committer
+            .out_domain_samples;
+        assert_ne!(initial_ood_samples, 0);
+        let vector = vec![F::ONE; TEST_NUM_COEFFS];
+
+        prove_and_verify(&config, vec![vector], Vec::new(), &[]);
     }
 
     #[test]

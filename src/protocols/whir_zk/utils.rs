@@ -278,6 +278,27 @@ pub(super) fn build_beq_tables<F: FftField>(
     tables
 }
 
+/// Combine blinding-proof weights for initial OOD evaluations and later
+/// evaluations of the polynomial folded by the initial sumcheck.
+pub(super) fn build_beq_tables_with_initial_ood<F: FftField>(
+    z_points: &[F],
+    initial_ood_count: usize,
+    eq_weights: &[F],
+    tau: F,
+    dims: ProtocolDims,
+) -> Vec<Vec<F>> {
+    let (initial_points, folded_points) = z_points.split_at(initial_ood_count);
+    let mut tables = build_beq_tables(initial_points, &[F::ONE], tau, dims);
+    let folded_tables = build_beq_tables(folded_points, eq_weights, tau, dims);
+    let scale = tau.pow([initial_ood_count as u64]);
+    for (table, folded) in tables.iter_mut().zip(folded_tables) {
+        for (entry, folded_entry) in table.iter_mut().zip(folded) {
+            *entry += scale * folded_entry;
+        }
+    }
+    tables
+}
+
 /// RS-fold coefficient vectors for the blinding polynomials.
 ///
 /// Produced by [`compute_rs_fold_blinding_coeffs`]; consumed when evaluating
@@ -485,9 +506,7 @@ pub(super) fn compute_eq_weights<F: FftField>(r_bar: &[F]) -> Vec<F> {
     buf
 }
 
-/// Accumulator for blinding polynomial claims across OOD, STIR, and Γ queries.
-///
-/// Collects (z, m_evals, g_evals) tuples during Steps 5-6 for use in Step 7.
+/// Claims about the blinding polynomials at initial OOD, later OOD, STIR, and Γ points.
 #[derive(Debug)]
 pub(super) struct LambdaAccumulator<F> {
     z_points: Vec<F>,
@@ -549,11 +568,136 @@ impl<F> LambdaAccumulator<F> {
 
 #[cfg(test)]
 mod tests {
-    use ark_ff::{FftField, Field};
+    use ark_ff::{AdditiveGroup, FftField, Field};
     use proptest::prelude::*;
 
-    use super::{discrete_log_pow2, phi_i_bits};
-    use crate::algebra::fields::Field64;
+    use super::{
+        build_beq_tables, build_beq_tables_with_initial_ood, build_weight_covectors,
+        discrete_log_pow2, phi_i_bits, ProtocolDims,
+    };
+    use crate::algebra::{dot, fields::Field64, univariate_evaluate};
+
+    #[test]
+    fn initial_ood_and_folded_blinding_weights_match_direct_evaluations() {
+        for (mu, ell) in [(4, 2), (5, 2), (7, 3)] {
+            let nu = mu / ell;
+            let dims = ProtocolDims {
+                mu,
+                ell,
+                rem: mu % ell,
+                nu,
+                size: 1 << mu,
+                num_vectors: 2,
+                num_blinding_vecs: 2 + nu,
+            };
+            let points = [Field64::from(2), Field64::from(5), Field64::from(11)];
+            let r = Field64::from(3);
+            let eq_weights = [Field64::ONE - r, r];
+            let tau = Field64::from(7);
+            let tables = build_beq_tables_with_initial_ood(&points, 2, &eq_weights, tau, dims);
+
+            for (i, table) in tables.iter().enumerate() {
+                let poly: Vec<_> = (0..1 << dims.ell)
+                    .map(|k| Field64::from((i * (1 << ell) + k + 1) as u64))
+                    .collect();
+                let lifted: Vec<_> = (0..dims.size)
+                    .map(|k| poly[dims.phi_i_bits(k, i)])
+                    .collect();
+                let half = dims.size / eq_weights.len();
+                let folded: Vec<_> = (0..half)
+                    .map(|k| {
+                        eq_weights
+                            .iter()
+                            .enumerate()
+                            .map(|(c, &weight)| weight * lifted[c * half + k])
+                            .sum()
+                    })
+                    .collect();
+                let expected = tau * univariate_evaluate(&lifted, points[0])
+                    + tau.square() * univariate_evaluate(&lifted, points[1])
+                    + tau.square() * tau * univariate_evaluate(&folded, points[2]);
+                assert_eq!(dot(table, &poly), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn initial_ood_claim_matches_masked_witness_decomposition() {
+        let dims = ProtocolDims {
+            mu: 4,
+            ell: 2,
+            rem: 0,
+            nu: 2,
+            size: 16,
+            num_vectors: 2,
+            num_blinding_vecs: 4,
+        };
+        let witness_polys: Vec<Vec<Field64>> = (0..2)
+            .map(|i| {
+                (0..dims.size)
+                    .map(|k| Field64::from((i * 16 + k + 1) as u64))
+                    .collect()
+            })
+            .collect();
+        let masking_polys: Vec<Vec<Field64>> = (0u64..2)
+            .map(|i| (0u64..4).map(|k| Field64::from(i * 4 + k + 2)).collect())
+            .collect();
+        let g_polys: Vec<Vec<Field64>> = (0u64..3)
+            .map(|i| (0u64..4).map(|k| Field64::from(i * 4 + k + 10)).collect())
+            .collect();
+        let alpha = Field64::from(5);
+        let beta = Field64::from(3);
+        let rho = Field64::from(7);
+        let z = Field64::from(11);
+
+        let f_hat_evals: Vec<_> = witness_polys
+            .iter()
+            .zip(&masking_polys)
+            .map(|(poly, mask)| {
+                let f_hat: Vec<_> = (0..dims.size)
+                    .map(|k| poly[k] + mask[dims.phi_i_bits(k, 0)])
+                    .collect();
+                univariate_evaluate(&f_hat, z)
+            })
+            .collect();
+        let f_zk: Vec<_> = (0..dims.size)
+            .map(|k| {
+                rho * (witness_polys[0][k] + alpha * witness_polys[1][k])
+                    + g_polys[0][dims.phi_i_bits(k, 0)]
+                    + beta * g_polys[1][dims.phi_i_bits(k, 1)]
+                    + beta.square() * g_polys[2][dims.phi_i_bits(k, 2)]
+            })
+            .collect();
+        let blinding_vectors: Vec<Vec<_>> = masking_polys
+            .iter()
+            .map(|mask| {
+                g_polys[0]
+                    .iter()
+                    .zip(mask)
+                    .flat_map(|(&g, &m)| [g, m])
+                    .collect()
+            })
+            .chain(
+                g_polys[1..]
+                    .iter()
+                    .map(|g| g.iter().flat_map(|&value| [value, Field64::ZERO]).collect()),
+            )
+            .collect();
+        let tables = build_beq_tables(&[z], &[Field64::ONE], Field64::ONE, dims);
+        let weights = build_weight_covectors(&tables, rho, &[Field64::ONE, alpha], dims);
+        let claims: Vec<_> = weights
+            .iter()
+            .zip(&blinding_vectors)
+            .map(|(weight, vector)| dot(weight, vector))
+            .collect();
+        let reconstructed = rho * (f_hat_evals[0] + alpha * f_hat_evals[1])
+            + claims[0]
+            + claims[1]
+            + beta * claims[2]
+            + beta.square() * claims[3];
+
+        assert_eq!(reconstructed, univariate_evaluate(&f_zk, z));
+    }
 
     // ---------------------------------------------------------------
     // phi_i_bits unit tests
