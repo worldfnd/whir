@@ -254,7 +254,8 @@ where
                     &folding_randomness.eq_weights(),
                 )))
                 .collect::<Vec<_>>();
-            let stir_rlc_coeffs = geometric_challenge(prover_state, stir_challenges.len());
+            let stir_rlc_coeffs =
+                geometric_challenge(prover_state, 1 + stir_challenges.len())[1..].to_vec();
             UnivariateEvaluation::accumulate_many(
                 &stir_challenges,
                 &mut covector,

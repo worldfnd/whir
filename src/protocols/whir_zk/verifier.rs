@@ -4,8 +4,8 @@ use tracing::instrument;
 
 use super::{
     utils::{
-        build_beq_tables, build_weight_covectors, compute_eq_weights, gamma_to_f_hat_indices,
-        LambdaAccumulator, ProtocolDims,
+        build_beq_tables_with_initial_ood, build_weight_covectors, compute_eq_weights,
+        gamma_to_f_hat_indices, LambdaAccumulator, ProtocolDims,
     },
     Config,
 };
@@ -57,6 +57,7 @@ struct VerifyPrepareResult<F> {
     beta_powers: Vec<F>,
     constraint_rlc_coeffs: Vec<F>,
     the_sum: F,
+    initial_lambda: LambdaAccumulator<F>,
     rho: F,
     alpha_coeffs: Vec<F>,
     folding_randomness: MultilinearPoint<F>,
@@ -154,17 +155,39 @@ where
             })
             .collect();
 
+        let initial_ood = self.commitments.blinded_commitment.out_of_domain();
+        let mut initial_lambda = LambdaAccumulator::new();
+        let mut initial_ood_evals = Vec::with_capacity(initial_ood.points.len());
+        for (&z, f_hat_values) in initial_ood
+            .points
+            .iter()
+            .zip(initial_ood.matrix.chunks_exact(num_vectors))
+        {
+            let m_evals: Vec<F> = self.verifier_state.prover_messages_vec(num_vectors)?;
+            let g_evals: Vec<F> = self.verifier_state.prover_messages_vec(self.dims.nu)?;
+            let blinding_eval: F = m_evals.iter().copied().sum::<F>()
+                + g_evals
+                    .iter()
+                    .zip(beta_powers.iter().skip(1))
+                    .map(|(&claim, &beta)| beta * claim)
+                    .sum::<F>();
+            initial_ood_evals.push(rho * dot(&alpha_coeffs, f_hat_values) + blinding_eval);
+            initial_lambda.push(z, m_evals, g_evals);
+        }
+
         // =====================================================================
         // Step 4: WHIR Initial Round — sumcheck on f_zk
         //
         // P ↔ V: s-round sumcheck yielding folding randomness r̄
         // =====================================================================
-        let constraint_rlc_coeffs: Vec<F> = geometric_challenge(self.verifier_state, num_forms);
-        let mut the_sum: F = constraint_rlc_coeffs
+        let constraint_rlc_coeffs: Vec<F> =
+            geometric_challenge(self.verifier_state, num_forms + initial_ood.points.len());
+        let mut the_sum: F = constraint_rlc_coeffs[..num_forms]
             .iter()
             .zip(combined_claims.iter())
             .map(|(&c, &v)| c * v)
-            .sum();
+            .sum::<F>()
+            + dot(&constraint_rlc_coeffs[num_forms..], &initial_ood_evals);
 
         let folding_randomness = self
             .config
@@ -179,6 +202,7 @@ where
             beta_powers,
             constraint_rlc_coeffs,
             the_sum,
+            initial_lambda,
             rho,
             alpha_coeffs,
             folding_randomness,
@@ -220,7 +244,7 @@ where
             .initial_committer
             .verify(self.verifier_state, &[&self.commitments.blinded_commitment])?;
 
-        let mut lambda = LambdaAccumulator::new();
+        let mut lambda = prepare.initial_lambda;
 
         // --- 5d: OOD responses ---
         let one_weight = [F::ONE];
@@ -297,7 +321,7 @@ where
             .collect();
 
         let stir_rlc_coeffs: Vec<F> =
-            geometric_challenge(self.verifier_state, stir_challenges.len());
+            geometric_challenge(self.verifier_state, 1 + stir_challenges.len())[1..].to_vec();
         prepare.the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
 
         let mut round_constraints: Vec<(Vec<F>, Vec<UnivariateEvaluation<F>>)> =
@@ -378,12 +402,20 @@ where
 
         // Inline linear form RLC check (blinded polynomial FinalClaim).
         // Also returned to the caller for deferred verification.
-        let expected_rlc: F = prepare
-            .constraint_rlc_coeffs
+        let expected_forms: F = prepare.constraint_rlc_coeffs[..weights.len()]
             .iter()
             .zip(weights.iter())
             .map(|(&c, w)| c * w.mle_evaluate(&evaluation_point))
             .sum();
+        let initial_ood_points = &self.commitments.blinded_commitment.out_of_domain().points;
+        let expected_ood: F = prepare.constraint_rlc_coeffs[weights.len()..]
+            .iter()
+            .zip(initial_ood_points)
+            .map(|(&c, &z)| {
+                c * UnivariateEvaluation::new(z, self.dims.size).mle_evaluate(&evaluation_point)
+            })
+            .sum();
+        let expected_rlc = expected_forms + expected_ood;
         verify!(expected_rlc == linear_form_rlc);
 
         Ok(VerifyOodStirResult {
@@ -391,8 +423,8 @@ where
             gamma_points,
             gamma_h_values,
             evaluation_point,
-            constraint_rlc_coeffs: prepare.constraint_rlc_coeffs,
-            linear_form_rlc,
+            constraint_rlc_coeffs: prepare.constraint_rlc_coeffs[..weights.len()].to_vec(),
+            linear_form_rlc: linear_form_rlc - expected_ood,
             batching_weights: prepare.batching_weights,
             beta_powers: prepare.beta_powers,
             rho: prepare.rho,
@@ -544,8 +576,13 @@ impl<F: FftField> Config<F> {
         let blinded_final_claim = blinded.blinded_final_claim;
         let tau: F = verifier_state.verifier_message();
 
-        let beq_tables =
-            build_beq_tables(blinded.lambda.z_points(), &blinded.eq_weights, tau, dims);
+        let beq_tables = build_beq_tables_with_initial_ood(
+            blinded.lambda.z_points(),
+            self.blinded_polynomial.initial_committer.out_domain_samples,
+            &blinded.eq_weights,
+            tau,
+            dims,
+        );
 
         let weight_covectors =
             build_weight_covectors(&beq_tables, blinded.rho, &blinded.alpha_coeffs, dims);

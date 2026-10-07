@@ -1,6 +1,6 @@
 [package]
 name = "provekit-whir"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 description = "An implementation of the WHIR polynomial commitment scheme"
 license = "MIT"

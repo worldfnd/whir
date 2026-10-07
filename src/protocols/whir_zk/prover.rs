@@ -9,8 +9,9 @@ use tracing::instrument;
 
 use super::{
     utils::{
-        build_beq_tables, build_fold_args, build_weight_covectors, compute_eq_weights,
-        compute_rs_fold_blinding_coeffs, gamma_to_f_hat_indices, ProtocolDims, RsFoldCoeffs,
+        build_beq_tables, build_beq_tables_with_initial_ood, build_fold_args,
+        build_weight_covectors, compute_eq_weights, compute_rs_fold_blinding_coeffs,
+        gamma_to_f_hat_indices, ProtocolDims, RsFoldCoeffs,
     },
     Config,
 };
@@ -118,6 +119,8 @@ where
     fn prepare_and_sumcheck(
         &mut self,
         vectors: Vec<Cow<'_, [F]>>,
+        f_hat_witness: &irs_commit::Witness<F, F>,
+        blinding_vectors: &[Vec<F>],
         g_polys: &[Vec<F>],
         linear_forms: &[Box<dyn LinearForm<F>>],
         evaluations: &[F],
@@ -222,6 +225,34 @@ where
         }
         drop(g_poly);
 
+        let initial_ood = &f_hat_witness.out_of_domain;
+        let mut initial_ood_evals = Vec::with_capacity(initial_ood.points.len());
+        for (&z, f_hat_values) in initial_ood
+            .points
+            .iter()
+            .zip(initial_ood.matrix.chunks_exact(num_vectors))
+        {
+            let beq_tables = build_beq_tables(&[z], &[F::ONE], F::ONE, self.dims);
+            let blinding_weights =
+                build_weight_covectors(&beq_tables, rho, &alpha_coeffs, self.dims);
+            let claims: Vec<F> = blinding_weights
+                .iter()
+                .zip(blinding_vectors)
+                .map(|(weight, vector)| dot(weight, vector))
+                .collect();
+            for claim in &claims {
+                self.prover_state.prover_message(claim);
+            }
+            let blinding_eval: F = claims[..num_vectors].iter().copied().sum::<F>()
+                + claims[num_vectors..]
+                    .iter()
+                    .zip(beta_powers.iter().skip(1))
+                    .map(|(&claim, &beta)| beta * claim)
+                    .sum::<F>();
+            let f_zk_eval = rho * dot(&alpha_coeffs, f_hat_values) + blinding_eval;
+            initial_ood_evals.push(f_zk_eval);
+        }
+
         // combined_eval_j = dot(α, evaluations[j*n..(j+1)*n])
         let combined_claims: Vec<F> = (0..num_forms)
             .map(|j| {
@@ -237,18 +268,31 @@ where
         // P ↔ V: s-round sumcheck on f_zk with weight w, yielding r̄ = {r₀..r_{s-1}}
         // P then sends [[H]] = fold_k(ρ·f + g, r̄)
         // =====================================================================
-        let constraint_rlc_coeffs: Vec<F> =
-            geometric_challenge(self.prover_state, linear_forms.len());
+        let constraint_rlc_coeffs: Vec<F> = geometric_challenge(
+            self.prover_state,
+            linear_forms.len() + initial_ood.points.len(),
+        );
         let mut covector = vec![F::ZERO; size];
         for (coeff, lf) in constraint_rlc_coeffs.iter().zip(linear_forms.iter()) {
             lf.accumulate(&mut covector, *coeff);
         }
+        let ood_forms: Vec<_> = initial_ood
+            .points
+            .iter()
+            .map(|&z| UnivariateEvaluation::new(z, size))
+            .collect();
+        UnivariateEvaluation::accumulate_many(
+            &ood_forms,
+            &mut covector,
+            &constraint_rlc_coeffs[num_forms..],
+        );
 
-        let mut the_sum: F = constraint_rlc_coeffs
+        let mut the_sum: F = constraint_rlc_coeffs[..num_forms]
             .iter()
             .zip(combined_claims.iter())
             .map(|(&c, &eval)| c * eval)
-            .sum();
+            .sum::<F>()
+            + dot(&constraint_rlc_coeffs[num_forms..], &initial_ood_evals);
 
         let folding_randomness = self.config.blinded_polynomial.initial_sumcheck.prove(
             self.prover_state,
@@ -295,7 +339,8 @@ where
             )
             .collect();
 
-        let stir_rlc_coeffs: Vec<F> = geometric_challenge(prover_state, stir_challenges.len());
+        let stir_rlc_coeffs: Vec<F> =
+            geometric_challenge(prover_state, 1 + stir_challenges.len())[1..].to_vec();
         UnivariateEvaluation::accumulate_many(&stir_challenges, state.covector, &stir_rlc_coeffs);
         *state.the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
 
@@ -338,6 +383,7 @@ where
 
         let r_bar = folding_randomness.0;
         let eq_weights = compute_eq_weights(&r_bar);
+        let mut lambda_z_points = f_hat_witness.out_of_domain.points.clone();
         let RsFoldCoeffs {
             masking_coeffs_all,
             g_i_coeffs,
@@ -349,8 +395,6 @@ where
             rho,
             self.dims,
         );
-
-        let mut lambda_z_points: Vec<F> = Vec::new();
 
         // Precompute combined f̂ for OOD MLE evaluations.
         // When n=1, borrow directly to avoid a full 2^μ allocation.
@@ -471,6 +515,7 @@ impl<F: FftField> Config<F> {
         f_hat_polys: Vec<Vec<F>>,
         masking_polys: &[Vec<F>],
         g_polys: &[Vec<F>],
+        blinding_vectors: &[Vec<F>],
         linear_forms: &[Box<dyn LinearForm<F>>],
         evaluations: &[F],
     ) -> BlindedProveResult<F>
@@ -508,7 +553,14 @@ impl<F: FftField> Config<F> {
             dims,
         };
 
-        let prep = ctx.prepare_and_sumcheck(vectors, g_polys, linear_forms, evaluations);
+        let prep = ctx.prepare_and_sumcheck(
+            vectors,
+            f_hat_witness,
+            blinding_vectors,
+            g_polys,
+            linear_forms,
+            evaluations,
+        );
         let PrepareResult {
             mut f_zk,
             mut covector,
@@ -586,7 +638,13 @@ impl<F: FftField> Config<F> {
         let tau: F = prover_state.verifier_message();
 
         // beq_tables has num_g_polys = ν+1 entries (one per Φ projection)
-        let beq_tables = build_beq_tables(&blinded.lambda_z_points, &blinded.eq_weights, tau, dims);
+        let beq_tables = build_beq_tables_with_initial_ood(
+            &blinded.lambda_z_points,
+            self.blinded_polynomial.initial_committer.out_domain_samples,
+            &blinded.eq_weights,
+            tau,
+            dims,
+        );
 
         let weight_covectors =
             build_weight_covectors(&beq_tables, blinded.rho, &blinded.alpha_coeffs, dims);
@@ -657,6 +715,7 @@ impl<F: FftField> Config<F> {
             f_hat_polys,
             &secrets.masking_polys,
             &secrets.g_polys,
+            &secrets.blinding_vectors,
             &linear_forms,
             &evaluations,
         );

@@ -168,7 +168,7 @@ where
                 )))
                 .collect::<Vec<_>>();
             let constraint_rlc_coeffs =
-                geometric_challenge(verifier_state, constraint_values.len());
+                geometric_challenge(verifier_state, 1 + constraint_values.len())[1..].to_vec();
             the_sum += dot(&constraint_rlc_coeffs, &constraint_values);
             round_constraints.push((constraint_rlc_coeffs, constraint_weights));
 
