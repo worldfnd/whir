@@ -180,7 +180,7 @@ where
         // V → P: α ←$ F_q (for n > 1; when n = 1, α = [1] with no transcript cost)
         // Used to form f_combined = Σ αⁱ fᵢ before applying ρ.
         // =====================================================================
-        let alpha_coeffs: Vec<F> = geometric_challenge(self.prover_state, 0, num_vectors);
+        let alpha_coeffs: Vec<F> = geometric_challenge(self.prover_state, num_vectors);
 
         // =====================================================================
         // Step 3: Preparation for WHIR Sumcheck Rounds
@@ -270,7 +270,6 @@ where
         // =====================================================================
         let constraint_rlc_coeffs: Vec<F> = geometric_challenge(
             self.prover_state,
-            0,
             linear_forms.len() + initial_ood.points.len(),
         );
         let mut covector = vec![F::ZERO; size];
@@ -340,7 +339,8 @@ where
             )
             .collect();
 
-        let stir_rlc_coeffs: Vec<F> = geometric_challenge(prover_state, 1, stir_challenges.len());
+        let stir_rlc_coeffs: Vec<F> =
+            geometric_challenge(prover_state, 1 + stir_challenges.len())[1..].to_vec();
         UnivariateEvaluation::accumulate_many(&stir_challenges, state.covector, &stir_rlc_coeffs);
         *state.the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
 

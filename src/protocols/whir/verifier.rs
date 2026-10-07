@@ -83,11 +83,11 @@ where
         };
 
         // Random linear combination of the vectors.
-        let vector_rlc_coeffs = geometric_challenge(verifier_state, 0, num_vectors);
+        let vector_rlc_coeffs = geometric_challenge(verifier_state, num_vectors);
 
         // Random linear combination of the constraints.
         let constraint_rlc_coeffs: Vec<M::Target> =
-            geometric_challenge(verifier_state, 0, oods_evals.len() + num_linear_forms);
+            geometric_challenge(verifier_state, oods_evals.len() + num_linear_forms);
         let (initial_form_rlc_coeffs, oods_rlc_coeffs) =
             constraint_rlc_coeffs.split_at(num_linear_forms);
 
@@ -168,7 +168,7 @@ where
                 )))
                 .collect::<Vec<_>>();
             let constraint_rlc_coeffs =
-                geometric_challenge(verifier_state, 1, constraint_values.len());
+                geometric_challenge(verifier_state, 1 + constraint_values.len())[1..].to_vec();
             the_sum += dot(&constraint_rlc_coeffs, &constraint_values);
             round_constraints.push((constraint_rlc_coeffs, constraint_weights));
 

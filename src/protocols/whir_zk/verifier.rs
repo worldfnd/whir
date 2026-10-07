@@ -136,7 +136,7 @@ where
         //
         // V → P: α ←$ F_q (for n > 1; when n = 1, α = [1])
         // =====================================================================
-        let alpha_coeffs: Vec<F> = geometric_challenge(self.verifier_state, 0, num_vectors);
+        let alpha_coeffs: Vec<F> = geometric_challenge(self.verifier_state, num_vectors);
 
         // =====================================================================
         // Step 3: Preparation for WHIR Sumcheck Rounds
@@ -181,7 +181,7 @@ where
         // P ↔ V: s-round sumcheck yielding folding randomness r̄
         // =====================================================================
         let constraint_rlc_coeffs: Vec<F> =
-            geometric_challenge(self.verifier_state, 0, num_forms + initial_ood.points.len());
+            geometric_challenge(self.verifier_state, num_forms + initial_ood.points.len());
         let mut the_sum: F = constraint_rlc_coeffs[..num_forms]
             .iter()
             .zip(combined_claims.iter())
@@ -321,7 +321,7 @@ where
             .collect();
 
         let stir_rlc_coeffs: Vec<F> =
-            geometric_challenge(self.verifier_state, 1, stir_challenges.len());
+            geometric_challenge(self.verifier_state, 1 + stir_challenges.len())[1..].to_vec();
         prepare.the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
 
         let mut round_constraints: Vec<(Vec<F>, Vec<UnivariateEvaluation<F>>)> =

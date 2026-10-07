@@ -130,7 +130,7 @@ where
         };
 
         // Random linear combination of the vectors.
-        let vector_rlc_coeffs: Vec<M::Target> = geometric_challenge(prover_state, 0, num_vectors);
+        let vector_rlc_coeffs: Vec<M::Target> = geometric_challenge(prover_state, num_vectors);
         assert_eq!(vector_rlc_coeffs[0], M::Target::ONE);
         // Recycle the first input as the accumulator (its coefficient is always ONE).
         let mut vectors = vectors.into_iter();
@@ -145,7 +145,7 @@ where
 
         // Random linear combination of the constraints.
         let constraint_rlc_coeffs: Vec<M::Target> =
-            geometric_challenge(prover_state, 0, linear_forms.len() + oods_evals.len());
+            geometric_challenge(prover_state, linear_forms.len() + oods_evals.len());
         let has_constraints = !constraint_rlc_coeffs.is_empty();
         let (initial_forms_rlc_coeffs, oods_rlc_coeffs) =
             constraint_rlc_coeffs.split_at(linear_forms.len());
@@ -254,7 +254,8 @@ where
                     &folding_randomness.eq_weights(),
                 )))
                 .collect::<Vec<_>>();
-            let stir_rlc_coeffs = geometric_challenge(prover_state, 1, stir_challenges.len());
+            let stir_rlc_coeffs =
+                geometric_challenge(prover_state, 1 + stir_challenges.len())[1..].to_vec();
             UnivariateEvaluation::accumulate_many(
                 &stir_challenges,
                 &mut covector,
