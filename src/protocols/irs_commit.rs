@@ -238,6 +238,27 @@ impl<M: Embedding> Config<M> {
         self.num_vectors
     }
 
+    /// Describe two equal witnesses as one virtual witness with a leading selector.
+    ///
+    /// The original commitments still authenticate their own columns. This config
+    /// only describes the combined rows after both openings pass verification.
+    pub(crate) fn joint_pair_source(&self) -> Option<Self> {
+        if self.num_vectors != 1
+            || !self.vector_size.is_power_of_two()
+            || !self.interleaving_depth.is_power_of_two()
+            || self.interleaving_depth > self.vector_size
+            || self.matrix_commit.num_rows() != self.codeword_length
+            || self.matrix_commit.num_cols != self.interleaving_depth
+        {
+            return None;
+        }
+        let mut joint = self.clone();
+        joint.vector_size = self.vector_size.checked_mul(2)?;
+        joint.interleaving_depth = self.interleaving_depth.checked_mul(2)?;
+        joint.matrix_commit.num_cols = self.matrix_commit.num_cols.checked_mul(2)?;
+        Some(joint)
+    }
+
     pub const fn vector_size(&self) -> usize {
         self.vector_size
     }

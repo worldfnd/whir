@@ -13,6 +13,7 @@ pub(crate) mod code_switch;
 pub(crate) mod derive;
 pub(crate) mod error;
 pub(crate) mod irs_commit;
+mod joint;
 pub(crate) mod layout;
 pub(crate) mod mask_proximity;
 pub(crate) mod protocol_config;

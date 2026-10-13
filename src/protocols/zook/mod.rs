@@ -1,6 +1,7 @@
 //! Zook ZK protocol — Construction 9.7.
 
 pub mod commit;
+mod joint;
 pub mod prover;
 pub mod verifier;
 

@@ -36,7 +36,7 @@ use crate::{
     hash::Hash,
     protocols::{
         code_switch::CovectorUpdateParams,
-        irs_commit::Commitment as IrsCommitment,
+        irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
         mask_proximity,
         params::protocol_config::{MaskOracleConfig, ProtocolConfig, RoundConfig},
         sumcheck::SumcheckOpening,
@@ -60,6 +60,27 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         &self,
         vs: &mut VerifierState<H>,
         commitment: Commitment,
+        linear_forms: &[&dyn LinearForm<M::Target>],
+        evaluations: &[M::Target],
+    ) -> VerificationResult<FinalClaim<M::Target>>
+    where
+        M::Target: Default + Codec<[H::U]>,
+        Standard: Distribution<M::Target>,
+        H: DuplexSpongeInterface,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        self.verify_with_second(vs, commitment, None, linear_forms, evaluations)
+    }
+
+    /// Share the existing execution after an optional selector fold.
+    pub(crate) fn verify_with_second<H>(
+        &self,
+        vs: &mut VerifierState<H>,
+        commitment: Commitment,
+        second: Option<(&IrsConfig<M>, &Commitment)>,
         linear_forms: &[&dyn LinearForm<M::Target>],
         evaluations: &[M::Target],
     ) -> VerificationResult<FinalClaim<M::Target>>
@@ -120,10 +141,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             sum: batched_evaluation,
         };
         if let Some(first) = self.first_round() {
-            state = verify_round::<M, H>(first, state, vs)?;
+            state = verify_round::<M, H>(first, state, second, vs)?;
         }
         for round in self.tail_rounds() {
-            state = verify_round::<Identity<M::Target>, H>(round, state, vs)?;
+            state = verify_round::<Identity<M::Target>, H>(round, state, None, vs)?;
         }
 
         let opening = self
@@ -412,6 +433,7 @@ impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
 fn verify_round<M, H>(
     round: &RoundConfig<M>,
     mut state: VerifierRoundState<M::Target>,
+    second: Option<(&IrsConfig<M>, &Commitment)>,
     vs: &mut VerifierState<H>,
 ) -> VerificationResult<VerifierRoundState<M::Target>>
 where
@@ -440,11 +462,16 @@ where
     masker.receive_cs_mask_and_reconcile(&opening, vs, &mut state.sum)?;
 
     // Code-switch: accumulate implicit constraints; no explicit covector update.
+    let (physical_source, commitments) = match second {
+        Some((source, right)) => (source, vec![&state.irs_commitment, &right.irs_commitment]),
+        None => (round.code_switch().source(), vec![&state.irs_commitment]),
+    };
     let (target_commitment, update_params) = round.code_switch().verify_for_implicit(
         vs,
         &mut state.sum,
         &opening.round_challenges,
-        &state.irs_commitment,
+        physical_source,
+        &commitments,
     )?;
     let current_round = state.round_scale_factors.len();
     let domain_bits = msg_len.trailing_zeros();
