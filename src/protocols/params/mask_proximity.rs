@@ -11,7 +11,7 @@ use crate::{
         mask_proximity::Config as MaskProximityConfig,
         params::{
             bounds::usize_to_f64,
-            error::{grind_to_at, DeriveError, Pow},
+            error::{grind_to_at, DeriveError, Pow, RoundSlot},
             solved::Solved,
             spec::SecuritySpec,
         },
@@ -23,13 +23,13 @@ pub fn solve<F: Field>(
     spec: &SecuritySpec,
     c_zk: IrsConfig<Identity<F>>,
     num_masks: usize,
-    round_index: usize,
+    round_slot: RoundSlot,
 ) -> Result<Solved<MaskProximityConfig<F>>, DeriveError> {
     let analytic = analytic_error_bits(&c_zk, num_masks);
     let pow = grind_to_at(
         spec,
         analytic,
-        Pow::RoundMaskProximity { index: round_index },
+        Pow::RoundMaskProximity { round: round_slot },
     )?;
     Ok(Solved::new(
         MaskProximityConfig::new(c_zk, num_masks, pow),
@@ -113,7 +113,7 @@ mod tests {
             l_zk_log in 1u32..=5,
         ) {
             let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
-            let config = solve(&spec, c_zk, num_masks, 0).unwrap();
+            let config = solve(&spec, c_zk, num_masks, RoundSlot::Shared(0)).unwrap();
             prop_assert_eq!(config.num_masks(), num_masks);
             prop_assert_eq!(config.c_zk_commit().num_vectors(), 2 * num_masks);
             prop_assert_eq!(config.c_zk_commit().interleaving_depth(), 1);
@@ -128,7 +128,7 @@ mod tests {
         ) {
             let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
             let analytic = analytic_error_bits(&c_zk, num_masks);
-            let config = solve(&spec, c_zk, num_masks, 0).unwrap();
+            let config = solve(&spec, c_zk, num_masks, RoundSlot::Shared(0)).unwrap();
             assert_pow_closes_gap(&spec, analytic, &config.pow());
         }
     }
@@ -138,7 +138,7 @@ mod tests {
     fn solve_rejects_mismatched_num_vectors() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let c_zk = build_test_c_zk(&spec, 2, 1, 2);
-        let _ = solve(&spec, c_zk, 3, 0);
+        let _ = solve(&spec, c_zk, 3, RoundSlot::Shared(0));
     }
 
     #[test]
@@ -162,6 +162,6 @@ mod tests {
             rate: RATE,
             mode: IrsMode::Standard,
         });
-        let _ = solve(&spec, c_zk, NUM_MASKS, 0);
+        let _ = solve(&spec, c_zk, NUM_MASKS, RoundSlot::Shared(0));
     }
 }

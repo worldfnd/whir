@@ -16,11 +16,11 @@ use crate::{
             bounds::usize_to_f64,
             branch::{Branch, OodMode, RoundBuildMode, RoundBuildPayload, SolveMode},
             code_switch as code_switch_params,
-            error::{DeriveError, Pow},
+            config::{MaskOracleConfig, RoundConfig, RoundMode},
+            error::{DeriveError, Pow, RoundSlot},
             irs_commit as irs_params,
             layout::{round_context, target_context, RoundShape},
             mask_proximity as mask_proximity_params,
-            protocol_config::{MaskOracleConfig, RoundConfig, RoundMode},
             spec::{
                 DecodingRegime, LogInvRate, MaskCodeMessageLen, OodSampleBudget, RoundContext,
                 SecuritySpec, ZkSpec,
@@ -57,7 +57,7 @@ pub(super) fn build_round_config<M: Embedding + Default>(
                 &source,
                 t_ood,
                 c_zk_log_inv_rate,
-                shape.round_index,
+                shape.round_slot,
             )?;
             let solve_mode = SolveMode::ZeroKnowledge(mask_oracle.info());
             (
@@ -79,14 +79,14 @@ pub(super) fn build_round_config<M: Embedding + Default>(
         &source,
         solve_mode,
         Pow::RoundSumcheck {
-            index: shape.round_index,
+            round: shape.round_slot,
         },
     )?;
     let code_switch =
-        code_switch_params::solve(spec, source, target, t_ood, solve_mode, shape.round_index)?;
+        code_switch_params::solve(spec, source, target, t_ood, solve_mode, shape.round_slot)?;
 
     Ok(RoundConfig::new(
-        shape.round_index,
+        shape.round_slot,
         sumcheck,
         code_switch,
         round_mode,
@@ -115,13 +115,7 @@ fn solve_round_source<M: Embedding + Default>(
     let target_list_size = spec
         .decoding_regime
         .list_size_estimate(target_log_degree, target_log_inv_rate);
-    solve_t_ood::<M>(
-        spec,
-        &src_ctx,
-        target_list_size,
-        ood_mode,
-        shape.round_index,
-    )
+    solve_t_ood::<M>(spec, &src_ctx, target_list_size, ood_mode, shape.round_slot)
 }
 
 /// ZK-only: assemble the per-round mask oracle, splitting masks across a
@@ -133,7 +127,7 @@ pub(super) fn build_mask_oracle<M: Embedding>(
     source: &IrsConfig<M>,
     t_ood: usize,
     c_zk_log_inv_rate: LogInvRate,
-    round_index: usize,
+    round_slot: RoundSlot,
 ) -> Result<MaskOracleConfig<M::Target>, DeriveError> {
     let spec = zk_spec.as_inner();
     let k = sumcheck_params::masks_required(ctx);
@@ -172,8 +166,8 @@ pub(super) fn build_mask_oracle<M: Embedding>(
         c_zk_list_size_estimate,
     );
 
-    let sumcheck_masks = mask_proximity_params::solve(spec, sumcheck_c_zk, k, round_index)?;
-    let cs_mask = mask_proximity_params::solve(spec, cs_c_zk, cs_masks, round_index)?;
+    let sumcheck_masks = mask_proximity_params::solve(spec, sumcheck_c_zk, k, round_slot)?;
+    let cs_mask = mask_proximity_params::solve(spec, cs_c_zk, cs_masks, round_slot)?;
     Ok(MaskOracleConfig::new(
         sumcheck_masks,
         cs_mask,
@@ -206,7 +200,7 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
     src_ctx: &RoundContext,
     target_list_size: f64,
     ood_mode: OodMode,
-    round_index: usize,
+    round_slot: RoundSlot,
 ) -> Result<(IrsConfig<M>, usize), DeriveError> {
     if matches!(spec.decoding_regime, DecodingRegime::Unique) {
         let source = irs_params::solve(spec, src_ctx, OodSampleBudget::new(1))?;
@@ -224,7 +218,7 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
             return Ok((source, t_ood));
         }
     }
-    Err(DeriveError::FixedPointDidNotConverge { round_index })
+    Err(DeriveError::FixedPointDidNotConverge { round: round_slot })
 }
 
 /// OOD security bits at candidate `t_ood`, per STIR Lemma 4.5:

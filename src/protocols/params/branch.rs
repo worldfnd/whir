@@ -12,7 +12,7 @@
 //! payload conversions, replacing one-off `to_ood_mode`-style helpers.
 
 use crate::protocols::params::{
-    protocol_config::MaskOracleInfo,
+    config::MaskOracleInfo,
     spec::{LogInvRate, ZkSpec},
 };
 
@@ -24,23 +24,12 @@ pub enum Branch<T> {
 }
 
 impl<T> Branch<T> {
-    pub const fn is_zk(&self) -> bool {
-        matches!(self, Self::ZeroKnowledge(_))
-    }
-
     /// Transform the ZK payload, leaving `Standard` unchanged. Replaces
     /// per-stage `to_*` conversion helpers.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Branch<U> {
         match self {
             Self::Standard => Branch::Standard,
             Self::ZeroKnowledge(t) => Branch::ZeroKnowledge(f(t)),
-        }
-    }
-
-    pub const fn as_ref(&self) -> Branch<&T> {
-        match self {
-            Self::Standard => Branch::Standard,
-            Self::ZeroKnowledge(t) => Branch::ZeroKnowledge(t),
         }
     }
 }

@@ -38,20 +38,55 @@ pub enum PowError {
 /// Largest gap a single grind slot can close (in bits).
 pub const MAX_DIFFICULTY: f64 = 60.0;
 
-pub fn threshold(difficulty: Bits) -> u64 {
-    assert!((0.0..=MAX_DIFFICULTY).contains(&difficulty.into()));
-
-    let threshold = (64.0 - f64::from(difficulty)).exp2().ceil();
+fn accepted_count_upper_bound(threshold: u64) -> f64 {
+    let accepted = u128::from(threshold) + 1;
+    let rounded = accepted as f64;
+    // `rounded` is `accepted as f64` with `accepted >= 1`, so it is always
+    // non-negative; the round-trip back to `u128` cannot lose a sign.
     #[allow(clippy::cast_sign_loss)]
-    if threshold >= u64::MAX as f64 {
-        u64::MAX
+    if (rounded as u128) < accepted {
+        f64::from_bits(rounded.to_bits() + 1)
     } else {
-        threshold as u64
+        rounded
     }
 }
 
+fn difficulty_value(threshold: u64) -> f64 {
+    let accepted = u128::from(threshold) + 1;
+    if accepted.is_power_of_two() {
+        return f64::from(64 - accepted.trailing_zeros());
+    }
+
+    let accepted = accepted_count_upper_bound(threshold);
+    (64.0 - accepted.log2() - f64::EPSILON * 64.0).max(0.0)
+}
+
+pub fn threshold(difficulty: Bits) -> u64 {
+    let difficulty = f64::from(difficulty);
+    assert!((0.0..=MAX_DIFFICULTY).contains(&difficulty));
+
+    if difficulty == 0.0 {
+        return u64::MAX;
+    }
+
+    // Verifier acceptance is inclusive (`value <= threshold`), so a threshold
+    // of `t` admits `t + 1` hash outputs. Pick the largest threshold whose
+    // reported difficulty still meets the requested difficulty.
+    let mut low = 0;
+    let mut high = u64::MAX;
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        if difficulty_value(mid) >= difficulty {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
 pub fn difficulty(threshold: u64) -> Bits {
-    Bits::from(64.0 - (threshold as f64).log2())
+    Bits::from(difficulty_value(threshold))
 }
 
 impl Config {
@@ -278,9 +313,9 @@ mod tests {
     #[test]
     fn test_threshold_integer() {
         assert_eq!(threshold(Bits::new(0.0)), u64::MAX);
-        assert_eq!(threshold(Bits::new(60.0)), 1 << 4);
+        assert_eq!(threshold(Bits::new(60.0)), (1 << 4) - 1);
         proptest!(|(bits in 1_u64..=60)| {
-            assert_eq!(threshold(Bits::new(bits as f64)), 1 << (64 - bits));
+            assert_eq!(threshold(Bits::new(bits as f64)), (1 << (64 - bits)) - 1);
         });
     }
 
@@ -306,9 +341,18 @@ mod tests {
     #[test]
     fn test_difficulty_integer() {
         assert_eq!(difficulty(u64::MAX), Bits::new(0.0));
-        assert_eq!(difficulty(1 << 4), Bits::new(60.0));
+        assert_eq!(difficulty((1 << 4) - 1), Bits::new(60.0));
         proptest!(|(bits in 1_u64..=60)| {
-            assert_eq!(difficulty(1 << (64 - bits)), Bits::new(bits as f64));
+            assert_eq!(difficulty((1 << (64 - bits)) - 1), Bits::new(bits as f64));
+        });
+    }
+
+    #[test]
+    fn test_threshold_never_under_delivers_requested_difficulty() {
+        proptest!(|(bits in 0.0..=60.0)| {
+            let requested = Bits::new(bits);
+            let t = threshold(requested);
+            assert!(difficulty(t) >= requested);
         });
     }
 

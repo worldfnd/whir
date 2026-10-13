@@ -17,7 +17,7 @@ use crate::{
             basecase as basecase_params,
             bounds::usize_to_f64,
             code_switch as code_switch_params,
-            error::{ChainSource, ChainTarget, DeriveError, Pow},
+            error::{ChainSource, ChainTarget, DeriveError, Pow, RoundSlot},
             mask_proximity as mask_proximity_params,
             solved::Solved,
             spec::{ListSize, MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
@@ -83,6 +83,14 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// Total number of code-switch rounds (`first_round` + `tail_rounds`).
     pub fn num_rounds(&self) -> usize {
         usize::from(self.first_round.is_some()) + self.tail_rounds.len()
+    }
+
+    /// Source-IRS `vector_size` of the round at `idx` (0 = `first_round`), or
+    /// `None` if out of range. Field-free, so it spans the head/tail type split.
+    pub fn round_source_vector_size(&self, idx: usize) -> Option<usize> {
+        self.round_views()
+            .nth(idx)
+            .map(RoundMetrics::source_vector_size)
     }
 
     /// Every round, head then tail, as one `&dyn RoundMetrics` stream — the sole
@@ -206,6 +214,8 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// - last round → basecase: `basecase.commit.vector_size == last.target.vector_size`
     /// - no rounds: `basecase.commit.vector_size == tuning.vector_size`
     pub fn validate_round_chaining(&self) -> Result<(), DeriveError> {
+        // Only the cheap shape accessors are read here — chaining runs before
+        // shape invariants are guaranteed, so `analytic`/`pow_slots` must not.
         let views: Vec<&dyn RoundMetrics> = self.round_views().collect();
 
         for window in views.windows(2) {
@@ -396,7 +406,7 @@ impl<M: Embedding> ProtocolConfig<M> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct RoundConfig<M: Embedding> {
-    round_index: usize,
+    slot: RoundSlot,
     sumcheck: Solved<SumcheckConfig<M::Target>>,
     code_switch: Solved<CodeSwitchConfig<M>>,
     mode: RoundMode<M::Target>,
@@ -404,21 +414,21 @@ pub struct RoundConfig<M: Embedding> {
 
 impl<M: Embedding> RoundConfig<M> {
     pub(crate) const fn new(
-        round_index: usize,
+        slot: RoundSlot,
         sumcheck: Solved<SumcheckConfig<M::Target>>,
         code_switch: Solved<CodeSwitchConfig<M>>,
         mode: RoundMode<M::Target>,
     ) -> Self {
         Self {
-            round_index,
+            slot,
             sumcheck,
             code_switch,
             mode,
         }
     }
 
-    pub const fn round_index(&self) -> usize {
-        self.round_index
+    pub const fn slot(&self) -> RoundSlot {
+        self.slot
     }
 
     pub const fn sumcheck(&self) -> &Solved<SumcheckConfig<M::Target>> {
@@ -444,92 +454,6 @@ impl<M: Embedding> RoundConfig<M> {
     /// Slim mask-oracle view derived from `mask_oracle()`.
     pub fn mask_oracle_info(&self) -> Option<MaskOracleInfo> {
         self.mask_oracle().map(MaskOracleConfig::info)
-    }
-}
-
-/// Field-free view of one round, bridging `first_round` (`M`) and `tail_rounds`
-/// (`Identity<M::Target>`) into one `&dyn` stream for the aggregators.
-///
-/// The shape accessors are always safe; `analytic`/`pow_slots` recompute and
-/// assume shape invariants hold, so call them only after
-/// `validate_round_chaining` (see [`ProtocolConfig::validate`]).
-trait RoundMetrics {
-    fn round_index(&self) -> usize;
-    fn source_vector_size(&self) -> usize;
-    fn target_vector_size(&self) -> usize;
-    /// `t_ood` when the round is ZK, else `None`.
-    fn t_ood(&self) -> Option<usize>;
-    /// Analytic soundness floor (recompute).
-    fn analytic(&self) -> Bits;
-    /// PoW slots: sumcheck, code-switch, and masks when ZK (recompute).
-    fn pow_slots(&self) -> Vec<PowSlot>;
-}
-
-impl<M: Embedding> RoundMetrics for RoundConfig<M> {
-    fn round_index(&self) -> usize {
-        self.round_index
-    }
-
-    fn source_vector_size(&self) -> usize {
-        self.code_switch.source().vector_size()
-    }
-
-    fn target_vector_size(&self) -> usize {
-        self.code_switch.target().vector_size()
-    }
-
-    fn t_ood(&self) -> Option<usize> {
-        match &self.mode {
-            RoundMode::ZeroKnowledge { t_ood, .. } => Some(t_ood.get()),
-            RoundMode::Standard => None,
-        }
-    }
-
-    fn analytic(&self) -> Bits {
-        self.analytic_bits()
-    }
-
-    fn pow_slots(&self) -> Vec<PowSlot> {
-        let mask_info = self.mask_oracle_info();
-        let index = self.round_index;
-        let cs = self.code_switch.config();
-        let sumcheck = PowSlot {
-            kind: Pow::RoundSumcheck { index },
-            pow: self.sumcheck.round_pow(),
-            recorded: self.sumcheck.analytic(),
-            recompute: sumcheck_params::analytic_error_bits(cs.source(), mask_info),
-        };
-        let code_switch = PowSlot {
-            kind: Pow::RoundCodeSwitch { index },
-            pow: cs.pow(),
-            recorded: self.code_switch.analytic(),
-            recompute: code_switch_params::analytic_error_bits(
-                cs.source(),
-                cs.target(),
-                cs.out_domain_samples(),
-                mask_info,
-            ),
-        };
-        let mask_slots = self
-            .mask_oracle()
-            .map(|mo| {
-                [mo.sumcheck_masks(), mo.cs_mask()].map(|mp| PowSlot {
-                    kind: Pow::RoundMaskProximity { index },
-                    pow: mp.pow(),
-                    recorded: mp.analytic(),
-                    recompute: mask_proximity_params::analytic_error_bits(
-                        mp.c_zk_commit(),
-                        mp.num_masks(),
-                    ),
-                })
-            })
-            .into_iter()
-            .flatten();
-        [Some(sumcheck), Some(code_switch)]
-            .into_iter()
-            .flatten()
-            .chain(mask_slots)
-            .collect()
     }
 }
 
@@ -581,6 +505,92 @@ impl<M: Embedding> RoundConfig<M> {
                 .min(mask_oracle_term)
                 .max(0.0),
         )
+    }
+}
+
+/// Field-free view of one round, bridging `first_round` (`M`) and `tail_rounds`
+/// (`Identity<M::Target>`) into one `&dyn` stream for the aggregators.
+///
+/// The shape accessors are always safe; `analytic`/`pow_slots` recompute and
+/// assume shape invariants hold, so call them only after
+/// `validate_round_chaining` (see [`ProtocolConfig::validate`]).
+trait RoundMetrics {
+    fn round_index(&self) -> usize;
+    fn source_vector_size(&self) -> usize;
+    fn target_vector_size(&self) -> usize;
+    /// `t_ood` when the round is ZK, else `None`.
+    fn t_ood(&self) -> Option<usize>;
+    /// Analytic soundness floor (recompute).
+    fn analytic(&self) -> Bits;
+    /// PoW slots: sumcheck, code-switch, and masks when ZK (recompute).
+    fn pow_slots(&self) -> Vec<PowSlot>;
+}
+
+impl<M: Embedding> RoundMetrics for RoundConfig<M> {
+    fn round_index(&self) -> usize {
+        self.slot.index()
+    }
+
+    fn source_vector_size(&self) -> usize {
+        self.code_switch.source().vector_size()
+    }
+
+    fn target_vector_size(&self) -> usize {
+        self.code_switch.target().vector_size()
+    }
+
+    fn t_ood(&self) -> Option<usize> {
+        match &self.mode {
+            RoundMode::ZeroKnowledge { t_ood, .. } => Some(t_ood.get()),
+            RoundMode::Standard => None,
+        }
+    }
+
+    fn analytic(&self) -> Bits {
+        self.analytic_bits()
+    }
+
+    fn pow_slots(&self) -> Vec<PowSlot> {
+        let mask_info = self.mask_oracle_info();
+        let round = self.slot;
+        let cs = self.code_switch.config();
+        let sumcheck = PowSlot {
+            kind: Pow::RoundSumcheck { round },
+            pow: self.sumcheck.round_pow(),
+            recorded: self.sumcheck.analytic(),
+            recompute: sumcheck_params::analytic_error_bits(cs.source(), mask_info),
+        };
+        let code_switch = PowSlot {
+            kind: Pow::RoundCodeSwitch { round },
+            pow: cs.pow(),
+            recorded: self.code_switch.analytic(),
+            recompute: code_switch_params::analytic_error_bits(
+                cs.source(),
+                cs.target(),
+                cs.out_domain_samples(),
+                mask_info,
+            ),
+        };
+        let mask_slots = self
+            .mask_oracle()
+            .map(|mo| {
+                [mo.sumcheck_masks(), mo.cs_mask()].map(|mp| PowSlot {
+                    kind: Pow::RoundMaskProximity { round },
+                    pow: mp.pow(),
+                    recorded: mp.analytic(),
+                    recompute: mask_proximity_params::analytic_error_bits(
+                        mp.c_zk_commit(),
+                        mp.num_masks(),
+                    ),
+                })
+            })
+            .into_iter()
+            .flatten();
+        [Some(sumcheck), Some(code_switch)]
+            .into_iter()
+            .flatten()
+            .chain(mask_slots)
+            .collect()
     }
 }
 

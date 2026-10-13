@@ -3,6 +3,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -14,6 +15,35 @@ use crate::{
     },
 };
 
+/// Which round a per-round PoW slot belongs to. Distinguishes shared inner
+/// rounds from the batched per-bundle pre-merge rounds so their slot labels
+/// can't collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoundSlot {
+    /// A shared inner round at index `0..R`.
+    Shared(usize),
+    /// A batched pre-merge round for bundle `index`.
+    PreMerge(usize),
+}
+
+impl RoundSlot {
+    /// The numeric index within this slot's namespace.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Shared(i) | Self::PreMerge(i) => i,
+        }
+    }
+}
+
+impl Display for RoundSlot {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Shared(i) => write!(f, "round {i}"),
+            Self::PreMerge(b) => write!(f, "bundle {b} pre-merge"),
+        }
+    }
+}
+
 /// Identifies a single PoW grind in the derived protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pow {
@@ -21,12 +51,16 @@ pub enum Pow {
     BasecaseGammaCombination,
     /// Basecase sumcheck grind.
     BasecaseSumcheck,
-    /// Per-round sumcheck grind at `index`.
-    RoundSumcheck { index: usize },
-    /// Per-round code-switch grind at `index`.
-    RoundCodeSwitch { index: usize },
-    /// Per-round mask-proximity grind at `index` — ZK mode only.
-    RoundMaskProximity { index: usize },
+    /// Per-round sumcheck grind.
+    RoundSumcheck { round: RoundSlot },
+    /// Per-round code-switch grind.
+    RoundCodeSwitch { round: RoundSlot },
+    /// Per-round mask-proximity grind — ZK mode only.
+    RoundMaskProximity { round: RoundSlot },
+    /// Batched selector-merge grind at schedule join `index`.
+    BatchedSelectorMerge { index: usize },
+    /// Runtime intra-bundle γ-RLC soundness check for bundle `index`.
+    BatchedIntraBundleRlc { index: usize },
 }
 
 impl Display for Pow {
@@ -34,9 +68,15 @@ impl Display for Pow {
         match self {
             Self::BasecaseGammaCombination => f.write_str("basecase γ-combination"),
             Self::BasecaseSumcheck => f.write_str("basecase sumcheck"),
-            Self::RoundSumcheck { index } => write!(f, "round {index} sumcheck"),
-            Self::RoundCodeSwitch { index } => write!(f, "round {index} code-switch"),
-            Self::RoundMaskProximity { index } => write!(f, "round {index} mask-proximity"),
+            Self::RoundSumcheck { round } => write!(f, "{round} sumcheck"),
+            Self::RoundCodeSwitch { round } => write!(f, "{round} code-switch"),
+            Self::RoundMaskProximity { round } => write!(f, "{round} mask-proximity"),
+            Self::BatchedSelectorMerge { index } => {
+                write!(f, "batched selector merge {index}")
+            }
+            Self::BatchedIntraBundleRlc { index } => {
+                write!(f, "batched bundle {index} γ-RLC")
+            }
         }
     }
 }
@@ -82,10 +122,10 @@ pub enum DeriveError {
     /// The `t_ood` fixed-point in [`super::build_round::solve_t_ood`] ran out of
     /// iterations — usually the field is too small for the security target.
     #[error(
-        "t_ood fixed-point did not converge for round {round_index}; \
+        "t_ood fixed-point did not converge for {round}; \
          lower target_security_bits or use a larger field"
     )]
-    FixedPointDidNotConverge { round_index: usize },
+    FixedPointDidNotConverge { round: RoundSlot },
 
     /// A PoW grind cannot close the analytic-to-target gap — the spec is too
     /// tight for any single grind to reach `target_security_bits`.
@@ -121,7 +161,7 @@ pub enum DeriveError {
     /// Cross-round (or round → basecase) shape chain broken: the next
     /// component's source `vector_size` does not match the previous
     /// component's target `vector_size`. Surfaced by
-    /// [`super::protocol_config::ProtocolConfig::validate_round_chaining`].
+    /// [`super::config::ProtocolConfig::validate_round_chaining`].
     #[error("chain broken: {from} → {to} expected vector_size {expected}, found {found}")]
     RoundChainBroken {
         from: ChainSource,
@@ -164,6 +204,16 @@ pub enum DeriveError {
          RateSchedule::Capped/Stepping with a manual cap"
     )]
     AdaptiveNoFeasibleSchedule,
+
+    /// The batched-protocol scheduler does not yet support the requested
+    /// combination of bundle shapes. The first-pass scheduler handles
+    /// (a) a single bundle (with any `num_polys` and length), and
+    /// (b) multiple bundles that all share the same `length` and `num_polys`
+    /// (joining at round 0 via the selector merge). Mixed sizes or mixed
+    /// poly counts are scheduled by follow-up work — for now the caller
+    /// must split into separate batched proofs.
+    #[error("batched scheduler does not yet support this shape: {reason}")]
+    BatchedUnsupported { reason: String },
 }
 
 impl From<CodewordLengthError> for DeriveError {

@@ -6,9 +6,9 @@ use crate::{
         basecase as basecase_params,
         branch::{Branch, RoundBuildMode, RoundBuildPayload},
         build_round::build_round_config,
+        config::{ProtocolConfig, RoundConfig},
         error::DeriveError,
         layout::{round_layout, RoundLayout},
-        protocol_config::{ProtocolConfig, RoundConfig},
         spec::{LogInvRate, SecuritySpec, TuningSpec},
     },
 };
@@ -88,8 +88,8 @@ mod tests {
         protocols::{
             basecase::BasecaseMode,
             params::{
-                error::{ChainSource, ChainTarget, DeriveError, Pow},
-                protocol_config::{ProtocolConfig, RoundMode},
+                config::{ProtocolConfig, RoundMode},
+                error::{ChainSource, ChainTarget, DeriveError, Pow, RoundSlot},
                 spec::{
                     DecodingRegime, FoldingFactor, KneeWeight, Mode, PowBudget, RateSchedule,
                     SecuritySpec, TuningSpec,
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_config_json_roundtrip() {
+    fn config_json_roundtrip() {
         let spec = test_spec(Mode::Standard);
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
         let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size)).unwrap();
@@ -488,7 +488,9 @@ mod tests {
             matches!(
                 err,
                 DeriveError::AnalyticDrift {
-                    pow: Pow::RoundSumcheck { index: 0 },
+                    pow: Pow::RoundSumcheck {
+                        round: RoundSlot::Shared(0)
+                    },
                     ..
                 }
             ),
@@ -628,7 +630,7 @@ mod tests {
         let stepped_tuning = TuningSpec {
             vector_size: 1usize << LOG_VECTOR_SIZE,
             starting_log_inv_rate: 2,
-            folding_factor: folding,
+            folding_factor: folding.clone(),
             rate_schedule: RateSchedule::Stepping,
         };
         let stepped_plan =

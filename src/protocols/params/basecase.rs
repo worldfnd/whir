@@ -9,9 +9,9 @@ use crate::{
         basecase::{self, Config as BasecaseConfig},
         irs_commit::Config as IrsConfig,
         params::{
+            config::BasecasePlan,
             error::{grind_to_at, DeriveError, Pow},
             irs_commit as irs_params,
-            protocol_config::BasecasePlan,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
             sumcheck as sumcheck_params,
         },
@@ -55,6 +55,7 @@ pub fn solve_with_commit<F: Field>(
         sumcheck_pow,
         vector_size.next_power_of_two().trailing_zeros() as usize,
         sumcheck::SumcheckMode::Standard,
+        std::num::NonZeroUsize::new(2).expect("2 is non-zero"),
     );
 
     let gamma_analytic = analytic_error_bits(&commit);
