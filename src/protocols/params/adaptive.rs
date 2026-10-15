@@ -16,16 +16,15 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
-            basecase as basecase_params,
-            branch::{Branch, RoundBuildMode},
-            build_round::{build_mask_oracle, solve_t_ood},
-            code_switch as code_switch_params,
+            basecase::{solve as solve_basecase, ZookFinalOpeningSoundness},
+            branch::RoundBuildMode,
+            build_round::build_round_config,
             error::DeriveError,
-            irs_commit as irs_params,
+            irs_commit::solve as solve_irs,
             layout::RoundShape,
-            protocol_config::MaskOracleInfo,
-            spec::{KneeWeight, Mode, OodSampleBudget, RoundContext, SecuritySpec, TuningSpec},
-            sumcheck as sumcheck_params,
+            mask_proximity::{solve_commit as solve_joint_commit, zook_mask_binding_bits},
+            protocol_config::{embedding_degree, RoundConfig},
+            spec::{KneeWeight, RoundContext, SecuritySpec, TuningSpec},
         },
     },
 };
@@ -42,6 +41,7 @@ struct RoundDims {
     codeword_length: usize,
     in_domain_samples: usize,
     interleaving_depth: usize,
+    mask_coefficients: usize,
 }
 
 /// Fixed per-encode-call overhead in the cost-proxy's nominal units.
@@ -109,42 +109,27 @@ impl Cost {
 /// feasibility check. Pure search-space heuristic, not a correctness bound.
 const ADAPTIVE_STEP_BUDGET: u32 = 2;
 
-/// Search per-round target rates that minimize a pareto-knee cost. The
-/// skeleton is fixed (folding factors, message-length sequence); only
-/// `target_log_inv_rate` per round is searched. Each candidate (round,
-/// source_rate, target_rate) is checked against the per-round PoW budget via
-/// the actual analytic-error formulas (memoized) — schedules whose PoW gap
-/// at any round would exceed `pow_budget` are dropped before pareto.
+/// Search per-round target rates that minimize a pareto-knee cost.
 ///
-/// Returns `Err(DeriveError::AdaptiveNoFeasibleSchedule)` if no candidate
-/// passes the per-slot PoW check — the spec is too tight for the planner's
-/// search space.
+/// Folding factors and message lengths stay fixed. Standard candidates may
+/// use their PoW budget; Zook candidates must meet the full analytic target,
+/// including joint-mask binding and final opening. Returns
+/// `AdaptiveNoFeasibleSchedule` if no candidate satisfies these bounds.
 pub(super) fn plan_adaptive_rates<M: Embedding + Default>(
     spec: &SecuritySpec,
     tuning: &TuningSpec,
     knee_weight: KneeWeight,
     skeleton: &[RoundShape],
     basecase_vector_size: usize,
-    mode: RoundBuildMode<'_>,
+    mode: RoundBuildMode,
 ) -> Result<Vec<u32>, DeriveError> {
     let mut planner: Planner<'_, M> = Planner::new(spec, skeleton, basecase_vector_size, mode);
     let candidates = planner.search(tuning.starting_log_inv_rate);
-    // No feasible candidates means even the most conservative search choice
-    // (constant rate at every round) failed the per-slot PoW check. The spec
-    // is fundamentally too tight — surface this as a planner-level error
-    // rather than returning placeholder rates that would just fail downstream
-    // validation with a less informative message.
+    // Report infeasibility within this search space before selecting a schedule.
     if candidates.is_empty() {
         return Err(DeriveError::AdaptiveNoFeasibleSchedule);
     }
     Ok(pick_knee(pareto_frontier(candidates), knee_weight.get()))
-}
-
-/// Adapter that returns `Some(())` when an analytic floor `bits` leaves a
-/// gap small enough for `pow_budget` to close. Used via `?` so a too-low
-/// floor short-circuits the surrounding `_dims` builder.
-fn fits(bits: f64, deficit: f64) -> Option<()> {
-    (bits >= deficit).then_some(())
 }
 
 /// DFS state for the adaptive rate search. Owns the loop-invariants and the
@@ -154,12 +139,11 @@ struct Planner<'a, M> {
     spec: &'a SecuritySpec,
     skeleton: &'a [RoundShape],
     basecase_vector_size: usize,
-    mode: RoundBuildMode<'a>,
+    mode: RoundBuildMode,
     field_bytes: f64,
     hash_bytes: f64,
     /// Memoize per `(round_idx, source_rate, target_rate)`. `Some(dims)` is
-    /// feasible with real IRS dimensions; `None` is infeasible (PoW budget
-    /// can't close the analytic gap).
+    /// feasible with real IRS dimensions; `None` violates a size or security bound.
     round_cache: HashMap<(usize, u32, u32), Option<RoundDims>>,
     /// Basecase candidates only vary by rate, so cache separately.
     basecase_cache: HashMap<u32, Option<RoundDims>>,
@@ -171,7 +155,7 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
         spec: &'a SecuritySpec,
         skeleton: &'a [RoundShape],
         basecase_vector_size: usize,
-        mode: RoundBuildMode<'a>,
+        mode: RoundBuildMode,
     ) -> Self {
         Self {
             spec,
@@ -189,7 +173,14 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
     fn search(&mut self, starting_log_inv_rate: u32) -> Vec<(Vec<u32>, Cost)> {
         let mut out = Vec::new();
         let mut chosen = Vec::with_capacity(self.skeleton.len());
-        self.recurse(0, starting_log_inv_rate, &mut chosen, Cost::ZERO, &mut out);
+        self.recurse(
+            0,
+            starting_log_inv_rate,
+            &mut chosen,
+            Cost::ZERO,
+            0,
+            &mut out,
+        );
         out
     }
 
@@ -199,19 +190,70 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
         cur_rate: u32,
         chosen: &mut Vec<u32>,
         acc: Cost,
+        mask_coefficients: usize,
         out: &mut Vec<(Vec<u32>, Cost)>,
     ) {
         // handle basecase
         if idx == self.skeleton.len() {
             let spec = self.spec;
             let vector_size = self.basecase_vector_size;
-            let dims = *self
-                .basecase_cache
-                .entry(cur_rate)
-                .or_insert_with(|| basecase_dims::<M>(spec, vector_size, cur_rate));
+            let dims = *self.basecase_cache.entry(cur_rate).or_insert_with(|| {
+                basecase_dims::<M>(
+                    spec,
+                    vector_size,
+                    cur_rate,
+                    usize::from(!self.skeleton.is_empty()),
+                )
+            });
             if let Some(dims) = dims {
                 let (e, p) = round_cost_from_dims(dims, self.field_bytes, self.hash_bytes);
-                out.push((chosen.clone(), acc.add((e, p))));
+                let mut cost = acc.add((e, p));
+                if self.mode.is_zk() {
+                    let Some(payload) = mask_coefficients.checked_add(dims.mask_coefficients)
+                    else {
+                        return;
+                    };
+                    let degree = if self.skeleton.is_empty() {
+                        1
+                    } else {
+                        let Ok(degree) = embedding_degree::<M>() else {
+                            return;
+                        };
+                        degree
+                    };
+                    let Ok(witness) = solve_irs::<Identity<M::Target>>(
+                        spec,
+                        &RoundContext {
+                            vector_size,
+                            log_inv_rate: cur_rate,
+                            folding_factor: 0,
+                        },
+                    ) else {
+                        return;
+                    };
+                    let Ok(masks) = solve_joint_commit::<M::Target>(spec, payload, degree) else {
+                        return;
+                    };
+                    let Ok(binding) = zook_mask_binding_bits(&masks) else {
+                        return;
+                    };
+                    let Ok(opening) = ZookFinalOpeningSoundness::for_codes(&witness, &masks) else {
+                        return;
+                    };
+                    let target = f64::from(spec.target_security_bits);
+                    if [binding, opening.combination, opening.queries]
+                        .into_iter()
+                        .any(|bits| f64::from(bits) < target)
+                    {
+                        return;
+                    }
+                    cost = cost.add(round_cost_from_dims(
+                        dimensions(&masks, 0),
+                        self.field_bytes,
+                        self.hash_bytes,
+                    ));
+                }
+                out.push((chosen.clone(), cost));
             }
             return;
         }
@@ -220,7 +262,7 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
         // the canonical WHIR per-round increment scaled by the search budget.
         // Hard cap on absolute rate via `ADAPTIVE_MAX_LOG_INV_RATE`. Each
         // candidate (src, tgt) is feasibility-checked below; exceeding the
-        // canonical increment is allowed when the PoW budget actually fits.
+        // canonical increment is allowed when all configured bounds hold.
         let max_step = shape
             .source_folding_factor
             .saturating_sub(1)
@@ -239,7 +281,11 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
             let Some(dims) = dims else { continue };
             let (e, p) = round_cost_from_dims(dims, self.field_bytes, self.hash_bytes);
             chosen.push(next_rate);
-            self.recurse(idx + 1, next_rate, chosen, acc.add((e, p)), out);
+            let Some(next_masks) = mask_coefficients.checked_add(dims.mask_coefficients) else {
+                chosen.pop();
+                continue;
+            };
+            self.recurse(idx + 1, next_rate, chosen, acc.add((e, p)), next_masks, out);
             chosen.pop();
         }
     }
@@ -289,125 +335,61 @@ fn pick_knee(frontier: Vec<(Vec<u32>, Cost)>, knee_weight: f64) -> Vec<u32> {
         .0
 }
 
-/// Build the basecase IRS at `cur_rate` and return its dimensions, or `None`
-/// if its analytic floors can't be closed by `pow_budget`.
+/// Return the final commitment dimensions and its mask budget.
 fn basecase_dims<M: Embedding + Default>(
     spec: &SecuritySpec,
     vector_size: usize,
     log_inv_rate: u32,
+    incoming_deep: usize,
 ) -> Option<RoundDims> {
-    let ctx = RoundContext {
-        vector_size,
-        log_inv_rate,
-        folding_factor: 0,
-    };
-    let commit: IrsConfig<Identity<M::Target>> =
-        irs_params::solve(spec, &ctx, OodSampleBudget::ZERO).ok()?;
-
-    let max_deficit = f64::from(spec.target_security_bits) - f64::from(spec.pow_budget.bits());
-
-    fits(
-        f64::from(sumcheck_params::analytic_error_bits(
-            &commit,
-            Option::<MaskOracleInfo>::None,
-        )),
-        max_deficit,
-    )?;
-    if matches!(spec.mode, Mode::ZeroKnowledge) {
-        fits(
-            f64::from(basecase_params::analytic_error_bits(&commit)),
-            max_deficit,
-        )?;
-    }
-
-    Some(RoundDims {
-        codeword_length: commit.codeword_length(),
-        in_domain_samples: commit.in_domain_samples(),
-        interleaving_depth: commit.interleaving_depth(),
-    })
+    let config =
+        solve_basecase::<M::Target>(spec, vector_size, log_inv_rate, incoming_deep).ok()?;
+    let masks = config
+        .witness_mask()
+        .map(|mask| mask.num_coefficients())
+        .transpose()
+        .ok()?
+        .unwrap_or(0);
+    Some(dimensions(config.commit(), masks))
 }
 
-/// Build a round at this (source_rate, target_rate, mode) and return the
-/// **target IRS's** dimensions (`codeword_length`, `in_domain_samples`,
-/// `interleaving_depth`) if every per-slot analytic floor fits inside
-/// `pow_budget`. Returns `None` if any floor is too low — even max grinding
-/// can't close the gap.
-///
-/// The returned dims drive the cost proxy, so the planner uses NTT-rounded
-/// codeword sizes and per-regime query counts — no closed-form approximation.
+/// Use the same round solver as ProtocolConfig::derive for candidate feasibility.
 fn try_round_dims<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
     source_log_inv_rate: u32,
     target_log_inv_rate: u32,
-    mode: RoundBuildMode<'_>,
+    mode: RoundBuildMode,
 ) -> Option<RoundDims> {
-    let max_deficit = f64::from(spec.target_security_bits) - f64::from(spec.pow_budget.bits());
-
-    let src_ctx = RoundContext {
-        vector_size: shape.source_vector_size,
-        log_inv_rate: source_log_inv_rate,
-        folding_factor: shape.source_folding_factor,
+    let shape = RoundShape {
+        source_log_inv_rate,
+        target_log_inv_rate,
+        ..*shape
     };
-    let target_log_degree = f64::from(
-        shape
-            .source_vector_size
-            .trailing_zeros()
-            .saturating_sub(shape.source_folding_factor),
-    );
-    let target_list_size = spec
-        .decoding_regime
-        .list_size_estimate(target_log_degree, f64::from(target_log_inv_rate));
+    if shape.round_index == 0 {
+        round_dimensions(&build_round_config::<M>(spec, &shape, mode).ok()?)
+    } else {
+        round_dimensions(&build_round_config::<Identity<M::Target>>(spec, &shape, mode).ok()?)
+    }
+}
 
-    let ood_mode = mode.map(|p| p.c_zk_log_inv_rate);
-    let (source, t_ood) = solve_t_ood::<M>(spec, &src_ctx, target_list_size, ood_mode, 0).ok()?;
-
-    let target_budget = match mode {
-        Branch::Standard => OodSampleBudget::ZERO,
-        Branch::ZeroKnowledge(_) => OodSampleBudget::new(t_ood),
+fn round_dimensions<M: Embedding>(round: &RoundConfig<M>) -> Option<RoundDims> {
+    let masks = match round.masks() {
+        Some(masks) => masks
+            .witness
+            .num_coefficients()
+            .ok()?
+            .checked_add(masks.sumcheck_coefficients)?,
+        None => 0,
     };
-    let tgt_ctx = RoundContext {
-        vector_size: source.message_length(),
-        log_inv_rate: target_log_inv_rate,
-        folding_factor: shape.target_folding_factor,
-    };
-    let target_irs: IrsConfig<Identity<M::Target>> =
-        irs_params::solve(spec, &tgt_ctx, target_budget).ok()?;
+    Some(dimensions(round.code_switch().target(), masks))
+}
 
-    let mask_info = match mode {
-        Branch::Standard => None,
-        Branch::ZeroKnowledge(payload) => {
-            let mo = build_mask_oracle::<M>(
-                payload.zk_spec,
-                &src_ctx,
-                &source,
-                t_ood,
-                payload.c_zk_log_inv_rate,
-                shape.round_index,
-            )
-            .ok()?;
-            fits(f64::from(mo.analytic_bits()), max_deficit)?;
-            Some(mo.info())
-        }
-    };
-
-    fits(
-        f64::from(sumcheck_params::analytic_error_bits(&source, mask_info)),
-        max_deficit,
-    )?;
-    fits(
-        f64::from(code_switch_params::analytic_error_bits(
-            &source,
-            &target_irs,
-            t_ood,
-            mask_info,
-        )),
-        max_deficit,
-    )?;
-
-    Some(RoundDims {
-        codeword_length: target_irs.codeword_length(),
-        in_domain_samples: target_irs.in_domain_samples(),
-        interleaving_depth: target_irs.interleaving_depth(),
-    })
+const fn dimensions<M: Embedding>(code: &IrsConfig<M>, mask_coefficients: usize) -> RoundDims {
+    RoundDims {
+        codeword_length: code.codeword_length(),
+        in_domain_samples: code.in_domain_samples(),
+        interleaving_depth: code.interleaving_depth(),
+        mask_coefficients,
+    }
 }

@@ -24,11 +24,14 @@ pub(crate) mod sumcheck;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
+pub use basecase::ZookFinalOpeningSoundness;
 pub use branch::{Branch, SolveMode};
-pub use error::{ChainSource, ChainTarget, DeriveError, Pow};
+pub use error::{ChainSource, ChainTarget, DeriveError, Pow, ZookSecurityError};
 pub use layout::LayoutError;
+pub use mask_proximity::zook_mask_binding_bits;
 pub use protocol_config::{
-    BasecasePlan, MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
+    BasecasePlan, JointMaskConfig, ProtocolConfig, RoundConfig, RoundMasks, RoundMode,
+    WitnessMaskConfig, ZookRoundSoundness,
 };
 pub use solved::Solved;
 pub use spec::{

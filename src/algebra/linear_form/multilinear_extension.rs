@@ -31,7 +31,15 @@ impl<F: Field> LinearForm<F> for MultilinearExtension<F> {
 
     fn mle_evaluate(&self, point: &[F]) -> F {
         zip_strict(&self.point, point).fold(F::ONE, |acc, (&l, &r)| {
-            acc * (l * r + (F::ONE - l) * (F::ONE - r))
+            let factor = if r.is_zero() {
+                F::ONE - l
+            } else if r.is_one() {
+                l
+            } else {
+                // l*r + (1-l)*(1-r) = (2*l-1)*r + (1-l).
+                (l.double() - F::ONE) * r + (F::ONE - l)
+            };
+            acc * factor
         })
     }
 
@@ -43,5 +51,62 @@ impl<F: Field> LinearForm<F> for MultilinearExtension<F> {
 impl<M: Embedding> Evaluate<M> for MultilinearExtension<M::Target> {
     fn evaluate(&self, embedding: &M, vector: &[M::Source]) -> M::Target {
         mixed_multilinear_extend(embedding, vector, &self.point)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_std::rand::{
+        distributions::Standard, prelude::Distribution, rngs::StdRng, SeedableRng,
+    };
+
+    use super::*;
+    use crate::algebra::{
+        fields::{Field256, Field64, Field64_3},
+        linear_form::Covector,
+        random_vector,
+    };
+
+    fn check_evaluation<F: Field>()
+    where
+        Standard: Distribution<F>,
+    {
+        let mut rng = StdRng::seed_from_u64(81);
+        for dimensions in 0..=8 {
+            for point in [
+                vec![F::ZERO; dimensions],
+                vec![F::ONE; dimensions],
+                random_vector::<F>(&mut rng, dimensions),
+            ] {
+                let form = MultilinearExtension::new(point);
+                let dense = Covector::from(&form);
+                let mut mixed = random_vector::<F>(&mut rng, dimensions);
+                for (i, coordinate) in mixed.iter_mut().enumerate() {
+                    match i % 3 {
+                        0 => *coordinate = F::ZERO,
+                        1 => *coordinate = F::ONE,
+                        _ => {}
+                    }
+                }
+                for evaluation in [
+                    vec![F::ZERO; dimensions],
+                    vec![F::ONE; dimensions],
+                    random_vector::<F>(&mut rng, dimensions),
+                    mixed,
+                ] {
+                    assert_eq!(
+                        form.mle_evaluate(&evaluation),
+                        dense.mle_evaluate(&evaluation)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boolean_and_random_coordinates_match_dense_evaluation() {
+        check_evaluation::<Field64>();
+        check_evaluation::<Field64_3>();
+        check_evaluation::<Field256>();
     }
 }

@@ -56,6 +56,8 @@ pub struct Config<M: Embedding> {
 pub struct Witness<F: Field> {
     pub message: Buffer<F>,
     pub target_witness: IrsWitness<F>,
+    /// Public aggregation weights, also used by callers carrying mask claims.
+    pub update: CovectorUpdateParams<F>,
 }
 
 /// Mutable claim state threaded through `prove`/`verify`: a covector (extended
@@ -69,11 +71,12 @@ pub struct Claim<'a, F: Field> {
 /// Verifier output from the code-switch.
 pub type Commitment = IrsCommitment;
 
-/// Code-switch verification output for implicit-covector callers.
+/// Code-switch aggregation weights and evaluation points.
 ///
-/// Returned by [`Config::verify_for_implicit`]. The caller accumulates
-/// constraint terms from these instead of updating an explicit `Vec<F>`.
+/// Returned in [`Witness::update`] and by [`Config::verify_for_implicit`].
+/// Callers use these to update implicit kernels and carried mask claims.
 #[must_use]
+#[derive(Clone, Debug)]
 pub struct CovectorUpdateParams<F: Field> {
     /// The `original_sl_coeff` that would have scaled the covector.
     pub original_sl_coeff: F,
@@ -186,11 +189,6 @@ impl<M: Embedding> Config<M> {
 
     pub const fn pow(&self) -> proof_of_work::Config {
         self.pow
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn target_mut_for_test(&mut self) -> &mut IrsConfig<Identity<M::Target>> {
-        &mut self.target
     }
 
     /// Mask oracle length `ℓ_zk`. Returns 0 in Standard mode.
@@ -322,6 +320,13 @@ impl<M: Embedding> Config<M> {
         Witness {
             message,
             target_witness,
+            update: CovectorUpdateParams {
+                original_sl_coeff: M::Target::ONE,
+                ood_rlc_coeffs: ood_rlc_coeffs.into_vec(),
+                ood_eval_points: ood_points,
+                in_domain_rlc_coeffs: in_domain_rlc_coeffs.into_vec(),
+                in_domain_eval_points: eval_points,
+            },
         }
     }
 

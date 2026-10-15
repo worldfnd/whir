@@ -11,7 +11,7 @@ pub use multilinear::{eq_weights, eval_eq, mixed_multilinear_extend, multilinear
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use self::embedding::Embedding;
+use self::embedding::{project_base_field, Basefield, Embedding, Identity, PublicScalar};
 #[cfg(feature = "parallel")]
 use crate::utils::workload_size;
 use crate::utils::zip_strict;
@@ -24,11 +24,26 @@ where
 }
 
 pub fn geometric_sequence<F: Field>(current: F, base: F, length: usize) -> Vec<F> {
+    match PublicScalar::new(base) {
+        PublicScalar::Base(base) => {
+            mixed_geometric_sequence(&Basefield::<F>::new(), current, base, length)
+        }
+        PublicScalar::Extension(base) => {
+            mixed_geometric_sequence(&Identity::new(), current, base, length)
+        }
+    }
+}
+
+fn mixed_geometric_sequence<M: Embedding>(
+    embedding: &M,
+    mut current: M::Target,
+    base: M::Source,
+    length: usize,
+) -> Vec<M::Target> {
     let mut result = Vec::with_capacity(length);
-    let mut current = current;
     for _ in 0..length {
         result.push(current);
-        current *= base;
+        current = embedding.mixed_mul(current, base);
     }
     result
 }
@@ -107,22 +122,45 @@ pub fn mixed_univariate_evaluate<M: Embedding>(
     coefficients: &[M::Source],
     point: M::Target,
 ) -> M::Target {
+    match PublicScalar::new(point) {
+        PublicScalar::Base(point) => evaluate_with_point(
+            embedding,
+            &Basefield::<M::Target>::new(),
+            coefficients,
+            point,
+        ),
+        PublicScalar::Extension(point) => {
+            evaluate_with_point(embedding, &Identity::new(), coefficients, point)
+        }
+    }
+}
+
+fn evaluate_with_point<M, P>(
+    embedding: &M,
+    point_embedding: &P,
+    coefficients: &[M::Source],
+    point: P::Source,
+) -> M::Target
+where
+    M: Embedding,
+    P: Embedding<Target = M::Target>,
+{
     #[cfg(feature = "parallel")]
     if coefficients.len() > workload_size::<M::Source>() {
         let half = coefficients.len() / 2;
         let (low, high) = coefficients.split_at(half);
         let (low, high) = rayon::join(
-            || mixed_univariate_evaluate(embedding, low, point),
-            || mixed_univariate_evaluate(embedding, high, point),
+            || evaluate_with_point(embedding, point_embedding, low, point),
+            || evaluate_with_point(embedding, point_embedding, high, point),
         );
-        return low + high * point.pow([half as u64]);
+        return low + point_embedding.mixed_mul(high, point.pow([half as u64]));
     }
 
     let Some(mut acc) = coefficients.last().map(|c| embedding.map(*c)) else {
         return M::Target::ZERO;
     };
     for &c in coefficients.iter().rev().skip(1) {
-        acc *= point;
+        acc = point_embedding.mixed_mul(acc, point);
         acc = embedding.mixed_add(acc, c);
     }
     acc
@@ -151,19 +189,58 @@ pub fn mixed_dot<F: Field, G: Field>(
 }
 
 /// Compute `accumulator[i] += sum_j scalars[j] * points[j]^i`
-pub fn geometric_accumulate<F: Field>(accumulator: &mut [F], mut scalars: Vec<F>, points: &[F]) {
+pub fn geometric_accumulate<F: Field>(accumulator: &mut [F], scalars: Vec<F>, points: &[F]) {
+    if F::extension_degree() == 1 {
+        return mixed_geometric_accumulate(&Identity::new(), accumulator, scalars, points);
+    }
+    let mut base_points = Vec::with_capacity(points.len());
+    let mut base_scalars = Vec::with_capacity(points.len());
+    let mut extension_points = Vec::new();
+    let mut extension_scalars = Vec::new();
+    for (scalar, &point) in scalars.into_iter().zip(points) {
+        if let Some(point) = project_base_field(point) {
+            base_points.push(point);
+            base_scalars.push(scalar);
+        } else {
+            extension_points.push(point);
+            extension_scalars.push(scalar);
+        }
+    }
+    mixed_geometric_accumulate(
+        &Basefield::<F>::new(),
+        accumulator,
+        base_scalars,
+        &base_points,
+    );
+    mixed_geometric_accumulate(
+        &Identity::new(),
+        accumulator,
+        extension_scalars,
+        &extension_points,
+    );
+}
+
+fn mixed_geometric_accumulate<M: Embedding>(
+    embedding: &M,
+    accumulator: &mut [M::Target],
+    mut scalars: Vec<M::Target>,
+    points: &[M::Source],
+) {
+    if points.is_empty() {
+        return;
+    }
     #[cfg(feature = "parallel")]
-    if accumulator.len() > workload_size::<F>() {
+    if accumulator.len() > workload_size::<M::Target>() {
         let half = accumulator.len() / 2;
         let (low, high) = accumulator.split_at_mut(half);
         let scalars_high = scalars
             .iter()
             .zip(points)
-            .map(|(s, x)| *s * x.pow([half as u64]))
+            .map(|(s, x)| embedding.mixed_mul(*s, x.pow([half as u64])))
             .collect();
         rayon::join(
-            || geometric_accumulate(low, scalars, points),
-            || geometric_accumulate(high, scalars_high, points),
+            || mixed_geometric_accumulate(embedding, low, scalars, points),
+            || mixed_geometric_accumulate(embedding, high, scalars_high, points),
         );
         return;
     }
@@ -171,7 +248,64 @@ pub fn geometric_accumulate<F: Field>(accumulator: &mut [F], mut scalars: Vec<F>
     for entry in accumulator {
         for (scalar, point) in scalars.iter_mut().zip(points) {
             *entry += *scalar;
-            *scalar *= *point; // TODO: Skip on last
+            *scalar = embedding.mixed_mul(*scalar, *point); // TODO: Skip on last
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+    use crate::algebra::fields::{Field64, Field64_3};
+
+    #[test]
+    fn mixed_public_points_match_generic_arithmetic() {
+        type F = Field64_3;
+        let mut rng = StdRng::seed_from_u64(132);
+        let mut points = vec![F::ZERO, F::ONE, F::from(7)];
+        points.extend(random_vector::<F>(&mut rng, 2));
+        points.push(points[2]);
+        for size in [0, 1, 3, 8193] {
+            let coefficients = random_vector::<F>(&mut rng, size);
+            let base_coefficients = random_vector::<Field64>(&mut rng, size);
+            for &point in &points {
+                let expected = coefficients
+                    .iter()
+                    .rev()
+                    .fold(F::ZERO, |a, &c| a * point + c);
+                assert_eq!(univariate_evaluate(&coefficients, point), expected);
+                let expected = base_coefficients
+                    .iter()
+                    .rev()
+                    .fold(F::ZERO, |a, &c| a * point + F::from_base_prime_field(c));
+                assert_eq!(
+                    mixed_univariate_evaluate(&Basefield::<F>::new(), &base_coefficients, point),
+                    expected
+                );
+                let scalar = rng.gen::<F>();
+                let expected: Vec<_> = (0..size).map(|i| scalar * point.pow([i as u64])).collect();
+                assert_eq!(geometric_sequence(scalar, point, size), expected);
+            }
+            for queries in [0, 3, points.len()] {
+                let points = &points[..queries];
+                let scalars = random_vector::<F>(&mut rng, points.len());
+                let mut actual = coefficients.clone();
+                let expected: Vec<_> = coefficients
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| {
+                        c + scalars
+                            .iter()
+                            .zip(points)
+                            .map(|(&s, &p)| s * p.pow([i as u64]))
+                            .sum::<F>()
+                    })
+                    .collect();
+                geometric_accumulate(&mut actual, scalars, points);
+                assert_eq!(actual, expected);
+            }
         }
     }
 }

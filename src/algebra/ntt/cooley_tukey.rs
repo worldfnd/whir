@@ -19,7 +19,10 @@ use super::{
 #[cfg(not(feature = "rs_in_order"))]
 use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
-    algebra::ntt::utils::divisors,
+    algebra::{
+        embedding::{project_base_field, Basefield, Embedding, Identity},
+        ntt::utils::divisors,
+    },
     buffer::{Buffer, BufferOps},
 };
 
@@ -46,6 +49,8 @@ pub struct NttEngine<F: Field> {
 
     // Root lookup table (extended on demand)
     roots: RwLock<Vec<F>>,
+    // Public roots in the prime field use its arithmetic even for extension-field data.
+    base_engine: Option<Box<NttEngine<F::BasePrimeField>>>,
 }
 
 struct SegmentRows<'segment, 'buffer, F> {
@@ -140,6 +145,11 @@ impl<F: Field> NttEngine<F> {
             omega_16_3: F::ZERO,
             omega_16_9: F::ZERO,
             roots: RwLock::new(Vec::new()),
+            base_engine: if F::extension_degree() == 1 {
+                None
+            } else {
+                project_base_field(omega_order).map(|root| Box::new(NttEngine::new(order, root)))
+            },
         };
         if order.is_multiple_of(3) {
             let omega_3_1 = res.root(3);
@@ -172,8 +182,16 @@ impl<F: Field> NttEngine<F> {
         if size <= 1 {
             return;
         }
-        let roots = self.roots_table(size);
-        self.ntt_dispatch(values, &roots, size);
+        if let Some(engine) = &self.base_engine {
+            engine.ntt_dispatch(
+                &Basefield::<F>::new(),
+                values,
+                &engine.roots_table(size),
+                size,
+            );
+        } else {
+            self.ntt_dispatch(&Identity::new(), values, &self.roots_table(size), size);
+        }
     }
 
     /// Inverse NTT. Does not apply 1/n scaling factor.
@@ -274,31 +292,43 @@ impl<F: Field> NttEngine<F> {
 
     /// Compute NTTs in place by splititng into two factors.
     /// Recurses using the sqrt(N) Cooley-Tukey Six step NTT algorithm.
-    fn ntt_recurse(&self, values: &mut [F], roots: &[F], size: usize) {
+    fn ntt_recurse<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        values: &mut [M::Target],
+        roots: &[F],
+        size: usize,
+    ) {
         debug_assert_eq!(values.len() % size, 0);
         let n1 = sqrt_factor(size); // TODO: Replace with divisors search.
         let n2 = size / n1;
 
         transpose(values, n1, n2);
-        self.ntt_dispatch(values, roots, n1);
+        self.ntt_dispatch(embedding, values, roots, n1);
         transpose(values, n2, n1);
         // TODO: When (n1, n2) are coprime we can use the
         // Good-Thomas NTT algorithm and avoid the twiddle loop.
-        apply_twiddles(values, roots, n1, n2);
-        self.ntt_dispatch(values, roots, n2);
+        apply_twiddles(embedding, values, roots, n1, n2);
+        self.ntt_dispatch(embedding, values, roots, n2);
         transpose(values, n1, n2);
     }
 
-    fn ntt_dispatch(&self, values: &mut [F], roots: &[F], size: usize) {
+    fn ntt_dispatch<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        values: &mut [M::Target],
+        roots: &[F],
+        size: usize,
+    ) {
         debug_assert_eq!(values.len() % size, 0);
         debug_assert_eq!(roots.len() % size, 0);
         #[cfg(feature = "parallel")]
-        if values.len() > workload_size::<F>() && values.len() != size {
+        if values.len() > workload_size::<M::Target>() && values.len() != size {
             // Multiple NTTs, compute in parallel.
             // Work size is largest multiple of `size` smaller than `WORKLOAD_SIZE`.
-            let workload_size = size * max(1, workload_size::<F>() / size);
+            let workload_size = size * max(1, workload_size::<M::Target>() / size);
             return values.par_chunks_mut(workload_size).for_each(|values| {
-                self.ntt_dispatch(values, roots, size);
+                self.ntt_dispatch(embedding, values, roots, size);
             });
         }
         match size {
@@ -314,8 +344,8 @@ impl<F: Field> NttEngine<F> {
                     let v0 = v[0];
                     (v[1], v[2]) = (v[1] + v[2], v[1] - v[2]);
                     v[0] += v[1];
-                    v[1] *= self.half_omega_3_1_plus_2; // ½(ω₃ + ω₃²)
-                    v[2] *= self.half_omega_3_1_min_2; // ½(ω₃ - ω₃²)
+                    v[1] = embedding.mixed_mul(v[1], self.half_omega_3_1_plus_2); // ½(ω₃ + ω₃²)
+                    v[2] = embedding.mixed_mul(v[2], self.half_omega_3_1_min_2); // ½(ω₃ - ω₃²)
                     v[1] += v0;
                     (v[1], v[2]) = (v[1] + v[2], v[1] - v[2]);
                 }
@@ -324,7 +354,7 @@ impl<F: Field> NttEngine<F> {
                 for v in values.chunks_exact_mut(4) {
                     (v[0], v[2]) = (v[0] + v[2], v[0] - v[2]);
                     (v[1], v[3]) = (v[1] + v[3], v[1] - v[3]);
-                    v[3] *= self.omega_4_1;
+                    v[3] = embedding.mixed_mul(v[3], self.omega_4_1);
                     (v[0], v[1]) = (v[0] + v[1], v[0] - v[1]);
                     (v[2], v[3]) = (v[2] + v[3], v[2] - v[3]);
                     (v[1], v[2]) = (v[2], v[1]);
@@ -337,17 +367,17 @@ impl<F: Field> NttEngine<F> {
                     (v[1], v[5]) = (v[1] + v[5], v[1] - v[5]);
                     (v[2], v[6]) = (v[2] + v[6], v[2] - v[6]);
                     (v[3], v[7]) = (v[3] + v[7], v[3] - v[7]);
-                    v[5] *= self.omega_8_1;
-                    v[6] *= self.omega_4_1; // == omega_8_2
-                    v[7] *= self.omega_8_3;
+                    v[5] = embedding.mixed_mul(v[5], self.omega_8_1);
+                    v[6] = embedding.mixed_mul(v[6], self.omega_4_1); // == omega_8_2
+                    v[7] = embedding.mixed_mul(v[7], self.omega_8_3);
                     (v[0], v[2]) = (v[0] + v[2], v[0] - v[2]);
                     (v[1], v[3]) = (v[1] + v[3], v[1] - v[3]);
-                    v[3] *= self.omega_4_1;
+                    v[3] = embedding.mixed_mul(v[3], self.omega_4_1);
                     (v[0], v[1]) = (v[0] + v[1], v[0] - v[1]);
                     (v[2], v[3]) = (v[2] + v[3], v[2] - v[3]);
                     (v[4], v[6]) = (v[4] + v[6], v[4] - v[6]);
                     (v[5], v[7]) = (v[5] + v[7], v[5] - v[7]);
-                    v[7] *= self.omega_4_1;
+                    v[7] = embedding.mixed_mul(v[7], self.omega_4_1);
                     (v[4], v[5]) = (v[4] + v[5], v[4] - v[5]);
                     (v[6], v[7]) = (v[6] + v[7], v[6] - v[7]);
                     (v[1], v[4]) = (v[4], v[1]);
@@ -361,25 +391,25 @@ impl<F: Field> NttEngine<F> {
                         let v = &mut v[i..];
                         (v[0], v[8]) = (v[0] + v[8], v[0] - v[8]);
                         (v[4], v[12]) = (v[4] + v[12], v[4] - v[12]);
-                        v[12] *= self.omega_4_1;
+                        v[12] = embedding.mixed_mul(v[12], self.omega_4_1);
                         (v[0], v[4]) = (v[0] + v[4], v[0] - v[4]);
                         (v[8], v[12]) = (v[8] + v[12], v[8] - v[12]);
                         (v[4], v[8]) = (v[8], v[4]);
                     }
-                    v[5] *= self.omega_16_1;
-                    v[6] *= self.omega_8_1;
-                    v[7] *= self.omega_16_3;
-                    v[9] *= self.omega_8_1;
-                    v[10] *= self.omega_4_1;
-                    v[11] *= self.omega_8_3;
-                    v[13] *= self.omega_16_3;
-                    v[14] *= self.omega_8_3;
-                    v[15] *= self.omega_16_9;
+                    v[5] = embedding.mixed_mul(v[5], self.omega_16_1);
+                    v[6] = embedding.mixed_mul(v[6], self.omega_8_1);
+                    v[7] = embedding.mixed_mul(v[7], self.omega_16_3);
+                    v[9] = embedding.mixed_mul(v[9], self.omega_8_1);
+                    v[10] = embedding.mixed_mul(v[10], self.omega_4_1);
+                    v[11] = embedding.mixed_mul(v[11], self.omega_8_3);
+                    v[13] = embedding.mixed_mul(v[13], self.omega_16_3);
+                    v[14] = embedding.mixed_mul(v[14], self.omega_8_3);
+                    v[15] = embedding.mixed_mul(v[15], self.omega_16_9);
                     for i in 0..4 {
                         let v = &mut v[i * 4..];
                         (v[0], v[2]) = (v[0] + v[2], v[0] - v[2]);
                         (v[1], v[3]) = (v[1] + v[3], v[1] - v[3]);
-                        v[3] *= self.omega_4_1;
+                        v[3] = embedding.mixed_mul(v[3], self.omega_4_1);
                         (v[0], v[1]) = (v[0] + v[1], v[0] - v[1]);
                         (v[2], v[3]) = (v[2] + v[3], v[2] - v[3]);
                         (v[1], v[2]) = (v[2], v[1]);
@@ -392,7 +422,7 @@ impl<F: Field> NttEngine<F> {
                     (v[11], v[14]) = (v[14], v[11]);
                 }
             }
-            size => self.ntt_recurse(values, roots, size),
+            size => self.ntt_recurse(embedding, values, roots, size),
         }
     }
 }
@@ -532,12 +562,23 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         // coset-major `(num_cosets × coset_size)` layout into standard codeword
         // order `(coset_size × num_cosets)`, where global index is
         // `c + j * num_cosets`.
-        apply_twiddles(
-            &mut result,
-            self.roots_table(codeword_length).as_slice(),
-            num_cosets,
-            coset_size,
-        );
+        if let Some(engine) = &self.base_engine {
+            apply_twiddles(
+                &Basefield::<F>::new(),
+                &mut result,
+                &engine.roots_table(codeword_length),
+                num_cosets,
+                coset_size,
+            );
+        } else {
+            apply_twiddles(
+                &Identity::new(),
+                &mut result,
+                &self.roots_table(codeword_length),
+                num_cosets,
+                coset_size,
+            );
+        }
         self.ntt_batch(&mut result, coset_size);
 
         #[cfg(feature = "rs_in_order")]
@@ -595,14 +636,20 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
 /// [ b0  b1*rX1   b2*rX2   b3*rX3   ]
 /// ```
 /// where `rX1`, `rX2`, etc., are powers of root-of-unity determined by row/col indices.
-pub fn apply_twiddles<F: Field>(values: &mut [F], roots: &[F], rows: usize, cols: usize) {
+pub fn apply_twiddles<M: Embedding>(
+    embedding: &M,
+    values: &mut [M::Target],
+    roots: &[M::Source],
+    rows: usize,
+    cols: usize,
+) {
     let size = rows * cols;
     debug_assert_eq!(values.len() % size, 0);
     let step = roots.len() / size;
 
     #[cfg(feature = "parallel")]
     {
-        if values.len() > workload_size::<F>() {
+        if values.len() > workload_size::<M::Target>() {
             if values.len() == size {
                 // Only one matrix → parallelize rows directly
                 values
@@ -614,17 +661,17 @@ pub fn apply_twiddles<F: Field>(values: &mut [F], roots: &[F], rows: usize, cols
                         let mut index = step;
                         for value in row.iter_mut().skip(1) {
                             index %= roots.len();
-                            *value *= roots[index];
+                            *value = embedding.mixed_mul(*value, roots[index]);
                             index += step;
                         }
                     });
                 return;
             }
             // Multiple matrices → chunk and recurse
-            let workload_size = size * max(1, workload_size::<F>() / size);
+            let workload_size = size * max(1, workload_size::<M::Target>() / size);
             values
                 .par_chunks_mut(workload_size)
-                .for_each(|chunk| apply_twiddles(chunk, roots, rows, cols));
+                .for_each(|chunk| apply_twiddles(embedding, chunk, roots, rows, cols));
             return;
         }
     }
@@ -636,7 +683,7 @@ pub fn apply_twiddles<F: Field>(values: &mut [F], roots: &[F], rows: usize, cols
             let mut index = step;
             for value in row.iter_mut().skip(1) {
                 index %= roots.len();
-                *value *= roots[index];
+                *value = embedding.mixed_mul(*value, roots[index]);
                 index += step;
             }
         }
@@ -647,9 +694,56 @@ pub fn apply_twiddles<F: Field>(values: &mut [F], roots: &[F], rows: usize, cols
 #[allow(clippy::significant_drop_tightening)]
 mod tests {
     use ark_ff::{AdditiveGroup as _, BigInteger, PrimeField};
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
 
     use super::*;
-    use crate::algebra::fields::Field64;
+    use crate::algebra::{
+        fields::{Field64, Field64_2, Field64_3},
+        random_vector, univariate_evaluate,
+    };
+
+    #[test]
+    fn base_roots_match_extension_arithmetic() {
+        let fast = NttEngine::<Field64_3>::new_from_fftfield();
+        let mut generic = NttEngine::<Field64_3>::new_from_fftfield();
+        assert!(generic.base_engine.take().is_some());
+        let mut rng = StdRng::seed_from_u64(133);
+        for size in [1, 2, 3, 4, 8, 16, 24, 64, 192, 8192] {
+            let mut actual = random_vector::<Field64_3>(&mut rng, size * 3);
+            let mut expected = actual.clone();
+            fast.ntt_batch(&mut actual, size);
+            generic.ntt_batch(&mut expected, size);
+            assert_eq!(actual, expected, "batch size {size}");
+        }
+        for (length, rows, codeword) in [(3, 2, 16), (64, 16, 256), (8192, 1, 131_072)] {
+            let coefficients = Buffer::from(random_vector::<Field64_3>(&mut rng, length * rows));
+            let buffers = [&coefficients];
+            let segments = [PolynomialSegment::from_rows(&buffers, rows)];
+            let actual = fast.interleaved_encode(Polynomials::from_segments(&segments), codeword);
+            let expected =
+                generic.interleaved_encode(Polynomials::from_segments(&segments), codeword);
+            assert_eq!(actual.to_slice(), expected.to_slice());
+        }
+    }
+
+    #[test]
+    fn roots_outside_base_field_retain_generic_transform() {
+        let q = 18_446_744_069_414_584_321_u128;
+        let exponent = (q * q - 1) >> 33;
+        let root = Field64_2::new(Field64::ZERO, Field64::ONE)
+            .pow([exponent as u64, (exponent >> 64) as u64]);
+        assert!(project_base_field(root).is_none());
+        let engine = NttEngine::new(1_usize << 33, root);
+        assert!(engine.base_engine.is_none());
+        let mut rng = StdRng::seed_from_u64(134);
+        let coefficients = random_vector::<Field64_2>(&mut rng, 32);
+        let mut actual = coefficients.clone();
+        engine.ntt(&mut actual);
+        let expected: Vec<_> = (0..32)
+            .map(|i| univariate_evaluate(&coefficients, engine.root(32).pow([i])))
+            .collect();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn test_new_from_fftfield_basic() {
@@ -806,7 +900,7 @@ mod tests {
         // Ensure the root of unity is correct
         assert_eq!(engine.root(4).pow([4]), Field64::ONE);
 
-        apply_twiddles(&mut values, &roots, 2, 4);
+        apply_twiddles(&Identity::new(), &mut values, &roots, 2, 4);
 
         // The first row should remain unchanged
         assert_eq!(values[0], Field64::from(1));
@@ -829,7 +923,7 @@ mod tests {
         let r1 = Field64::from(12);
         let roots = vec![r1];
 
-        apply_twiddles(&mut values, &roots, 1, 2);
+        apply_twiddles(&Identity::new(), &mut values, &roots, 1, 2);
 
         // Everything should remain unchanged
         assert_eq!(values[0], Field64::from(1));
@@ -853,7 +947,7 @@ mod tests {
         // Mock roots
         let roots = (2..100).map(Field64::from).collect::<Vec<_>>();
 
-        apply_twiddles(&mut values, &roots, 3, 3);
+        apply_twiddles(&Identity::new(), &mut values, &roots, 3, 3);
 
         // First row remains unchanged
         assert_eq!(values[0], Field64::from(1));
@@ -882,7 +976,7 @@ mod tests {
         // Generate a large set of twiddle factors
         let roots: Vec<Field64> = (0..(size * 2) as u64).map(Field64::from).collect();
 
-        apply_twiddles(&mut values, &roots, rows, cols);
+        apply_twiddles(&Identity::new(), &mut values, &roots, rows, cols);
 
         // Verify the first row remains unchanged
         for (i, &col) in values.iter().enumerate().take(cols) {
