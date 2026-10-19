@@ -271,11 +271,6 @@ impl<M: Embedding> Config<M> {
     }
 
     #[cfg(test)]
-    pub(crate) const fn set_vector_size_for_test(&mut self, vector_size: usize) {
-        self.vector_size = vector_size;
-    }
-
-    #[cfg(test)]
     pub(crate) const fn set_in_domain_samples_for_test(&mut self, in_domain_samples: usize) {
         self.in_domain_samples = in_domain_samples;
     }

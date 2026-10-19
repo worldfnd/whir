@@ -1,225 +1,145 @@
-//! IRS-commit parameter selection.
-//!
-//! ZK mask sizing follows Construction 9.7 / Theorem 9.6:
-//! `mask_length = in_domain + t_ood` (Proposition 3.19).
+//! IRS parameter selection; all masks are supplied by Zook.
 
 use crate::{
     algebra::embedding::Embedding,
     protocols::{
-        irs_commit::{num_in_domain_queries, Config as IrsConfig, IrsMode, IrsParams},
+        irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
         params::{
-            bounds::rate,
-            error::DeriveError,
-            spec::{
-                LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
-                ZkSpec,
-            },
+            bounds::{rate, usize_to_f64},
+            error::{DeriveError, ZookSecurityError},
+            regime::DecodingRegimeParams,
+            spec::{Mode, RoundContext, SecuritySpec},
         },
     },
 };
 
-/// Convergence cap for the mask-length / effective-rate fixpoint in [`solve`].
-/// Lemma 9.5 requires `mask_length ≥ in_domain_samples + t_ood`. Both sides
-/// move with each iteration (mask drives codeword sizing → effective rate →
-/// in-domain query count), but `next_order` rounding bounds the shift; the
-/// loop converges in 1-2 iterations under all production specs.
-const SOLVE_MAX_ITER: usize = 4;
-
+/// Encode the supplied vector without appending randomness.
 pub fn solve<M: Embedding + Default>(
     spec: &SecuritySpec,
     ctx: &RoundContext,
-    out_domain_samples: OodSampleBudget,
 ) -> Result<IrsConfig<M>, DeriveError> {
-    let security_target = f64::from(spec.protocol_security_target_bits());
+    let depth = 1_usize
+        .checked_shl(ctx.folding_factor)
+        .ok_or(DeriveError::SizeOverflow)?;
+    if ctx.vector_size == 0 || !ctx.vector_size.is_multiple_of(depth) {
+        return Err(DeriveError::InvalidMaskLayout);
+    }
     let rate = rate(f64::from(ctx.log_inv_rate));
-    let interleaving_depth = 1_usize << ctx.folding_factor;
-
-    let build = |mode: IrsMode| -> Result<IrsConfig<M>, DeriveError> {
-        Ok(IrsConfig::try_new(IrsParams {
-            security_target,
-            decoding_regime: spec.decoding_regime,
-            hash_id: spec.hash_id,
-            num_vectors: 1,
-            vector_size: ctx.vector_size,
-            interleaving_depth,
-            rate,
-            mode,
-        })?)
+    if rate == 0.0 {
+        return Err(DeriveError::SizeOverflow);
+    }
+    // Zook query steps sum two error terms; reserve half the error budget
+    // for the in-domain term. No grinding credit is used for these IOP bounds.
+    let security_target = match spec.mode {
+        Mode::Standard => f64::from(spec.protocol_security_target_bits()),
+        Mode::ZeroKnowledge => f64::from(spec.target_security_bits) + 1.0,
     };
-
-    if matches!(spec.mode, Mode::Standard) {
-        return build(IrsMode::Standard);
-    }
-
-    // ZK mode: Lemma 9.5 requires `mask_length ≥ in_domain + OOD`.
-    // `in_domain_samples` is computed inside `IrsConfig::try_new` from the
-    // codeword's *effective* rate (which depends on `mask_length` via
-    // `masked_message_length`). Iterate to align the two: pick a mask, build
-    // the config, check whether the effective in_domain exceeds the assumed
-    // query count, and grow if needed. Converges in 1-2 iterations because
-    // rate shifts are small.
-    let mut q = num_in_domain_queries(spec.decoding_regime, security_target, rate);
-    for _ in 0..SOLVE_MAX_ITER {
-        let mask_length = q.saturating_add(out_domain_samples.get());
-        let cfg = build(IrsMode::ZeroKnowledge { mask_length })?;
-        if cfg.in_domain_samples() <= q.get() {
-            return Ok(cfg);
-        }
-        q = std::num::NonZeroUsize::new(cfg.in_domain_samples()).expect("in_domain ≥ 1");
-    }
-    panic!("mask / effective-rate fixpoint did not converge in {SOLVE_MAX_ITER} iterations");
-}
-
-/// Shared C_zk IRS config for mask polynomials.
-///
-/// - `l_zk`: message length (`ℓ_zk` in the paper), must be a power of 2.
-/// - `source_mask_length`: `r` from Theorem 9.6.
-/// - `num_vectors`: `2 * num_masks` (Construction 7.2: originals + fresh).
-pub fn solve_mask_code<M: Embedding + Default>(
-    spec: ZkSpec<'_>,
-    l_zk: MaskCodeMessageLen,
-    source_mask_length: usize,
-    log_inv_rate: LogInvRate,
-    num_vectors: usize,
-) -> Result<IrsConfig<M>, DeriveError> {
-    let l_zk = l_zk.get();
-    assert!(
-        l_zk >= source_mask_length,
-        "Theorem 9.6: ℓ_zk ({l_zk}) ≥ source mask length ({source_mask_length})",
-    );
-    assert!(l_zk.is_power_of_two(), "ℓ_zk ({l_zk}) must be a power of 2");
-    assert!(
-        num_vectors.is_multiple_of(2),
-        "num_vectors ({num_vectors}) must be even (mask-proximity original/fresh pairs)",
-    );
-
-    let security_target = f64::from(spec.protocol_security_target_bits());
-    let rate = rate(f64::from(log_inv_rate.get()));
-
     Ok(IrsConfig::try_new(IrsParams {
         security_target,
         decoding_regime: spec.decoding_regime,
         hash_id: spec.hash_id,
-        num_vectors,
-        vector_size: l_zk,
-        interleaving_depth: 1,
+        num_vectors: 1,
+        vector_size: ctx.vector_size,
+        interleaving_depth: depth,
         rate,
         mode: IrsMode::Standard,
     })?)
 }
 
+/// Require degree-preserving encoding and `delta/2 <= theta < 1 - sqrt(1-delta)`.
+/// Here `delta = (n - m + 1)/n` is the relative Reed–Solomon distance,
+/// `n = codeword_length()`, `m = message_length()`, and `theta` is the
+/// configured proximity radius.
+///
+/// ProveKit Prover Whitepaper Appendix A, “Correlated agreement”, constrained
+/// correlated-agreement theorem. Section 5.3, “Overlaid masks instead of
+/// zk-encoding”, defines the degree-preserving commitment to `p + mask`.
+pub(super) fn validate_zook_code<M: Embedding>(
+    code: &IrsConfig<M>,
+) -> Result<(), ZookSecurityError> {
+    if !matches!(code.mode(), IrsMode::Standard) {
+        return Err(ZookSecurityError::AppendedMasks);
+    }
+    let DecodingRegimeParams::Johnson { .. } = code.regime() else {
+        return Err(ZookSecurityError::UnsupportedRegime);
+    };
+    let rho = code.rate();
+    let theta = 1.0 - 2.0_f64.powf(code.regime().one_minus_distance_log2(-rho.log2()));
+    // RS minimum distance is (n - k + 1) / n, including the constant term.
+    let distance = 1.0 - rho + 1.0 / usize_to_f64(code.codeword_length());
+    if theta < distance / 2.0 || theta >= 1.0 - (1.0 - distance).sqrt() {
+        return Err(ZookSecurityError::InvalidProximity);
+    }
+    Ok(())
+}
+
+/// Restrict the final witness and joint-mask bounds to one polynomial per commitment.
+pub(super) fn validate_single_polynomial<M: Embedding>(
+    code: &IrsConfig<M>,
+) -> Result<(), ZookSecurityError> {
+    validate_zook_code(code)?;
+    if code.num_vectors() != 1 || code.interleaving_depth() != 1 {
+        return Err(ZookSecurityError::ExpectedSinglePolynomial);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
+    use std::num::NonZeroUsize;
 
     use super::*;
-    use crate::protocols::params::test_utils::{
-        arb_round_ctx, arb_spec, arb_zk_spec, deterministic_spec, TestEmbedding,
-        TestNonIdentityEmbedding,
+    use crate::{
+        algebra::{
+            embedding::Identity,
+            fields::{Field64, Field64_2},
+        },
+        hash::BLAKE3,
+        protocols::params::{spec::DecodingRegime, test_utils::johnson_code},
     };
-
-    type M = TestEmbedding;
-
-    #[test]
-    fn zk_spec_rejects_standard_mode() {
-        let spec: SecuritySpec = deterministic_spec(Mode::Standard);
-        assert!(ZkSpec::try_new(&spec).is_none());
-    }
+    type F = Field64_2;
 
     #[test]
-    #[should_panic(expected = "must be a power of 2")]
-    fn solve_mask_code_rejects_non_pow2_l_zk() {
-        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
-        let zk_spec = ZkSpec::try_new(&spec).unwrap();
-        let _ = solve_mask_code::<M>(
-            zk_spec,
-            MaskCodeMessageLen::new(3),
-            0,
-            LogInvRate::new(1),
-            2,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Theorem 9.6")]
-    fn solve_mask_code_rejects_l_zk_below_source_mask_length() {
-        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
-        let zk_spec = ZkSpec::try_new(&spec).unwrap();
-        let _ = solve_mask_code::<M>(
-            zk_spec,
-            MaskCodeMessageLen::new(2),
-            4,
-            LogInvRate::new(1),
-            2,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "must be even")]
-    fn solve_mask_code_rejects_odd_num_vectors() {
-        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
-        let zk_spec = ZkSpec::try_new(&spec).unwrap();
-        let _ = solve_mask_code::<M>(
-            zk_spec,
-            MaskCodeMessageLen::new(2),
-            0,
-            LogInvRate::new(1),
-            3,
-        );
-    }
-
-    const IRS_TARGET_RANGE: std::ops::RangeInclusive<u32> = 80..=128;
-
-    fn arb_zk_spec_default() -> impl Strategy<Value = SecuritySpec> {
-        arb_zk_spec(IRS_TARGET_RANGE)
-    }
-
-    fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec> {
-        arb_spec(Mode::Standard, IRS_TARGET_RANGE)
-    }
-
-    proptest! {
-        #[test]
-        fn zk_mask_covers_in_domain_plus_ood(
-            spec in arb_zk_spec_default(),
-            ctx in arb_round_ctx(),
-            out_domain in 0usize..16,
-        ) {
-            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain)).unwrap();
-            prop_assert!(
-                config.mask_length() >= config.in_domain_samples() + out_domain,
-                "mask {} < in_domain {} + out_domain {}",
-                config.mask_length(), config.in_domain_samples(), out_domain,
-            );
-        }
-
-        #[test]
-        fn standard_has_no_mask(
-            spec in arb_standard_spec(),
-            ctx in arb_round_ctx(),
-            out_domain in 0usize..8,
-        ) {
-            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain)).unwrap();
-            prop_assert_eq!(config.mask_length(), 0);
+    fn rejects_appended_masks_and_unsupported_regimes() {
+        for (mode, regime, expected) in [
+            (
+                IrsMode::ZeroKnowledge {
+                    mask_length: NonZeroUsize::new(16).unwrap(),
+                },
+                DecodingRegime::Johnson,
+                ZookSecurityError::AppendedMasks,
+            ),
+            (
+                IrsMode::Standard,
+                DecodingRegime::Unique,
+                ZookSecurityError::UnsupportedRegime,
+            ),
+            (
+                IrsMode::Standard,
+                DecodingRegime::Capacity,
+                ZookSecurityError::UnsupportedRegime,
+            ),
+        ] {
+            let config = IrsConfig::<Identity<F>>::new(IrsParams {
+                security_target: 80.0,
+                decoding_regime: regime,
+                hash_id: BLAKE3,
+                num_vectors: 1,
+                vector_size: 128,
+                interleaving_depth: 1,
+                rate: 0.25,
+                mode,
+            });
+            assert_eq!(validate_zook_code(&config), Err(expected));
         }
     }
 
-    const SMOKE_VECTOR_SIZE: usize = 64;
-    const SMOKE_LOG_INV_RATE: u32 = 1;
-    const SMOKE_FOLDING_FACTOR: u32 = 2;
-    const SMOKE_OOD_BUDGET: usize = 2;
-
     #[test]
-    fn solve_works_with_basefield_embedding_zk() {
-        let spec = deterministic_spec(Mode::ZeroKnowledge);
-        let ctx = RoundContext {
-            vector_size: SMOKE_VECTOR_SIZE,
-            log_inv_rate: SMOKE_LOG_INV_RATE,
-            folding_factor: SMOKE_FOLDING_FACTOR,
-        };
-        let config: IrsConfig<TestNonIdentityEmbedding> =
-            solve(&spec, &ctx, OodSampleBudget::new(SMOKE_OOD_BUDGET))
-                .expect("IRS fixture must solve");
-        assert!(config.mask_length() > 0);
+    fn rejects_proximity_below_half_distance() {
+        let small = johnson_code::<Identity<Field64>>(2, 1, 0.5);
+        assert_eq!(
+            validate_zook_code(&small),
+            Err(ZookSecurityError::InvalidProximity)
+        );
     }
 }

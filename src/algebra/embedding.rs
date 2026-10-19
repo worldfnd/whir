@@ -2,7 +2,7 @@
 
 use std::fmt::Debug;
 
-use ark_ff::Field;
+use ark_ff::{Field, Zero};
 use serde::{Deserialize, Serialize};
 
 use crate::type_info::{Type, TypeInfo, Typed};
@@ -218,6 +218,53 @@ impl<A: Embedding, B: Embedding<Source = A::Target>> TypeInfo for Compose<A, B> 
     fn type_info() -> Self::Info {
         "compose".into()
     }
+}
+
+/// A public scalar, retaining prime-field arithmetic when it lies in that field.
+#[derive(Clone, Copy)]
+pub(crate) enum PublicScalar<F: Field> {
+    Base(F::BasePrimeField),
+    Extension(F),
+}
+
+impl<F: Field> PublicScalar<F> {
+    pub(crate) fn new(value: F) -> Self {
+        project_base_field(value).map_or(Self::Extension(value), Self::Base)
+    }
+
+    pub(crate) fn mul(self, value: F) -> F {
+        match self {
+            Self::Base(scalar) => value.mul_by_base_prime_field(&scalar),
+            Self::Extension(scalar) => value * scalar,
+        }
+    }
+
+    pub(crate) fn pow(self, exponent: u64) -> Self {
+        match self {
+            Self::Base(value) => Self::Base(value.pow([exponent])),
+            Self::Extension(value) => Self::Extension(value.pow([exponent])),
+        }
+    }
+
+    pub(crate) fn square(&mut self) {
+        match self {
+            Self::Base(value) => {
+                value.square_in_place();
+            }
+            Self::Extension(value) => {
+                value.square_in_place();
+            }
+        }
+    }
+}
+
+/// Project a public field element only when all nonconstant coordinates vanish.
+pub(crate) fn project_base_field<F: Field>(value: F) -> Option<F::BasePrimeField> {
+    let mut coordinates = value.to_base_prime_field_elements();
+    let constant = coordinates.next()?;
+    coordinates
+        .all(|coordinate| coordinate.is_zero())
+        .then_some(constant)
 }
 
 #[cfg(test)]

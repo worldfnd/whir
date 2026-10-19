@@ -1,9 +1,13 @@
-//! Zook ZK protocol — Construction 9.7.
+//! Zook with overlaid witness masks and a joint mask commitment.
 
+mod binding;
+mod claims;
 pub mod commit;
 pub mod prover;
+mod round;
 pub mod verifier;
 
+use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};
 
 pub use crate::protocols::params::protocol_config::ProtocolConfig;
@@ -20,10 +24,10 @@ use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, ve
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct FinalClaim<F: ark_ff::Field> {
-    /// All sumcheck challenges from all rounds concatenated with basecase
-    /// evaluation points. Length = log2(vector_size).
+    /// Sumcheck challenges for the original witness dimensions, excluding leading
+    /// padding coordinates. Length = log2(vector_size).
     pub evaluation_point: Vec<F>,
-    /// Cumulative product of all code-switch `original_sl_coeff` values.
+    /// Product of round combination factors and leading zero-padding weights.
     pub initial_claim_scale: F,
     /// `opening.linear_form_evaluation − Σ_c constraint_contributions`.
     /// The portion of the protocol sum attributable to the input linear forms.
@@ -52,17 +56,27 @@ impl<F: ark_ff::Field> FinalClaim<F> {
         let form_mle_sum: F = linear_forms
             .iter()
             .zip(&self.rlc_coefficients)
-            .map(|(form, &g)| g * form.mle_evaluate(&self.evaluation_point))
+            .map(|(form, &g)| g * evaluate_padded(*form, &self.evaluation_point))
             .sum();
         verify!(self.initial_claim_scale * form_mle_sum == self.linear_forms_contribution);
         Ok(())
     }
 }
 
+/// Evaluate a form extended with zeros to the Boolean cube described by `point`.
+fn evaluate_padded<F: Field>(form: &dyn LinearForm<F>, point: &[F]) -> F {
+    if form.size() == 0 {
+        return F::ZERO;
+    }
+    let dimensions = (usize::BITS - (form.size() - 1).leading_zeros()) as usize;
+    let (padding, point) = point.split_at(point.len() - dimensions);
+    padding.iter().map(|&r| F::ONE - r).product::<F>() * form.mle_evaluate(point)
+}
+
 /// Values derived by [`ProtocolConfig::prove`] from the prover transcript.
 #[derive(Clone, Debug)]
 pub struct ProverClaim<F: ark_ff::Field> {
-    /// Sumcheck challenges followed by the basecase evaluation points.
+    /// Sumcheck challenges for the original witness dimensions, excluding padding.
     pub evaluation_point: Vec<F>,
     /// Fiat-Shamir RLC coefficients for the input forms.
     pub rlc_coefficients: Vec<F>,
@@ -76,7 +90,7 @@ mod tests {
     use crate::{
         algebra::{
             embedding::{Basefield, Embedding, Identity},
-            fields::{Field256, Field64, Field64_2},
+            fields::{Field256, Field64_2},
             linear_form::{Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
@@ -88,9 +102,9 @@ mod tests {
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
     };
 
-    // ── Small-test field and config (Field64, λ=40, fast) ───────────────────
+    // ── Small-test field and config (Field64_2, λ=40, fast) ─────────────────
 
-    type SmallF = Field64;
+    type SmallF = Field64_2;
     type SmallEmbed = Identity<SmallF>;
 
     fn small_spec(mode: Mode) -> SecuritySpec {
@@ -103,10 +117,10 @@ mod tests {
         }
     }
 
-    /// 2^8 witness, folding_factor 2 → multiple rounds.
+    /// 2^12 witness: multiple rounds with enough room for overlaid masks.
     fn multi_round_tuning() -> TuningSpec {
         TuningSpec {
-            vector_size: 1 << 8,
+            vector_size: 1 << 12,
             starting_log_inv_rate: 1,
             folding_factor: FoldingFactor::Constant(2),
             rate_schedule: RateSchedule::Stepping,
@@ -294,7 +308,7 @@ mod tests {
             multi_round_tuning(),
         )
         .unwrap();
-        assert!(!config.rounds().is_empty(), "expected at least one round");
+        assert!(config.has_rounds(), "expected at least one round");
         full_roundtrip(&config, 1, 0, "roundtrip_zk_with_rounds");
     }
 
@@ -303,7 +317,7 @@ mod tests {
         let config =
             ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
                 .unwrap();
-        assert!(!config.rounds().is_empty(), "expected at least one round");
+        assert!(config.has_rounds(), "expected at least one round");
         full_roundtrip(&config, 1, 1, "roundtrip_standard_with_rounds");
     }
 
@@ -334,7 +348,7 @@ mod tests {
             basecase_tuning(),
         )
         .unwrap();
-        assert!(config.rounds().is_empty(), "expected basecase-only plan");
+        assert!(!config.has_rounds(), "expected basecase-only plan");
         full_roundtrip(&config, 1, 2, "roundtrip_zk_basecase_only");
     }
 
@@ -343,7 +357,7 @@ mod tests {
         let config =
             ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), basecase_tuning())
                 .unwrap();
-        assert!(config.rounds().is_empty(), "expected basecase-only plan");
+        assert!(!config.has_rounds(), "expected basecase-only plan");
         full_roundtrip(&config, 1, 3, "roundtrip_standard_basecase_only");
     }
 

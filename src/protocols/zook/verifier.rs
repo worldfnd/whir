@@ -1,70 +1,49 @@
-//! Zook verifier — mirror of [`super::prover`] (Construction 9.7).
-//!
-//! Per ZK round, the verifier:
-//!   1. Receives the **sumcheck-masks tree** commitment (pre-sumcheck — binds
-//!      each round poly's mask via Fiat-Shamir).
-//!   2. Runs `sumcheck.verify` (orchestrator tracks sumcheck challenges implicitly).
-//!      Post-sumcheck `state.sum = δ + γ_sumcheck · dot`.
-//!   3. Receives the **cs_mask tree** commitment (post-sumcheck — cs_mask
-//!      carries `r_folded` from source IRS randomness) and reads `δ`
-//!      cleartext, reconciling `state.sum := (sum − δ) · γ_sumcheck⁻¹`.
-//!   4. Runs `code_switch.verify_for_implicit` — accumulates OOD/in-domain
-//!      constraints as `ImplicitConstraint` entries instead of updating an
-//!      explicit covector.
-//!   5. Verifies sumcheck masks at `[1, r_i, …, r_i^{vec_size_A−1}]` (gives
-//!      X_i = M_i(r_i)); verifies cs_mask at the post-cs covector mask
-//!      region (gives X_cs). Checks `Σ X_i == δ` to bind δ; subtracts X_cs
-//!      to project to f-only.
-//!
-//! After all rounds: receives the basecase IRS commitment, runs
-//! `basecase.verify`, constructs `full_eval_point = all_round_challenges ++ evaluation_points`,
-//! and checks that the implicit covector evaluates to `basecase.linear_form_evaluation`
-//! in O((num_constraints + log N)) operations — eliminating the O(N) per-round
-//! covector update bottleneck.
+//! Zook verifier: replay joint-mask rounds, then check the final opening.
 
-use ark_ff::Field;
+use ark_ff::{Field, Zero};
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
 use crate::{
     algebra::{
         embedding::{Embedding, Identity},
-        geometric_sequence,
-        linear_form::{LinearForm, UnivariateEvaluation},
+        linear_form::{Evaluate, LinearForm},
+        multilinear_extend, univariate_evaluate,
     },
     hash::Hash,
     protocols::{
-        code_switch::CovectorUpdateParams,
-        irs_commit::Commitment as IrsCommitment,
-        mask_proximity,
-        params::protocol_config::{MaskOracleConfig, ProtocolConfig, RoundConfig},
-        sumcheck::SumcheckOpening,
-        zook::{commit::Commitment, FinalClaim},
+        basecase::Opening,
+        irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
+        params::{BasecasePlan, ProtocolConfig},
+        zook::{
+            commit::Commitment,
+            round::{reduce_verifier, VerifierRoundState},
+            FinalClaim,
+        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, VerificationResult,
         VerifierMessage, VerifierState,
     },
+    utils::zip_strict,
     verify,
 };
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    /// Verify `f(witness) == evaluations[j]` for every linear_form `f = linear_forms[j]` against
-    /// the received commitment.
-    ///
-    /// The verifier holds no base-field state — all arithmetic is in `M::Target`
-    /// — so only round 0's dispatch (over embedding `M`) is embedding-aware.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds(), num_claims = linear_forms.len())))]
+    /// Verify the supplied linear evaluations against the received commitment.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify"))]
     pub fn verify<H>(
         &self,
         vs: &mut VerifierState<H>,
-        commitment: Commitment,
+        commitment: Commitment<M::Target>,
         linear_forms: &[&dyn LinearForm<M::Target>],
         evaluations: &[M::Target],
     ) -> VerificationResult<FinalClaim<M::Target>>
     where
-        M::Target: Default + Codec<[H::U]>,
+        M::Target: Codec<[H::U]>,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface,
         u8: Decoding<[H::U]>,
@@ -72,420 +51,262 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        assert_eq!(
-            linear_forms.len(),
-            evaluations.len(),
-            "linear_forms.len() != evaluations.len()"
-        );
-        assert!(
-            !linear_forms.is_empty(),
-            "zook requires ≥ 1 (form, value) pair"
-        );
-
-        let one = <M::Target as Field>::ONE;
-
-        // RLC challenge binds the form/value set to the commitment.
-        let batching_challenge: M::Target = vs.verifier_message();
-        let claim_weights = geometric_sequence(one, batching_challenge, linear_forms.len());
-        let batched_evaluation: M::Target = evaluations
-            .iter()
-            .zip(&claim_weights)
-            .map(|(v, weight)| *v * weight)
-            .sum();
-
-        // Basecase-only path: no rounds, evaluate directly.
-        if !self.has_rounds() {
-            let opening =
-                self.basecase()
-                    .verify(vs, &commitment.irs_commitment, batched_evaluation)?;
-            // No constraint terms, no round scalings: linear_forms_contribution = opening.linear_form_evaluation,
-            // initial_claim_scale = ONE. The caller checks:
-            // ONE × Σ_j claim_weight_j × form_j.mle_at(evaluation_point) == linear_forms_contribution
-            return Ok(FinalClaim {
-                evaluation_point: opening.evaluation_points,
-                initial_claim_scale: one,
-                linear_forms_contribution: opening.linear_form_evaluation,
-                rlc_coefficients: claim_weights,
-            });
-        }
-
-        // Multi-round path: accumulate constraints implicitly, no initial_covector.
-        let mut state = VerifierRoundState {
-            irs_commitment: commitment.irs_commitment,
-            constraints: Vec::new(),
-            all_round_challenges: Vec::new(),
-            challenges_at: vec![0],
-            round_scale_factors: Vec::new(),
-            current_msg_len: self.tuning().vector_size,
-            sum: batched_evaluation,
-        };
-        if let Some(first) = self.first_round() {
-            state = verify_round::<M, H>(first, state, vs)?;
-        }
-        for round in self.tail_rounds() {
-            state = verify_round::<Identity<M::Target>, H>(round, state, vs)?;
-        }
-
-        let opening = self
-            .basecase()
-            .verify(vs, &state.irs_commitment, state.sum)?;
-
-        // full_eval_point = all round challenges ++ basecase evaluation points.
-        let full_eval_point: Vec<M::Target> = state
-            .all_round_challenges
-            .iter()
-            .chain(opening.evaluation_points.iter())
-            .copied()
-            .collect();
-        debug_assert_eq!(
-            full_eval_point.len(),
-            self.tuning().vector_size.trailing_zeros() as usize,
-            "full_eval_point length must equal log2(vector_size)"
-        );
-
-        // Compute scale_suffixes[round_idx] = Π_{r'=round_idx..num_completed_rounds-1} round_scale_factors[r'].
-        let num_completed_rounds = state.round_scale_factors.len();
-        let mut scale_suffixes = vec![one; num_completed_rounds + 1];
-        for round_idx in (0..num_completed_rounds).rev() {
-            scale_suffixes[round_idx] =
-                state.round_scale_factors[round_idx] * scale_suffixes[round_idx + 1];
-        }
-
-        // Compute constraint contributions (O(num_constraints × log N)).
-        // constraint_sum = Σ_c c.batching_weight × scale_suffixes[c.round+1] × mle_of_geom(c.eval_point, z_suffix)
-        let constraint_sum: M::Target = state
-            .constraints
-            .iter()
-            .map(|c| {
-                let z_suffix_start = state.challenges_at[c.added_at_round + 1];
-                let z_suffix =
-                    &full_eval_point[z_suffix_start..z_suffix_start + c.domain_bits as usize];
-                c.batching_weight
-                    * scale_suffixes[c.added_at_round + 1]
-                    * UnivariateEvaluation::new(c.eval_point, 1usize << c.domain_bits)
-                        .mle_evaluate(z_suffix)
-            })
-            .sum();
-
-        // linear_forms_contribution is what scale_suffixes[0] × initial_forms_mle must equal.
-        // The caller verifies: scale_suffixes[0] × Σ_j γ^j × form_j.mle_at(full_eval_point) == linear_forms_contribution
-        let linear_forms_contribution = opening.linear_form_evaluation - constraint_sum;
-
-        Ok(FinalClaim {
-            evaluation_point: full_eval_point,
-            initial_claim_scale: scale_suffixes[0],
-            linear_forms_contribution,
-            rlc_coefficients: claim_weights,
-        })
-    }
-}
-
-struct VerifierRoundState<F: Field> {
-    irs_commitment: IrsCommitment,
-    /// Deferred constraint terms from code_switch OOD and in-domain constraints.
-    constraints: Vec<ImplicitConstraint<F>>,
-    /// All sumcheck round challenges seen so far, in order.
-    all_round_challenges: Vec<F>,
-    /// `challenges_at[r]` = number of cumulative challenges before round r.
-    /// Length = number of rounds processed + 1 (initial entry is 0).
-    challenges_at: Vec<usize>,
-    /// `original_sl_coeff` from each round's code_switch, in order.
-    round_scale_factors: Vec<F>,
-    /// Current message length (size of post-fold covector this round).
-    current_msg_len: usize,
-    sum: F,
-}
-
-struct ImplicitConstraint<F: Field> {
-    /// OOD alpha or in-domain omega.
-    eval_point: F,
-    /// RLC coefficient at the time this constraint was added.
-    batching_weight: F,
-    /// log2 of the effective domain size = log2(msg_len when added).
-    /// The final contribution is batching_weight * mle_evaluate(eval_point, z_suffix)
-    /// where z_suffix has exactly this many elements.
-    domain_bits: u32,
-    /// Index into `round_scale_factors`: which round added this constraint.
-    /// `scale_suffixes[added_at_round + 1]` is the product of all round_scale_factors
-    /// from the round after this one to the end.
-    added_at_round: usize,
-}
-
-/// Manages ZK mask verification state for one round.
-/// Mirrors `RoundMaskOracle` in `prover.rs` on the receive side.
-/// `Disabled` is the Null Object for Standard mode — all methods return Ok(()) / &[].
-enum RoundMaskOracleCheck<'a, F: Field> {
-    /// Standard mode: no mask oracle.
-    Disabled,
-    /// ZK — sumcheck-masks commitment received; awaiting cs_mask.
-    SumcheckCommitmentReceived {
-        mo: &'a MaskOracleConfig<F>,
-        sc_commitment: mask_proximity::Commitment,
-        /// source IRS randomness length — needed for zk_tail in verify_and_discharge.
-        source_mask_len: usize,
-    },
-    /// ZK — both commitments received, sum reconciled; ready to verify and discharge.
-    ReadyForDischarge {
-        mo: &'a MaskOracleConfig<F>,
-        sc_commitment: mask_proximity::Commitment,
-        cs_commitment: mask_proximity::Commitment,
-        /// δ = Σ Mᵢ(rᵢ) received from transcript; bound by the sumcheck-mask opening check.
-        mask_eval_sum: F,
-        source_mask_len: usize,
-    },
-}
-
-impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
-    /// Receive the sumcheck-masks commitment (ZK) or construct Disabled (Standard).
-    fn begin<M, H>(round: &'a RoundConfig<M>, vs: &mut VerifierState<H>) -> VerificationResult<Self>
-    where
-        M: Embedding<Target = F>,
-        F: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
-    {
-        match round.mask_oracle() {
-            None => Ok(Self::Disabled),
-            Some(mo) => {
-                let sc_commitment = mo.sumcheck_masks().receive_commitment(vs)?;
-                let source_mask_len = round.code_switch().source().mask_length();
-                Ok(Self::SumcheckCommitmentReceived {
-                    mo,
-                    sc_commitment,
-                    source_mask_len,
-                })
-            }
-        }
+        let reduced = reduce_verifier(self, vs, commitment, linear_forms, evaluations)?;
+        self.verify_final_opening(vs, reduced)
     }
 
-    /// Receive the cs_mask commitment + mask_eval_sum (δ) cleartext, then reconcile *sum.
-    /// Transitions SumcheckCommitmentReceived → ReadyForDischarge in place.
-    /// No-op for Disabled.
-    fn receive_cs_mask_and_reconcile<H>(
-        &mut self,
-        opening: &SumcheckOpening<F>,
+    fn verify_final_opening<H>(
+        &self,
         vs: &mut VerifierState<H>,
-        sum: &mut F,
-    ) -> VerificationResult<()>
+        state: VerifierRoundState<'_, M::Target>,
+    ) -> VerificationResult<FinalClaim<M::Target>>
     where
-        F: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
-    {
-        let (mo, sc_commitment, source_mask_len) = match std::mem::replace(self, Self::Disabled) {
-            Self::SumcheckCommitmentReceived {
-                mo,
-                sc_commitment,
-                source_mask_len,
-            } => (mo, sc_commitment, source_mask_len),
-            other => {
-                *self = other;
-                return Ok(());
-            }
-        };
-
-        let cs_commitment = mo.cs_mask().receive_commitment(vs)?;
-        let mask_eval_sum: F = vs.prover_message()?;
-
-        // Reconcile: sum was (mask_eval_sum + mask_rlc · dot), now (sum − δ)/mask_rlc = dot.
-        // mask_rlc is Fiat–Shamir; zero has negligible probability for large fields.
-        let mask_rlc_inv = opening
-            .mask_rlc
-            .inverse()
-            .expect("mask_rlc non-zero (negligible probability for large fields)");
-        *sum = (*sum - mask_eval_sum) * mask_rlc_inv;
-
-        *self = Self::ReadyForDischarge {
-            mo,
-            sc_commitment,
-            cs_commitment,
-            mask_eval_sum,
-            source_mask_len,
-        };
-        Ok(())
-    }
-
-    /// Verify both mask trees and subtract the cs_mask contribution from *sum.
-    /// No-op for Disabled.
-    ///
-    /// Soundness: `code_switch.verify_for_implicit` (step 4) checked OOD/in-domain
-    /// consistency of the target codeword but did NOT verify the masks are close to
-    /// C_zk. Both checks are load-bearing per Theorem 9.10 / Construction 7.2.
-    fn verify_and_discharge<H>(
-        self,
-        round_challenges: &[F],
-        msg_len: usize,
-        update_params: &CovectorUpdateParams<F>,
-        vs: &mut VerifierState<H>,
-        sum: &mut F,
-    ) -> VerificationResult<()>
-    where
-        F: Codec<[H::U]>,
+        M::Target: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         u8: Decoding<[H::U]>,
         [u8; 32]: Decoding<[H::U]>,
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let (mo, sc_commitment, cs_commitment, mask_eval_sum, source_mask_len) = match self {
-            Self::ReadyForDischarge {
-                mo,
-                sc_commitment,
-                cs_commitment,
-                mask_eval_sum,
-                source_mask_len,
-            } => (
-                mo,
-                sc_commitment,
-                cs_commitment,
-                mask_eval_sum,
-                source_mask_len,
-            ),
-            Self::Disabled => return Ok(()),
-            Self::SumcheckCommitmentReceived { .. } => {
-                debug_assert!(
-                    false,
-                    "verify_and_discharge called before receive_cs_mask_and_reconcile"
-                );
-                return Ok(());
+        let opening = match self.basecase() {
+            BasecasePlan::Standard { config, .. } => {
+                assert!(state.masks.is_none());
+                config.verify(vs, &state.irs, state.sum)?
+            }
+            BasecasePlan::ZeroKnowledge { sumcheck, .. } => {
+                let (message, mut sum) = self.receive_final_claim(vs, &state)?;
+                let point = sumcheck.verify(vs, &mut sum)?.round_challenges;
+                let value = multilinear_extend(&message, &point);
+                verify!(!value.is_zero());
+                Opening {
+                    evaluation_points: point,
+                    linear_form_evaluation: sum / value,
+                }
             }
         };
+        Ok(state.kernel.finish(&opening, self.tuning().vector_size))
+    }
 
-        // --- Sumcheck-masks tree ---
-        // Verify each mask at its geometric covector [1, rᵢ, rᵢ², …]; check Σ Xᵢ == mask_eval_sum.
-        let sumcheck_vec_size = mo.sumcheck_masks().c_zk_commit().vector_size();
-        let sm_covectors: Vec<Vec<F>> = round_challenges
+    /// Check both encoding relations and all three deferred Phase 0 equations.
+    ///
+    /// §5.4, “The final opening protocol”: `L(M') = lambda*L(m) + L(M)`
+    /// for each binding form, then `sum = lambda*c + d - B(M')`.
+    fn receive_final_claim<H>(
+        &self,
+        vs: &mut VerifierState<H>,
+        state: &VerifierRoundState<'_, M::Target>,
+    ) -> VerificationResult<(Vec<M::Target>, M::Target)>
+    where
+        M::Target: Codec<[H::U]>,
+        H: DuplexSpongeInterface,
+        u8: Decoding<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        let (Some(layout), Some(masks)) = (self.joint_masks(), state.masks.as_ref()) else {
+            panic!("final opening requires the joint mask commitment");
+        };
+        let commit = self.basecase().commit();
+        let witness_blind_commit = commit.receive_commitment(vs)?;
+        let mask_blind_commit = layout.commit().receive_commitment(vs)?;
+        let blind_sum: M::Target = vs.prover_message()?;
+        let blind_binding: Vec<M::Target> = vs.prover_messages_vec(3)?;
+        let lambda = vs.verifier_message::<M::Target>();
+        let message = vs.prover_messages_vec(commit.vector_size())?;
+        let mask_message = vs.prover_messages_vec(layout.commit().vector_size())?;
+        verify_combination(
+            commit,
+            vs,
+            [&witness_blind_commit, &state.irs],
+            &message,
+            lambda,
+        )?;
+        verify_combination(
+            layout.commit(),
+            vs,
+            [&mask_blind_commit, &masks.joint],
+            &mask_message,
+            lambda,
+        )?;
+        for ((form, &value), blind) in masks
+            .binding
+            .forms
             .iter()
-            .map(|&r| geometric_sequence(F::ONE, r, sumcheck_vec_size))
-            .collect();
-        let sm_refs: Vec<&[F]> = sm_covectors.iter().map(Vec::as_slice).collect();
-        let sm_x_values = mo
-            .sumcheck_masks()
-            .verify(vs, &sc_commitment, Some(&sm_refs))?
-            .expect("sumcheck-mask values always returned when covectors passed");
-        let sumcheck_x_sum: F = sm_x_values.iter().copied().sum();
-        verify!(sumcheck_x_sum == mask_eval_sum);
-
-        // --- cs_mask tree ---
-        // Reconstruct zk_tail: the covector region [msg_len .. msg_len + l_zk].
-        // OOD points contribute over the full l_zk; in-domain only over source_mask_len.
-        let l_zk = mo.l_zk().get();
-        let mut zk_tail = vec![F::ZERO; l_zk];
-
-        for (coeff, alpha) in update_params
-            .ood_rlc_coeffs
-            .iter()
-            .zip(&update_params.ood_eval_points)
+            .zip(&masks.binding.values)
+            .zip(blind_binding)
         {
-            let alpha_msg_pow = alpha.pow([msg_len as u64]);
-            let mut alpha_l = alpha_msg_pow;
-            for entry in &mut zk_tail {
-                *entry += *coeff * alpha_l;
-                alpha_l *= *alpha;
-            }
+            verify!(form.evaluate(&Identity::new(), &mask_message) == blind + lambda * value);
         }
-        for (coeff, omega) in update_params
-            .in_domain_rlc_coeffs
-            .iter()
-            .zip(&update_params.in_domain_eval_points)
-        {
-            let omega_msg_pow = omega.pow([msg_len as u64]);
-            let mut omega_l = omega_msg_pow;
-            for entry in &mut zk_tail[..source_mask_len] {
-                *entry += *coeff * omega_l;
-                omega_l *= *omega;
-            }
-        }
-
-        let cs_cov: [&[F]; 1] = [&zk_tail];
-        let cs_x_values = mo
-            .cs_mask()
-            .verify(vs, &cs_commitment, Some(&cs_cov))?
-            .expect("cs_mask value always returned when covector passed");
-        *sum -= cs_x_values[0];
-
-        Ok(())
+        let sum = blind_sum + lambda * state.sum - masks.claims.evaluate(&mask_message);
+        Ok((message, sum))
     }
 }
 
-#[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify_round", fields(msg_len = round.code_switch().source().message_length())))]
-fn verify_round<M, H>(
-    round: &RoundConfig<M>,
-    mut state: VerifierRoundState<M::Target>,
+/// Authenticate a single polynomial's revealed combination against both roots.
+fn verify_combination<F, H>(
+    config: &IrsConfig<Identity<F>>,
     vs: &mut VerifierState<H>,
-) -> VerificationResult<VerifierRoundState<M::Target>>
+    commitments: [&IrsCommitment; 2],
+    message: &[F],
+    lambda: F,
+) -> VerificationResult<()>
 where
-    M: Embedding,
-    M::Target: Field + Default + Codec<[H::U]>,
-    Standard: Distribution<M::Target>,
+    F: Field + Codec<[H::U]>,
     H: DuplexSpongeInterface,
     u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
     Hash: ProverMessage<[H::U]>,
 {
-    let msg_len = round.code_switch().source().message_length();
-
-    // Receive sumcheck-masks commitment (ZK) or construct Disabled (Standard).
-    let mut masker = RoundMaskOracleCheck::begin(round, vs)?;
-
-    // Sumcheck: mutates sum, records round challenges for full_eval_point reconstruction.
-    let opening = round.sumcheck().verify(vs, &mut state.sum)?;
-    state
-        .all_round_challenges
-        .extend_from_slice(&opening.round_challenges);
-    state.current_msg_len = msg_len;
-
-    // Receive cs_mask commitment + mask_eval_sum (δ), reconcile sum to the unmasked dot.
-    masker.receive_cs_mask_and_reconcile(&opening, vs, &mut state.sum)?;
-
-    // Code-switch: accumulate implicit constraints; no explicit covector update.
-    let (target_commitment, update_params) = round.code_switch().verify_for_implicit(
-        vs,
-        &mut state.sum,
-        &opening.round_challenges,
-        &state.irs_commitment,
-    )?;
-    let current_round = state.round_scale_factors.len();
-    let domain_bits = msg_len.trailing_zeros();
-    for (batching_weight, eval_point) in update_params
-        .ood_rlc_coeffs
-        .iter()
-        .zip(&update_params.ood_eval_points)
-    {
-        state.constraints.push(ImplicitConstraint {
-            eval_point: *eval_point,
-            batching_weight: *batching_weight,
-            domain_bits,
-            added_at_round: current_round,
-        });
+    assert_eq!(config.num_messages(), 1);
+    assert_eq!(config.mask_length(), 0);
+    let evaluations = config.verify(vs, &commitments)?;
+    let weights = [F::ONE, lambda];
+    let values = evaluate_points(message, &evaluations.points);
+    for (actual, expected) in zip_strict(values, evaluations.values(&weights)) {
+        verify!(actual == expected);
     }
-    for (batching_weight, eval_point) in update_params
-        .in_domain_rlc_coeffs
-        .iter()
-        .zip(&update_params.in_domain_eval_points)
-    {
-        state.constraints.push(ImplicitConstraint {
-            eval_point: *eval_point,
-            batching_weight: *batching_weight,
-            domain_bits,
-            added_at_round: current_round,
-        });
+    Ok(())
+}
+
+/// Evaluate independent queries in one batch, preserving their order.
+fn evaluate_points<F: Field>(message: &[F], points: &[F]) -> Vec<F> {
+    #[cfg(feature = "parallel")]
+    let points = points.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let points = points.iter();
+    points
+        .map(|&point| univariate_evaluate(message, point))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    use ark_ff::AdditiveGroup;
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
+
+    use super::*;
+    use crate::{
+        algebra::{
+            embedding::Basefield,
+            fields::{Field64_2, Field64_3},
+            linear_form::{MultilinearExtension, UnivariateEvaluation},
+            random_vector,
+        },
+        buffer::{Buffer, BufferMath, BufferOps},
+        protocols::params::{
+            FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
+        },
+        transcript::{codecs::Empty, DomainSeparator, ProverState},
+    };
+
+    #[test]
+    fn batched_evaluations_preserve_query_order_and_duplicates() {
+        type F = Field64_3;
+        let mut rng = StdRng::seed_from_u64(121);
+        let mut points = random_vector::<F>(&mut rng, 67);
+        points[0] = F::ZERO;
+        points[1] = F::ONE;
+        points[2] = points[4];
+        for size in [0, 1, 3, 8192] {
+            let message = random_vector::<F>(&mut rng, size);
+            let expected: Vec<_> = points
+                .iter()
+                .map(|point| {
+                    message
+                        .iter()
+                        .rev()
+                        .fold(F::ZERO, |value, coefficient| value * point + coefficient)
+                })
+                .collect();
+            assert_eq!(evaluate_points(&message, &points), expected);
+            assert_eq!(evaluate_points(&message, &[]), Vec::<F>::new());
+        }
     }
-    state
-        .round_scale_factors
-        .push(update_params.original_sl_coeff);
-    state.challenges_at.push(state.all_round_challenges.len());
-    state.irs_commitment = target_commitment;
 
-    // Verify both mask trees and subtract cs_mask contribution from sum.
-    masker.verify_and_discharge(
-        &opening.round_challenges,
-        msg_len,
-        &update_params,
-        vs,
-        &mut state.sum,
-    )?;
+    fn check_final_opening(mutate: impl Fn(&mut VerifierRoundState<'_, Field64_2>), accept: bool) {
+        for size in [8_usize, 4096] {
+            let config = ProtocolConfig::<Basefield<Field64_2>>::derive(
+                SecuritySpec::new(80)
+                    .with_mode(Mode::ZeroKnowledge)
+                    .with_pow_budget(PowBudget::Forbidden),
+                TuningSpec {
+                    vector_size: size,
+                    starting_log_inv_rate: 2,
+                    folding_factor: FoldingFactor::Constant(2),
+                    rate_schedule: RateSchedule::Stepping,
+                },
+            )
+            .unwrap();
+            let mut rng = StdRng::seed_from_u64(102);
+            let witness = Buffer::random(&mut rng, size);
+            let multilinear =
+                MultilinearExtension::new(random_vector(&mut rng, size.trailing_zeros() as usize));
+            let univariate = UnivariateEvaluation::new(Field64_2::from(7), 3);
+            let forms: [&dyn LinearForm<Field64_2>; 2] = [&multilinear, &univariate];
+            let values = [
+                multilinear.evaluate(&Basefield::new(), witness.to_slice()),
+                univariate.evaluate(&Basefield::new(), &witness.to_slice()[..3]),
+            ];
+            let ds = DomainSeparator::protocol(&config)
+                .session(&"final-opening")
+                .instance(&Empty);
+            let mut ps = ProverState::new_std(&ds);
+            let committed = config.commit(&mut ps, witness);
+            let prover_claim = config.prove(&mut ps, committed, &forms, &values);
+            let proof = ps.proof();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let mut vs = VerifierState::new_std(&ds, &proof);
+                let commitment = config.receive_commitment(&mut vs)?;
+                let mut state = reduce_verifier(&config, &mut vs, commitment, &forms, &values)?;
+                mutate(&mut state);
+                let claim = config.verify_final_opening(&mut vs, state)?;
+                claim.verify(&forms)?;
+                assert_eq!(claim.evaluation_point, prover_claim.evaluation_point);
+                assert_eq!(claim.evaluation_point.len(), size.trailing_zeros() as usize);
+                assert_eq!(claim.rlc_coefficients, prover_claim.rlc_coefficients);
+                vs.check_eof()
+            }));
+            assert_eq!(matches!(result, Ok(Ok(()))), accept, "witness size {size}");
+        }
+    }
 
-    Ok(state)
+    #[test]
+    fn final_opening_preserves_points_for_padded_and_short_forms() {
+        check_final_opening(|_| {}, true);
+    }
+
+    #[test]
+    fn final_opening_checks_each_deferred_binding_equation() {
+        for index in 0..3 {
+            check_final_opening(
+                |state| {
+                    state.masks.as_mut().unwrap().binding.values[index] += Field64_2::ONE;
+                },
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn final_opening_checks_accumulated_mask_claim_and_sum() {
+        check_final_opening(
+            |state| {
+                state.masks.as_mut().unwrap().claims.covector.vector[0] += Field64_2::ONE;
+            },
+            false,
+        );
+        check_final_opening(|state| state.sum += Field64_2::ONE, false);
+    }
+
+    #[test]
+    fn final_opening_authenticates_both_original_commitments() {
+        check_final_opening(
+            |state| state.irs = state.masks.as_ref().unwrap().joint.clone(),
+            false,
+        );
+        check_final_opening(
+            |state| state.masks.as_mut().unwrap().joint = state.irs.clone(),
+            false,
+        );
+    }
 }
