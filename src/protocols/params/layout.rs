@@ -1,20 +1,17 @@
-//! Round-skeleton layout: pure-data walk over the witness shape.
-//!
-//! Produces per-round shapes (vector size, log_inv_rate, folding factors)
-//! independent of [`SecuritySpec`] and IRS solving. Consumed by
-//! [`super::build_round`] to instantiate per-round configs and by
-//! [`super::derive`] to drive the round/basecase split.
+//! Round dimensions chosen before masks are sampled.
 
 use thiserror::Error;
 
 use crate::{
-    algebra::embedding::Embedding,
+    algebra::embedding::{Embedding, Identity},
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
             adaptive::plan_adaptive_rates,
             branch::RoundBuildMode,
             error::DeriveError,
+            irs_commit::solve as solve_irs,
+            protocol_config::WitnessMaskConfig,
             spec::{RateSchedule, RoundContext, SecuritySpec, TuningSpec},
         },
     },
@@ -58,6 +55,7 @@ pub(super) struct RoundShape {
 
 #[derive(Debug)]
 pub(super) struct RoundLayout {
+    pub(super) padded_vector_size: usize,
     pub(super) shapes: Vec<RoundShape>,
     pub(super) basecase_vector_size: usize,
     pub(super) basecase_log_inv_rate: u32,
@@ -66,89 +64,196 @@ pub(super) struct RoundLayout {
 pub(super) fn round_layout<M: Embedding + Default>(
     spec: &SecuritySpec,
     tuning: &TuningSpec,
-    mode: RoundBuildMode<'_>,
+    mode: RoundBuildMode,
 ) -> Result<RoundLayout, DeriveError> {
-    if !tuning.vector_size.is_power_of_two() {
-        return Err(LayoutError::VectorSizeNotPowerOfTwo {
-            vector_size: tuning.vector_size,
-        }
-        .into());
-    }
-    let min_folding = tuning.folding_factor.min();
-    if min_folding < 1 {
-        return Err(LayoutError::FoldingFactorBelowOne { min: min_folding }.into());
-    }
-    if tuning.starting_log_inv_rate < 1 {
-        return Err(LayoutError::StartingRateBelowOne.into());
-    }
-
-    let mut num_vars = tuning.vector_size.trailing_zeros() as usize;
+    let padded_vector_size = initial_vector_size::<M>(spec, tuning, mode)?;
+    let mut num_vars = padded_vector_size.trailing_zeros() as usize;
     let mut log_inv_rate = tuning.starting_log_inv_rate;
     let mut shapes = Vec::new();
 
     loop {
         let round = shapes.len();
         let source_folding = tuning.folding_factor.at_round(round);
-        let target_folding = tuning.folding_factor.at_round(round.saturating_add(1));
-        if num_vars < source_folding.saturating_add(target_folding) {
+        let next_folding = tuning.folding_factor.at_round(round + 1);
+        let Some(remaining) = num_vars.checked_sub(source_folding) else {
+            break;
+        };
+        if !mode.is_zk() && remaining < next_folding {
             break;
         }
+        let source_folding_factor =
+            u32::try_from(source_folding).map_err(|_| DeriveError::SizeOverflow)?;
         let target_log_inv_rate = tuning
             .rate_schedule
-            .step(log_inv_rate, source_folding as u32);
+            .step(log_inv_rate, source_folding_factor);
+        let mut target_folding_factor =
+            u32::try_from(next_folding).map_err(|_| DeriveError::SizeOverflow)?;
+
+        if mode.is_zk() {
+            let source_fits = if round == 0 {
+                mask_fits::<M>(
+                    spec,
+                    1usize << num_vars,
+                    log_inv_rate,
+                    source_folding_factor,
+                    0,
+                )?
+            } else {
+                mask_fits::<Identity<M::Target>>(
+                    spec,
+                    1usize << num_vars,
+                    log_inv_rate,
+                    source_folding_factor,
+                    1,
+                )?
+            };
+            if !source_fits
+                || !mask_fits::<Identity<M::Target>>(
+                    spec,
+                    1usize << remaining,
+                    target_log_inv_rate,
+                    0,
+                    1,
+                )?
+            {
+                break;
+            }
+            if remaining < next_folding
+                || !mask_fits::<Identity<M::Target>>(
+                    spec,
+                    1usize << remaining,
+                    target_log_inv_rate,
+                    target_folding_factor,
+                    1,
+                )?
+            {
+                target_folding_factor = 0;
+            }
+        }
         shapes.push(RoundShape {
             round_index: round,
             source_vector_size: 1usize << num_vars,
             source_log_inv_rate: log_inv_rate,
-            source_folding_factor: source_folding as u32,
-            target_folding_factor: target_folding as u32,
+            source_folding_factor,
+            target_folding_factor,
             target_log_inv_rate,
         });
-        num_vars = num_vars.saturating_sub(source_folding);
+        num_vars = remaining;
         log_inv_rate = target_log_inv_rate;
-    }
-
-    let basecase_vector_size = 1usize << num_vars;
-    // Adaptive: replace stepped per-round rates with the pareto-knee schedule.
-    // `plan_adaptive_rates` returns one rate per round (= per-round target) and
-    // an additional basecase rate is taken from the final entry.
-    let basecase_log_inv_rate = match tuning.rate_schedule {
-        RateSchedule::Adaptive { knee_weight } if !shapes.is_empty() => {
-            let new_rates = plan_adaptive_rates::<M>(
-                spec,
-                tuning,
-                knee_weight,
-                &shapes,
-                basecase_vector_size,
-                mode,
-            )?;
-            for (shape, &t) in shapes.iter_mut().zip(&new_rates) {
-                shape.target_log_inv_rate = t;
-            }
-            for i in 1..shapes.len() {
-                shapes[i].source_log_inv_rate = shapes[i - 1].target_log_inv_rate;
-            }
-            *new_rates
-                .last()
-                .expect("non-empty rounds → non-empty rates")
+        if mode.is_zk() && target_folding_factor == 0 {
+            break;
         }
-        _ => log_inv_rate,
-    };
-
-    // Force the last round's target IRS to interleaving = 1 so it can serve
-    // directly as the basecase commit — eliminates the recommit of the folded
-    // message in `zook::prove`. `target_folding_factor` only affects the
-    // target IRS shape (it's a hint about the next round's source-folding,
-    // and there is no next round here).
+    }
     if let Some(last) = shapes.last_mut() {
         last.target_folding_factor = 0;
     }
-
+    let basecase_vector_size = 1usize << num_vars;
+    let basecase_log_inv_rate = select_rates::<M>(
+        spec,
+        tuning,
+        &mut shapes,
+        basecase_vector_size,
+        mode,
+        log_inv_rate,
+    )?;
     Ok(RoundLayout {
+        padded_vector_size,
         shapes,
         basecase_vector_size,
         basecase_log_inv_rate,
     })
+}
+
+fn select_rates<M: Embedding + Default>(
+    spec: &SecuritySpec,
+    tuning: &TuningSpec,
+    shapes: &mut [RoundShape],
+    basecase_vector_size: usize,
+    mode: RoundBuildMode,
+    log_inv_rate: u32,
+) -> Result<u32, DeriveError> {
+    let rate = match tuning.rate_schedule {
+        RateSchedule::Adaptive { knee_weight } if !shapes.is_empty() => {
+            let rates = plan_adaptive_rates::<M>(
+                spec,
+                tuning,
+                knee_weight,
+                shapes,
+                basecase_vector_size,
+                mode,
+            )?;
+            for (shape, &rate) in shapes.iter_mut().zip(&rates) {
+                shape.target_log_inv_rate = rate;
+            }
+            for i in 1..shapes.len() {
+                shapes[i].source_log_inv_rate = shapes[i - 1].target_log_inv_rate;
+            }
+            rates
+                .last()
+                .copied()
+                .ok_or(DeriveError::AdaptiveNoFeasibleSchedule)?
+        }
+        _ => log_inv_rate,
+    };
+    Ok(rate)
+}
+
+fn initial_vector_size<M: Embedding + Default>(
+    spec: &SecuritySpec,
+    tuning: &TuningSpec,
+    mode: RoundBuildMode,
+) -> Result<usize, DeriveError> {
+    if !tuning.vector_size.is_power_of_two() {
+        return Err(LayoutError::VectorSizeNotPowerOfTwo {
+            vector_size: tuning.vector_size,
+        }
+        .into());
+    }
+    let min = tuning.folding_factor.min();
+    if min < 1 {
+        return Err(LayoutError::FoldingFactorBelowOne { min }.into());
+    }
+    if tuning.starting_log_inv_rate < 1 {
+        return Err(LayoutError::StartingRateBelowOne.into());
+    }
+
+    let mut padded_vector_size = tuning.vector_size;
+    if mode.is_zk() {
+        while !mask_fits::<Identity<M::Target>>(
+            spec,
+            padded_vector_size,
+            tuning.starting_log_inv_rate,
+            0,
+            0,
+        )? {
+            padded_vector_size = padded_vector_size
+                .checked_mul(2)
+                .ok_or(DeriveError::SizeOverflow)?;
+        }
+    }
+    Ok(padded_vector_size)
+}
+
+fn mask_fits<M: Embedding + Default>(
+    spec: &SecuritySpec,
+    vector_size: usize,
+    log_inv_rate: u32,
+    folding_factor: u32,
+    incoming_deep: usize,
+) -> Result<bool, DeriveError> {
+    let code = solve_irs::<M>(
+        spec,
+        &RoundContext {
+            vector_size,
+            log_inv_rate,
+            folding_factor,
+        },
+    )?;
+    match WitnessMaskConfig::for_code(&code, incoming_deep) {
+        Ok(_) => Ok(true),
+        Err(DeriveError::MaskDoesNotFit { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) const fn round_context(shape: &RoundShape) -> RoundContext {

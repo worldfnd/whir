@@ -1,22 +1,28 @@
-//! Basecase (Construction 7.2, p.43) parameter selection + γ-combination bound.
+//! Standard basecase selection and Zook final-opening bounds.
 
 use ark_ff::Field;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    algebra::{embedding::Identity, fields::FieldWithSize},
+    algebra::embedding::Identity,
     bits::Bits,
     protocols::{
-        basecase::{self, Config as BasecaseConfig},
+        basecase::{BasecaseMode, Config as BasecaseConfig},
         irs_commit::Config as IrsConfig,
         params::{
-            error::{grind_to_at, DeriveError, Pow},
-            irs_commit as irs_params,
-            protocol_config::BasecasePlan,
-            spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
-            sumcheck as sumcheck_params,
+            bounds::{error_bits, log2_sum},
+            error::{grind_to_at, DeriveError, Pow, ZookSecurityError},
+            irs_commit::{
+                solve as solve_irs, validate_joint_mask_code, validate_single_polynomial,
+            },
+            protocol_config::{BasecasePlan, WitnessMaskConfig},
+            regime::constrained_agreement_bits,
+            solved::Solved,
+            spec::{Mode, RoundContext, SecuritySpec},
+            sumcheck::{analytic_error_bits, revealed_sumcheck_error_bits},
         },
         proof_of_work::Config as PowConfig,
-        sumcheck::{self, Config as SumcheckConfig},
+        sumcheck::{Config as SumcheckConfig, SumcheckMode},
     },
 };
 
@@ -24,189 +30,153 @@ pub fn solve<F: Field>(
     spec: &SecuritySpec,
     vector_size: usize,
     log_inv_rate: u32,
+    incoming_deep: usize,
 ) -> Result<BasecasePlan<F>, DeriveError> {
-    assert!(vector_size > 0, "basecase requires vector_size ≥ 1");
-
-    let ctx = RoundContext {
-        vector_size,
-        log_inv_rate,
-        folding_factor: 0,
-    };
-    let commit = irs_params::solve(spec, &ctx, OodSampleBudget::ZERO)?;
-    solve_with_commit(spec, commit)
+    let commit = solve_irs(
+        spec,
+        &RoundContext {
+            vector_size,
+            log_inv_rate,
+            folding_factor: 0,
+        },
+    )?;
+    solve_with_commit(spec, commit, incoming_deep)
 }
 
-/// Same as [`solve`] but with a pre-built IRS config — used by `derive` when
-/// the last round's `code_switch.target` is being reused as the basecase
-/// commit (Phase 2: no recommit of the folded message). The shared IRS is
-/// built once at the previous-round layer; this function only owns the
-/// basecase-specific sumcheck + γ-combination PoW grind.
 pub fn solve_with_commit<F: Field>(
     spec: &SecuritySpec,
     commit: IrsConfig<Identity<F>>,
+    incoming_deep: usize,
 ) -> Result<BasecasePlan<F>, DeriveError> {
-    let vector_size = commit.vector_size();
-    assert!(vector_size > 0, "basecase requires vector_size ≥ 1");
-
-    let sumcheck_analytic = sumcheck_params::analytic_error_bits(&commit, None);
-    let sumcheck_pow = grind_to_at(spec, sumcheck_analytic, Pow::BasecaseSumcheck)?;
+    if matches!(spec.mode, Mode::ZeroKnowledge) {
+        validate_single_polynomial(&commit)?;
+        let witness_mask = WitnessMaskConfig::for_code(&commit, incoming_deep)?;
+        let analytic = revealed_sumcheck_error_bits::<F>();
+        let pow = grind_to_at(spec, analytic, Pow::BasecaseSumcheck)?;
+        let sumcheck = Solved::new(
+            SumcheckConfig::new(
+                commit.vector_size(),
+                pow,
+                commit.vector_size().trailing_zeros() as usize,
+                SumcheckMode::Standard,
+            ),
+            analytic,
+        );
+        return Ok(BasecasePlan::ZeroKnowledge {
+            commit,
+            witness_mask,
+            sumcheck,
+        });
+    }
+    let analytic = analytic_error_bits(&commit, false)?;
+    let pow = grind_to_at(spec, analytic, Pow::BasecaseSumcheck)?;
     let sumcheck = SumcheckConfig::new(
-        vector_size,
-        sumcheck_pow,
-        vector_size.next_power_of_two().trailing_zeros() as usize,
-        sumcheck::SumcheckMode::Standard,
+        commit.vector_size(),
+        pow,
+        commit.vector_size().trailing_zeros() as usize,
+        SumcheckMode::Standard,
     );
-
-    let gamma_analytic = analytic_error_bits(&commit);
-    let (mode, pow) = match spec.mode {
-        SpecMode::Standard => (basecase::BasecaseMode::Standard, PowConfig::none()),
-        SpecMode::ZeroKnowledge => (
-            basecase::BasecaseMode::ZeroKnowledge,
-            grind_to_at(spec, gamma_analytic, Pow::BasecaseGammaCombination)?,
-        ),
-    };
-
-    Ok(BasecasePlan::new(
-        BasecaseConfig::new(commit, sumcheck, mode, pow),
-        sumcheck_analytic,
-        gamma_analytic,
-    ))
+    Ok(BasecasePlan::Standard {
+        config: BasecaseConfig::new(commit, sumcheck, BasecaseMode::Standard, PowConfig::none()),
+        sumcheck_analytic: analytic,
+    })
 }
 
-/// γ-combination soundness (Lemma 7.4 combination-randomness slot, paper p.45).
-pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
-    let field_bits = F::field_size_bits();
-    let log_list = commit.list_size().log2();
-    let prox_gaps = commit.rbr_soundness_fold_prox_gaps();
-    let poly_id = field_bits - log_list;
-    Bits::new(prox_gaps.min(poly_id).max(0.0))
+/// Final-opening security conditional on joint-mask binding.
+///
+/// `epsilon_combination = max(A_witness, A_masks)`;
+/// `epsilon_queries <= (1 - theta_witness)^s_witness + (1 - theta_masks)^s_masks`.
+/// Each `A` bounds degree-one constrained correlated agreement for its code;
+/// each `theta` is that code's proximity radius and each `s` its query count.
+/// The mask commitment holds two full-length columns combined with weights
+/// `[lambda, 1]`; sharing their root leaves the degree-one combination unchanged.
+/// The implementation conservatively uses the degree-two agreement bound.
+/// Taking the maximum of error probabilities gives the minimum of security bits.
+///
+/// ProveKit Prover Whitepaper §6.4, “Soundness”, theorem “ZO0K soundness under
+/// mask binding”, final-opening batching and query bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZookFinalOpeningSoundness {
+    /// One common random combination for the witness and joint mask commitments.
+    pub combination: Bits,
+    /// Sum of the two independent code-query error bounds.
+    pub queries: Bits,
 }
 
-impl<F: Field> BasecaseConfig<F> {
-    /// Analytic soundness bits (excluding PoW): `min(sumcheck round error, γ-slot error)`.
-    pub fn analytic_bits(&self) -> Bits {
-        let sumcheck_term = f64::from(sumcheck_params::analytic_error_bits(self.commit(), None));
-        let min_bits = match self.mode() {
-            basecase::BasecaseMode::Standard => sumcheck_term,
-            basecase::BasecaseMode::ZeroKnowledge => {
-                sumcheck_term.min(f64::from(analytic_error_bits(self.commit())))
-            }
-        };
-        Bits::new(min_bits.max(0.0))
+impl ZookFinalOpeningSoundness {
+    /// Evaluate the final witness code and joint mask code at their actual query counts.
+    pub fn for_codes<F: Field>(
+        witness: &IrsConfig<Identity<F>>,
+        masks: &IrsConfig<Identity<F>>,
+    ) -> Result<Self, ZookSecurityError> {
+        validate_single_polynomial(witness)?;
+        validate_joint_mask_code(masks)?;
+        Ok(Self {
+            combination: constrained_agreement_bits(witness)?
+                .min(constrained_agreement_bits(masks)?),
+            queries: error_bits(log2_sum(-witness.rbr_queries(), -masks.rbr_queries())),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
-
     use super::*;
-    use crate::protocols::params::test_utils::{
-        arb_standard_spec, arb_zk_spec, assert_close, assert_pow_closes_gap, deterministic_spec,
-        TestField, TEST_TARGET_RANGE,
+    use crate::{
+        algebra::fields::{Field64, Field64_2, FieldWithSize},
+        protocols::params::{
+            spec::PowBudget,
+            test_utils::{johnson_code, johnson_code_with_vectors},
+        },
     };
 
-    const FIXTURE_VECTOR_SIZE: usize = 16;
-    const FIXTURE_LOG_INV_RATE: u32 = 2;
-
-    fn arb_dims() -> impl Strategy<Value = (u32, u32)> {
-        (1u32..=4, 1u32..=3)
-    }
-
     #[test]
-    fn analytic_error_formula() {
-        use crate::protocols::params::{
-            irs_commit as irs_params,
-            spec::{Mode, OodSampleBudget, RoundContext},
+    fn final_sumcheck_is_standard_and_receives_no_grinding_credit() {
+        let code = johnson_code::<Identity<Field64_2>>(128, 1, 0.25);
+        let spec = SecuritySpec::new(80).with_mode(Mode::ZeroKnowledge);
+        let BasecasePlan::ZeroKnowledge { sumcheck, .. } =
+            solve_with_commit(&spec, code, 0).unwrap()
+        else {
+            panic!("expected Zook final sumcheck");
         };
-
-        let spec = deterministic_spec(Mode::ZeroKnowledge);
-        let ctx = RoundContext {
-            vector_size: FIXTURE_VECTOR_SIZE,
-            log_inv_rate: FIXTURE_LOG_INV_RATE,
-            folding_factor: 0,
-        };
-        let commit: IrsConfig<Identity<TestField>> =
-            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO).expect("IRS fixture must solve");
-
-        let got = f64::from(analytic_error_bits(&commit));
-        let field_bits = TestField::field_size_bits();
-        let log_list = commit.list_size().log2();
-        let prox_gaps = commit.rbr_soundness_fold_prox_gaps();
-        let poly_id = field_bits - log_list;
-        let expected = prox_gaps.min(poly_id).max(0.0);
-
-        assert_close(got, expected);
-    }
-
-    #[test]
-    fn analytic_error_uses_eps_mca_when_limiting() {
-        use crate::protocols::params::{
-            irs_commit as irs_params,
-            spec::{Mode, OodSampleBudget, RoundContext},
-        };
-
-        let spec = deterministic_spec(Mode::ZeroKnowledge);
-        let ctx = RoundContext {
-            vector_size: FIXTURE_VECTOR_SIZE,
-            log_inv_rate: 1,
-            folding_factor: 0,
-        };
-        let commit: IrsConfig<Identity<TestField>> =
-            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO).expect("IRS fixture must solve");
-
-        let field_bits = TestField::field_size_bits();
-        let log_list = commit.list_size().log2();
-        let prox_gaps = commit.rbr_soundness_fold_prox_gaps();
-        let poly_id = field_bits - log_list;
-        assert!(
-            prox_gaps < poly_id,
-            "fixture wants prox_gaps to bind: prox_gaps {prox_gaps} ≥ poly_id {poly_id}",
+        assert!(matches!(sumcheck.mode(), SumcheckMode::Standard));
+        assert_eq!(sumcheck.initial_size(), 128);
+        assert_eq!(sumcheck.final_size(), 1);
+        assert_eq!(sumcheck.round_pow(), PowConfig::none());
+        assert_eq!(
+            sumcheck.analytic(),
+            Bits::new(Field64_2::field_size_bits() - 1.0)
         );
 
-        let got = f64::from(analytic_error_bits(&commit));
-        assert_close(got, prox_gaps.max(0.0));
+        let code = johnson_code::<Identity<Field64>>(128, 1, 0.25);
+        let spec = SecuritySpec::new(64)
+            .with_mode(Mode::ZeroKnowledge)
+            .with_pow_budget(PowBudget::per_slot(20));
+        assert!(matches!(
+            solve_with_commit(&spec, code, 0),
+            Err(DeriveError::SecurityTargetNotMet {
+                pow: Pow::BasecaseSumcheck,
+                ..
+            })
+        ));
     }
 
-    proptest! {
-        #[test]
-        fn solve_standard_assembles(
-            spec in arb_standard_spec(TEST_TARGET_RANGE),
-            (log_size, log_inv_rate) in arb_dims(),
-        ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            prop_assert!(matches!(config.mode(), basecase::BasecaseMode::Standard));
-            prop_assert_eq!(config.commit().interleaving_depth(), 1);
-            prop_assert_eq!(config.commit().num_vectors(), 1);
-            prop_assert_eq!(config.commit().vector_size(), config.sumcheck().initial_size());
-        }
+    #[test]
+    fn final_queries_lose_one_bit_when_errors_are_equal() {
+        let code = johnson_code::<Identity<Field64_2>>(128, 1, 0.25);
+        let masks = johnson_code_with_vectors::<Identity<Field64_2>>(128, 1, 0.25, 2);
+        let result = ZookFinalOpeningSoundness::for_codes(&code, &masks).unwrap();
+        assert!((f64::from(result.queries) - (code.rbr_queries() - 1.0)).abs() < 1e-10);
+    }
 
-        #[test]
-        fn solve_zk_assembles(
-            spec in arb_zk_spec(TEST_TARGET_RANGE),
-            (log_size, log_inv_rate) in arb_dims(),
-        ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            prop_assert!(matches!(config.mode(), basecase::BasecaseMode::ZeroKnowledge));
-            prop_assert!(config.commit().mask_length() > 0);
-        }
-
-        #[test]
-        fn pow_closes_gap_to_target_zk(
-            spec in arb_zk_spec(TEST_TARGET_RANGE),
-            (log_size, log_inv_rate) in arb_dims(),
-        ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            assert_pow_closes_gap(&spec, analytic_error_bits(config.commit()), &config.pow());
-        }
-
-        #[test]
-        fn standard_mode_has_no_pow(
-            spec in arb_standard_spec(TEST_TARGET_RANGE),
-            (log_size, log_inv_rate) in arb_dims(),
-        ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            prop_assert_eq!(config.pow(), PowConfig::none());
-        }
+    #[test]
+    fn final_opening_uses_weaker_agreement_bound() {
+        let witness = johnson_code::<Identity<Field64_2>>(64, 1, 0.25);
+        let masks = johnson_code_with_vectors::<Identity<Field64_2>>(1024, 1, 0.25, 2);
+        let result = ZookFinalOpeningSoundness::for_codes(&witness, &masks).unwrap();
+        assert_eq!(
+            result.combination,
+            constrained_agreement_bits(&masks).unwrap()
+        );
     }
 }

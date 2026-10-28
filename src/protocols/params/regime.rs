@@ -13,9 +13,18 @@ use std::f64::consts::LOG2_10;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::params::{
-    bounds::{rate, usize_to_f64},
-    spec::DecodingRegime,
+use crate::{
+    algebra::{embedding::Embedding, fields::FieldWithSize},
+    bits::Bits,
+    protocols::{
+        irs_commit::Config as IrsConfig,
+        params::{
+            bounds::{error_bits, log2_sum, rate, usize_to_f64},
+            error::ZookSecurityError,
+            irs_commit::validate_zook_code,
+            spec::DecodingRegime,
+        },
+    },
 };
 
 /// Materialized decoding-regime parameters at a known rate.
@@ -141,6 +150,27 @@ impl DecodingRegime {
         DecodingRegimeParams::from_policy(self, rate(log_inv_rate))
             .list_size(log_degree, log_inv_rate)
     }
+}
+
+/// Constrained correlated-agreement error for constraints of degree at most two:
+/// `epsilon <= L * ((2/3) * L^4 * rho + 1) * n / Q`.
+/// Here `L = code.list_size()`, `rho = code.rate()`, `n = code.codeword_length()`,
+/// and `Q` is the size of the target field where challenges are sampled.
+///
+/// ProveKit Prover Whitepaper Appendix A, “Correlated agreement”, constrained
+/// correlated-agreement theorem.
+/// Its factor `1 - delta = (m - 1)/n`, for code dimension `m`, is conservatively
+/// replaced by `rho = m/n`. The same bound covers degree-one batching.
+pub(super) fn constrained_agreement_bits<M: Embedding>(
+    code: &IrsConfig<M>,
+) -> Result<Bits, ZookSecurityError> {
+    validate_zook_code(code)?;
+    let list_bits = code.list_size().log2();
+    let log_factor = (2.0_f64 / 3.0).log2() + 4.0 * list_bits + code.rate().log2();
+    Ok(error_bits(
+        list_bits + log2_sum(log_factor, 0.0) + usize_to_f64(code.codeword_length()).log2()
+            - M::Target::field_size_bits(),
+    ))
 }
 
 #[cfg(test)]

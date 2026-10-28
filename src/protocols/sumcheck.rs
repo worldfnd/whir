@@ -170,6 +170,39 @@ impl<F: Field> Config<F> {
         [u8; 32]: Decoding<[H::U]>,
         U64: Codec<[H::U]>,
     {
+        self.prove_with_carried_sum(prover_state, embedding, a, b, sum, masks, F::ZERO)
+    }
+
+    /// Reduce `dot(a, b) + carried_sum` while retaining the carried contribution.
+    ///
+    /// On entry, `sum` is the dot product alone; the verifier must start with
+    /// `sum + carried_sum`. On exit, `sum` is the complete claim:
+    /// `mask_rlc * (dot(a', b') + carried_sum / 2^num_rounds)` plus the sum
+    /// of the mask polynomials evaluated at their round challenges.
+    /// With no rounds, the output is the input dot product plus `carried_sum`.
+    ///
+    /// The carried contribution enters each round polynomial's constant term.
+    /// It is not sent separately. Passing zero preserves [`Self::prove`]'s transcript.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    pub fn prove_with_carried_sum<M, H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        embedding: &M,
+        a: Buffer<M::Source>,
+        b: &mut Buffer<F>,
+        sum: &mut F,
+        masks: &[F],
+        carried_sum: F,
+    ) -> (Buffer<F>, SumcheckOpening<F>)
+    where
+        M: Embedding<Target = F>,
+        H: DuplexSpongeInterface,
+        R: CryptoRng + RngCore,
+        F: Codec<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+    {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
         );
@@ -177,7 +210,7 @@ impl<F: Field> Config<F> {
         assert_eq!(b.len(), self.initial_size);
         debug_assert_eq!(a.mixed_dot(embedding, b), *sum);
         assert_eq!(masks.len(), self.num_rounds * self.mask_length());
-        let half = F::from(2).inverse().unwrap();
+        let half = F::BasePrimeField::ONE / F::BasePrimeField::from(2);
         let polynomial_len = self.mask_length().max(3);
 
         // First fold: `a` crosses from the source to the target field. When
@@ -195,6 +228,9 @@ impl<F: Field> Config<F> {
         };
 
         let (mut mask_sum, mask_rlc) = self.maybe_send_initial_mask_sum(prover_state, masks);
+        // Each Boolean sum counts a constant twice, so the recurrence below
+        // halves this contribution on every fold without changing the dot sum.
+        mask_sum += mask_rlc * carried_sum;
 
         let mut univariate = Vec::with_capacity(polynomial_len);
         let mut round_challenges = Vec::with_capacity(self.num_rounds);
@@ -224,15 +260,16 @@ impl<F: Field> Config<F> {
             };
             let c1 = *sum - c0.double() - c2;
 
-            // Build round polynomial. In Standard (`mask = []`, `mask_rlc = 1`,
-            // `mask_sum = 0`) this collapses to `[c0, c1, c2]`.
+            // With no masks or carried sum, this reduces to `[c0, c1, c2]`.
             univariate.clear();
             univariate.resize(polynomial_len, F::ZERO);
-            let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(round + 1));
+            let sum_multiple =
+                F::BasePrimeField::from(1 << self.num_rounds.saturating_sub(round + 1));
             for (u, m) in univariate.iter_mut().zip(mask.iter()) {
-                *u = sum_multiple * *m;
+                *u = m.mul_by_base_prime_field(&sum_multiple);
             }
-            univariate[0] += (mask_sum - sum_multiple * eval_01(mask)) * half;
+            univariate[0] += (mask_sum - eval_01(mask).mul_by_base_prime_field(&sum_multiple))
+                .mul_by_base_prime_field(&half);
             univariate[0] += mask_rlc * c0;
             univariate[1] += mask_rlc * c1;
             univariate[2] += mask_rlc * c2;
@@ -296,12 +333,12 @@ impl<F: Field> Config<F> {
                 if self.num_rounds == 0 {
                     return (F::ZERO, F::ONE);
                 }
-                let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(1));
+                let sum_multiple = F::BasePrimeField::from(1 << self.num_rounds.saturating_sub(1));
                 let mask_sum = masks
                     .chunks_exact(mask_length.get())
                     .map(eval_01)
                     .sum::<F>()
-                    * sum_multiple;
+                    .mul_by_base_prime_field(&sum_multiple);
                 prover_state.prover_message(&mask_sum);
                 let mask_rlc = prover_state.verifier_message();
                 (mask_sum, mask_rlc)
@@ -420,6 +457,7 @@ fn eval_01<F: Field>(coefficients: &[F]) -> F {
 
 #[cfg(test)]
 mod tests {
+    use ark_ff::AdditiveGroup;
     use ark_std::rand::{
         distributions::{Distribution, Standard},
         rngs::StdRng,
@@ -473,6 +511,18 @@ mod tests {
         F: Field + Codec<[u8]> + 'static,
         Standard: Distribution<F>,
     {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let carried_sum = random_vector(&mut rng, 1)[0];
+        for carried_sum in [F::ZERO, F::from(7), carried_sum] {
+            test_config_with_carried_sum(seed, config, carried_sum);
+        }
+    }
+
+    fn test_config_with_carried_sum<F>(seed: u64, config: &Config<F>, carried_sum: F)
+    where
+        F: Field + Codec<[u8]> + 'static,
+        Standard: Distribution<F>,
+    {
         // Pseudo-random Instance
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -495,13 +545,14 @@ mod tests {
                 round_challenges: point,
                 mask_rlc,
             },
-        ) = config.prove(
+        ) = config.prove_with_carried_sum(
             &mut prover_state,
             &Identity::new(),
             vector,
             &mut covector,
             &mut sum,
             &masks,
+            carried_sum,
         );
         assert_eq!(vector.len(), config.final_size());
         assert_eq!(covector.len(), config.final_size());
@@ -525,13 +576,34 @@ mod tests {
                 .sum();
         assert_eq!(
             sum,
-            expected_mask_sum + mask_rlc * dot(vector.to_slice(), covector.to_slice())
+            expected_mask_sum
+                + mask_rlc
+                    * (dot(vector.to_slice(), covector.to_slice())
+                        + carried_sum / F::from(2).pow([config.num_rounds as u64]))
         );
 
         let proof = prover_state.proof();
 
+        if carried_sum.is_zero() {
+            let mut original_state = ProverState::new_std(&ds);
+            let mut original_covector = Buffer::from(initial_covector.as_slice());
+            let mut original_sum = initial_sum;
+            let (original_vector, _) = config.prove(
+                &mut original_state,
+                &Identity::new(),
+                Buffer::from(initial_vector.as_slice()),
+                &mut original_covector,
+                &mut original_sum,
+                &masks,
+            );
+            assert_eq!(original_state.proof(), proof);
+            assert_eq!(original_vector, vector);
+            assert_eq!(original_covector, covector);
+            assert_eq!(original_sum, sum);
+        }
+
         // Verifier
-        let mut verifier_sum = initial_sum;
+        let mut verifier_sum = initial_sum + carried_sum;
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let SumcheckOpening {
             round_challenges: verifier_point,
@@ -580,30 +652,43 @@ mod tests {
                 random_vector(&mut rng, config.mask_length() * config.num_rounds);
             let a_lifted = lift(&embedding, &a_source);
             let initial_sum = dot(&a_lifted, &covector);
+            let carried_sum = random_vector(&mut rng, 1)[0];
 
-            let run = |mixed: bool| {
+            let run = |mixed: bool, carried_sum: Field64_3| {
                 let mut b = Buffer::from(covector.as_slice());
                 let mut sum = initial_sum;
                 let mut prover_state = ProverState::new_std(&ds);
                 let (folded, opening) = if mixed {
-                    config.prove(
+                    config.prove_with_carried_sum(
                         &mut prover_state,
                         &embedding,
                         Buffer::from(a_source.as_slice()),
                         &mut b,
                         &mut sum,
                         &masks,
+                        carried_sum,
                     )
                 } else {
-                    config.prove(
+                    config.prove_with_carried_sum(
                         &mut prover_state,
                         &Identity::new(),
                         Buffer::from(a_lifted.as_slice()),
                         &mut b,
                         &mut sum,
                         &masks,
+                        carried_sum,
                     )
                 };
+                let mask_sum: Field64_3 = chunks_exact_or_empty(
+                    &masks, config.mask_length(), config.num_rounds,
+                )
+                .zip(&opening.round_challenges)
+                .map(|(mask, &challenge)| univariate_evaluate(mask, challenge))
+                .sum();
+                assert_eq!(sum, mask_sum + opening.mask_rlc * (
+                    folded.dot(&b)
+                    + carried_sum / Field64_3::from(2).pow([config.num_rounds as u64])
+                ));
                 (
                     prover_state.proof(),
                     folded.into_vec(),
@@ -613,8 +698,84 @@ mod tests {
                     opening.mask_rlc,
                 )
             };
-            assert_eq!(run(true), run(false));
+            for carried_sum in [Field64_3::ZERO, carried_sum] {
+                assert_eq!(run(true, carried_sum), run(false, carried_sum));
+            }
         });
+    }
+
+    #[test]
+    fn carried_sum_with_no_rounds() {
+        for size in [0, 1, 3] {
+            for mode in [
+                SumcheckMode::Standard,
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
+            ] {
+                test_config(
+                    0,
+                    &Config::<Field64>::new(size, proof_of_work::Config::none(), 0, mode),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn carries_mask_contributions_between_sumchecks() {
+        let configs = [(16, 2), (4, 1)].map(|(size, rounds)| {
+            Config::<Field64>::new(
+                size,
+                proof_of_work::Config::none(),
+                rounds,
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
+            )
+        });
+        let ds = DomainSeparator::protocol(&configs).instance(&U64(0));
+        let mut rng = StdRng::seed_from_u64(17);
+        let mut vector = Buffer::<Field64>::random(&mut rng, 16);
+        let mut covector = Buffer::<Field64>::random(&mut rng, 16);
+        let mut carried_sum = Field64::from(7);
+        let initial_claim = vector.dot(&covector) + carried_sum;
+        let mut ps = ProverState::new_std(&ds);
+        let mut expected_claims = Vec::new();
+
+        for config in &configs {
+            let masks = random_vector(&mut rng, 3 * config.num_rounds);
+            let mut sum = vector.dot(&covector);
+            let (folded, opening) = config.prove_with_carried_sum(
+                &mut ps,
+                &Identity::new(),
+                vector,
+                &mut covector,
+                &mut sum,
+                &masks,
+                carried_sum,
+            );
+            vector = folded;
+            covector.scalar_mul(opening.mask_rlc);
+            let new_masks: Field64 = masks
+                .chunks_exact(3)
+                .zip(&opening.round_challenges)
+                .map(|(mask, &challenge)| univariate_evaluate(mask, challenge))
+                .sum();
+            carried_sum = opening.mask_rlc * carried_sum
+                / Field64::from(2).pow([config.num_rounds as u64])
+                + new_masks;
+            assert_eq!(sum, vector.dot(&covector) + carried_sum);
+            expected_claims.push(sum);
+        }
+
+        let proof = ps.proof();
+        let mut vs = VerifierState::new_std(&ds, &proof);
+        let mut sum = initial_claim;
+        for (config, expected) in configs.iter().zip(expected_claims) {
+            let _ = config.verify(&mut vs, &mut sum).unwrap();
+            assert_eq!(sum, expected);
+        }
+        vs.check_eof().unwrap();
     }
 
     #[test]

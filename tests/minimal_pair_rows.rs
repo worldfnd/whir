@@ -55,7 +55,7 @@ fn extension_field_row_fold_equals_encoding_the_folded_pair() {
 
         // Two roots contribute four columns each, at the same query points.
         assert_eq!(opened.num_columns(), 8);
-        assert_ne!(opened.points, Vec::new());
+        assert!(!opened.points.is_empty());
         let selector = Field64_3::new(Field64::ZERO, Field64::ONE, Field64::ZERO);
         let point = [selector, Field64_3::from(2), Field64_3::from(3)];
         let weights = Buffer::from(eq_weights(&point));

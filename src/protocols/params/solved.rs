@@ -39,17 +39,6 @@ impl<C> Solved<C> {
     }
 }
 
-#[cfg(test)]
-impl<C> Solved<C> {
-    pub(crate) const fn config_mut_for_test(&mut self) -> &mut C {
-        &mut self.config
-    }
-
-    pub(crate) const fn set_analytic_for_test(&mut self, analytic: Bits) {
-        self.analytic = analytic;
-    }
-}
-
 impl<C> Deref for Solved<C> {
     type Target = C;
 
