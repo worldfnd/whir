@@ -112,3 +112,7 @@ lto = "thin" # LTO breaks line attribution.
 # Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
+
+[[bench]]
+name = "pair_opening"
+harness = false
