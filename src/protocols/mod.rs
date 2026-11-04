@@ -16,4 +16,6 @@ pub mod merkle_tree;
 pub mod proof_of_work;
 pub mod sumcheck;
 pub mod whir;
+#[cfg(feature = "experimental-prefix-zk")]
+pub mod whir_prefix;
 pub mod whir_zk;

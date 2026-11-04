@@ -72,6 +72,7 @@ lto = "fat"
 
 [features]
 default = ["parallel"]
+experimental-prefix-zk = []
 # Verifier panics instead of returning errors. Useful for debuging.
 verifier_panics = []
 parallel = ["dep:rayon"]
@@ -82,6 +83,11 @@ tracing = ["dep:tracing"]
 [[bench]]
 name = "expand_from_coeff"
 harness = false
+
+[[bin]]
+name = "prefix-experiment"
+path = "src/bin/prefix_experiment.rs"
+required-features = ["experimental-prefix-zk"]
 
 [[bench]]
 name = "sumcheck"
