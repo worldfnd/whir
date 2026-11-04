@@ -1,6 +1,6 @@
 //! Linear mask terms carried alongside the folded witness claim.
 
-use std::ops::Range;
+use std::{iter::once, ops::Range};
 
 use ark_ff::Field;
 use zeroize::Zeroizing;
@@ -36,6 +36,14 @@ impl<F: Field> MaskClaims<F> {
     /// Evaluate the carried term locally; this value is not a transcript message.
     pub(super) fn evaluate(&self, coefficients: &[F]) -> F {
         self.covector.evaluate(&Identity::new(), coefficients)
+    }
+
+    pub(super) fn scale(&mut self, scalar: F) {
+        if !scalar.is_one() {
+            for weight in &mut self.covector.vector {
+                *weight *= scalar;
+            }
+        }
     }
 
     /// Initialize `B(m) = -<mask_0, K>` from each IRS polynomial's prefix.
@@ -78,26 +86,38 @@ impl<F: Field> MaskClaims<F> {
         remaining_size: usize,
         opening: &SumcheckOpening<F>,
     ) {
+        self.fold_sumcheck_indices(range.map(Some), remaining_size, opening);
+    }
+
+    /// Carry one collection's contribution to a sparse mask assembled from both collections.
+    /// Missing indices belong to the other collection and receive no new weight.
+    pub(super) fn fold_sumcheck_indices(
+        &mut self,
+        indices: impl IntoIterator<Item = Option<usize>>,
+        remaining_size: usize,
+        opening: &SumcheckOpening<F>,
+    ) {
         let rounds = opening.round_challenges.len();
-        assert_eq!(range.len(), 2 * rounds + 1);
         // Sumcheck configuration requires odd characteristic. No inverse of a
         // transcript challenge is needed, including when lambda is zero.
         let divisor = F::BasePrimeField::from(2).pow([rounds as u64]);
         let inverse = F::BasePrimeField::ONE / divisor;
         let scale = opening.mask_rlc.mul_by_base_prime_field(&inverse);
-        for weight in &mut self.covector.vector {
-            *weight *= scale;
-        }
+        self.scale(scale);
         let scale = F::BasePrimeField::from(remaining_size as u64);
-        let weights = &mut self.covector.vector[range];
-        weights[0] += F::from_base_prime_field(scale);
-        for (pair, &challenge) in weights[1..]
-            .chunks_exact_mut(2)
-            .zip(&opening.round_challenges)
-        {
-            pair[0] += challenge.mul_by_base_prime_field(&scale);
-            pair[1] += challenge.square().mul_by_base_prime_field(&scale);
+        let weights = once(F::ONE).chain(
+            opening
+                .round_challenges
+                .iter()
+                .flat_map(|&r| [r, r.square()]),
+        );
+        let mut indices = indices.into_iter();
+        for weight in weights {
+            if let Some(index) = indices.next().expect("one index per sparse coefficient") {
+                self.covector.vector[index] += weight.mul_by_base_prime_field(&scale);
+            }
         }
+        assert!(indices.next().is_none());
     }
 
     /// Add the next overlaid witness mask after code-switch aggregation.
@@ -115,11 +135,7 @@ impl<F: Field> MaskClaims<F> {
         kernel_at: impl FnMut(usize) -> F,
     ) {
         assert_eq!(update.ood_rlc_coeffs.len(), update.ood_eval_points.len());
-        if !update.original_sl_coeff.is_one() {
-            for weight in &mut self.covector.vector {
-                *weight *= update.original_sl_coeff;
-            }
-        }
+        self.scale(update.original_sl_coeff);
         self.subtract_witness_mask(range.clone(), mask, message_length, kernel_at);
         geometric_accumulate_prefixes(
             &mut self.covector.vector[range],

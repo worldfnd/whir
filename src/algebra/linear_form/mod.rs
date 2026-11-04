@@ -43,7 +43,7 @@ pub trait LinearForm<F: Field>: Any + Send + Sync {
     /// Take $w ∈ 𝔽^n$ such that evaluating the linear form on $v ∈ 𝔽^n$ equals the inner
     /// product $⟨w,v⟩$. Then this function computes $accumulator_i += scalar · w_i$.
     ///
-    /// This function is only called by the prover.
+    /// Used by the prover and by batched verifier evaluations of custom forms.
     fn accumulate(&self, accumulator: &mut [F], scalar: F);
 }
 

@@ -253,6 +253,13 @@ impl Config {
 }
 
 impl Witness {
+    pub(crate) fn commitment(&self) -> Option<Commitment> {
+        self.nodes
+            .to_slice()
+            .last()
+            .map(|&hash| Commitment { hash })
+    }
+
     /// Wrap a fully built node buffer (leaf layer first, root last) as a witness.
     pub const fn new(nodes: Buffer<Hash>) -> Self {
         Self { nodes }

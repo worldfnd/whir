@@ -48,14 +48,15 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let reduced = reduce_prover(self, ps, committed, linear_forms, evaluations);
-        self.prove_final_opening(ps, reduced)
+        let reduced = reduce_prover(self, ps, committed, None, None, linear_forms, evaluations);
+        self.prove_final_opening(ps, reduced, self.tuning().vector_size)
     }
 
-    fn prove_final_opening<H, R>(
+    pub(super) fn prove_final_opening<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
         mut state: ProverRoundState<Identity<M::Target>>,
+        original_size: usize,
     ) -> ProverClaim<M::Target>
     where
         M::Target: Codec<[H::U]>,
@@ -69,7 +70,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     {
         let suffix = match self.basecase() {
             BasecasePlan::Standard { config, .. } => {
-                assert!(state.masks.is_none());
+                assert!(state.masks.is_empty());
                 config
                     .prove(
                         ps,
@@ -98,7 +99,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             }
         };
         state.challenges.extend(suffix);
-        let dimensions = self.tuning().vector_size.trailing_zeros() as usize;
+        let dimensions = original_size.trailing_zeros() as usize;
         let padding = state.challenges.len() - dimensions;
         ProverClaim {
             evaluation_point: state.challenges.split_off(padding),
@@ -106,12 +107,11 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         }
     }
 
-    /// Reveal the final witness and joint masks combined with fresh full-length blinders.
-    ///
-    /// §5.4, “The final opening protocol”: `H' = H + lambda*p`, `M' = M + lambda*m`,
-    /// where `p` is the final masked witness, `m` the joint masks, and `H, M` the blinders.
-    /// Send `d = <H, K> + B(M)`, then reduce `<H', K> = d + lambda*c - B(M')`
-    /// with Standard sumcheck, where `c` is the accumulated claim and `K` its kernel.
+    /// Reveal the final witness and each mask vector combined with its full-length blinder.
+    /// Send `d = <H, K> + sum_i B_i(U_i)` before the combination challenge.
+    /// The revealed vectors are `H' = H + lambda*p` and `m_i' = U_i + lambda*m_i`.
+    /// Reduce `<H', K> = d + lambda*c - sum_i B_i(m_i')` with Standard sumcheck,
+    /// where `c` is the accumulated claim and `K` its kernel.
     fn blind_final_claim<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
@@ -124,35 +124,63 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let (Some(layout), Some(masks)) = (self.joint_masks(), state.masks.as_mut()) else {
-            panic!("final opening requires the joint mask commitment");
-        };
+        let layout = self.joint_masks().expect("final opening mask layout");
+        assert!(!state.masks.is_empty());
         let commit = self.basecase().commit();
         let mask_commit = layout.commit();
         let mut witness_blinder = Buffer::random(ps.rng(), commit.vector_size());
-        let mut mask_blinder = take(&mut masks.joint.opening_blinder);
+        let mut mask_blinders: Vec<_> = state
+            .masks
+            .iter_mut()
+            .map(|masks| take(&mut masks.joint.opening_blinder))
+            .collect();
         let mut witness_blind_commit = commit.commit(ps, &[&witness_blinder]);
-        let blind_sum =
-            witness_blinder.dot(&state.covector) + masks.claims.evaluate(mask_blinder.to_slice());
+        let blind_sum = witness_blinder.dot(&state.covector)
+            + state
+                .masks
+                .iter()
+                .zip(&mask_blinders)
+                .map(|(masks, blinder)| masks.claims.evaluate(blinder.to_slice()))
+                .sum::<M::Target>();
         ps.prover_message(&blind_sum);
-        for value in masks.binding.evaluate(layout, mask_blinder.to_slice()) {
-            ps.prover_message(&value);
+        for (masks, blinder) in state.masks.iter().zip(&mask_blinders) {
+            for value in masks.binding.evaluate(layout, blinder.to_slice()) {
+                ps.prover_message(&value);
+            }
         }
         let lambda = ps.verifier_message::<M::Target>();
         state
             .message
             .mixed_scalar_mul_add_to(&Identity::new(), &mut witness_blinder, lambda);
-        masks.joint.coefficients.mixed_scalar_mul_add_to(
-            &Identity::new(),
-            &mut mask_blinder,
-            lambda,
-        );
+        for (masks, blinder) in state.masks.iter().zip(&mut mask_blinders) {
+            masks
+                .joint
+                .coefficients
+                .mixed_scalar_mul_add_to(&Identity::new(), blinder, lambda);
+        }
         ps.prover_messages(witness_blinder.to_slice());
-        ps.prover_messages(mask_blinder.to_slice());
+        for blinder in &mask_blinders {
+            ps.prover_messages(blinder.to_slice());
+        }
         let _ = commit.open(ps, &[&witness_blind_commit, &state.irs_witness]);
-        let _ = mask_commit.open(ps, &[&masks.joint.irs_witness]);
+        // Query all mask columns at common indices: they form one interleaved code.
+        let roots: Vec<_> = state
+            .masks
+            .iter()
+            .map(|masks| &masks.joint.irs_witness)
+            .collect();
+        let _ = mask_commit.open(ps, &roots);
         witness_blind_commit.matrix.wipe();
-        state.sum = blind_sum + lambda * state.sum - masks.claims.evaluate(mask_blinder.to_slice());
+        state.sum = blind_sum + lambda * state.sum
+            - state
+                .masks
+                .iter()
+                .zip(&mask_blinders)
+                .map(|(masks, blinder)| masks.claims.evaluate(blinder.to_slice()))
+                .sum::<M::Target>();
+        for blinder in &mut mask_blinders {
+            blinder.wipe();
+        }
         state.message.wipe();
         state.message = witness_blinder;
         debug_assert_eq!(state.message.dot(&state.covector), state.sum);
