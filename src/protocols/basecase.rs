@@ -81,11 +81,6 @@ impl<F: Field> Config<F> {
         self.pow
     }
 
-    #[cfg(test)]
-    pub(crate) const fn set_pow_for_test(&mut self, pow: proof_of_work::Config) {
-        self.pow = pow;
-    }
-
     pub const fn size(&self) -> usize {
         self.sumcheck.initial_size()
     }

@@ -5,16 +5,10 @@
 //! pipeline stages alias it with the payload they carry:
 //!
 //! - [`RoundBuildMode`] — input to [`super::build_round::build_round_config`].
-//! - [`OodMode`] — input to OOD-bound helpers.
 //! - [`SolveMode`] — input to the per-sub-protocol solvers (`sumcheck`, `code_switch`).
 //!
 //! Sharing one enum gives us a free [`Branch::map`] for stage-to-stage
 //! payload conversions, replacing one-off `to_ood_mode`-style helpers.
-
-use crate::protocols::params::{
-    protocol_config::MaskOracleInfo,
-    spec::{LogInvRate, ZkSpec},
-};
 
 /// Standard (no payload) vs. zero-knowledge (payload `T`).
 #[derive(Clone, Copy, Debug)]
@@ -45,21 +39,8 @@ impl<T> Branch<T> {
     }
 }
 
-/// Payload carried by [`RoundBuildMode::ZeroKnowledge`] — references the
-/// `SecuritySpec` (so its lifetime threads through) plus the planner-chosen
-/// `C_zk` rate.
-#[derive(Clone, Copy, Debug)]
-pub struct RoundBuildPayload<'a> {
-    pub zk_spec: ZkSpec<'a>,
-    pub c_zk_log_inv_rate: LogInvRate,
-}
+/// Mode used while building round configurations.
+pub type RoundBuildMode = Branch<()>;
 
-/// Mode-dispatch input for [`super::build_round::build_round_config`].
-pub type RoundBuildMode<'a> = Branch<RoundBuildPayload<'a>>;
-
-/// Mode flag for the OOD security bound. Payload is the `C_zk` log-inverse
-/// rate; formulas coerce to `f64` at the point of use.
-pub type OodMode = Branch<LogInvRate>;
-
-/// Solver-input mode for the per-round sumcheck and code-switch builders.
-pub type SolveMode = Branch<MaskOracleInfo>;
+/// Mode used by the sub-protocol parameter solvers.
+pub type SolveMode = Branch<()>;
