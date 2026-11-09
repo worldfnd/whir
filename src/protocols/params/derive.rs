@@ -132,6 +132,31 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_zook_retains_a_larger_basecase_when_required_for_security() {
+        use crate::algebra::fields::Field64_3;
+
+        for (vector_size, initial) in [(1 << 20, 3), (1 << 21, 4)] {
+            let config = ProtocolConfig::<Basefield<Field64_3>>::derive(
+                SecuritySpec::new(128)
+                    .with_mode(Mode::ZeroKnowledge)
+                    .with_pow_budget(PowBudget::Forbidden),
+                TuningSpec {
+                    vector_size,
+                    starting_log_inv_rate: 2,
+                    folding_factor: FoldingFactor::ConstantFromSecondRound { initial, rest: 3 },
+                    rate_schedule: RateSchedule::Adaptive {
+                        knee_weight: KneeWeight::DEFAULT,
+                    },
+                },
+            )
+            .unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.basecase().commit().vector_size(), 256);
+            assert!(config.analytic_bits() >= 128.0.into());
+        }
+    }
+
+    #[test]
     fn derives_one_joint_mask_commitment_with_all_components() {
         let config = ProtocolConfig::<M>::derive(spec(), tuning(4096)).unwrap();
         assert!(config.has_rounds());

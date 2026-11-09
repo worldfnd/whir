@@ -144,18 +144,28 @@ pub(super) fn round_layout<M: Embedding + Default>(
             break;
         }
     }
-    if let Some(last) = shapes.last_mut() {
-        last.target_folding_factor = 0;
-    }
+    let basecase_log_inv_rate = loop {
+        if let Some(last) = shapes.last_mut() {
+            last.target_folding_factor = 0;
+        }
+        match select_rates::<M>(
+            spec,
+            tuning,
+            &mut shapes,
+            1usize << num_vars,
+            mode,
+            log_inv_rate,
+        ) {
+            Err(DeriveError::AdaptiveNoFeasibleSchedule) if mode.is_zk() && !shapes.is_empty() => {
+                // A larger basecase can fit its mask at rates that meet the analytic target.
+                let last = shapes.pop().expect("nonempty folding schedule");
+                num_vars += last.source_folding_factor as usize;
+                log_inv_rate = last.source_log_inv_rate;
+            }
+            result => break result?,
+        }
+    };
     let basecase_vector_size = 1usize << num_vars;
-    let basecase_log_inv_rate = select_rates::<M>(
-        spec,
-        tuning,
-        &mut shapes,
-        basecase_vector_size,
-        mode,
-        log_inv_rate,
-    )?;
     Ok(RoundLayout {
         padded_vector_size,
         shapes,
