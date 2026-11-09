@@ -18,7 +18,7 @@ use crate::{
     protocols::{
         basecase::Opening,
         code_switch::{Claim, CovectorUpdateParams},
-        irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
+        irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
         params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
         sumcheck::SumcheckOpening,
         zook::{
@@ -307,6 +307,11 @@ where
         "linear_forms.len() != evaluations.len()"
     );
     assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
+    let source = committed.second_source.as_ref().map(|_| {
+        config
+            .pair_source()
+            .expect("pair commitment requires its combined configuration")
+    });
     let claim_weights = geometric_sequence(M::Target::ONE, ps.verifier_message(), forms.len());
     let mut covector = vec![M::Target::ZERO; config.padded_vector_size()];
     for (form, &weight) in forms.iter().zip(&claim_weights) {
@@ -366,6 +371,7 @@ where
             Some(first),
         ) => prove_round(
             first,
+            source.as_ref().zip(committed.second_source),
             ProverRoundState::<M> {
                 message,
                 irs_witness,
@@ -383,6 +389,7 @@ where
     for round in config.tail_rounds() {
         state = prove_round(
             round,
+            None,
             state,
             config
                 .joint_masks()
@@ -417,6 +424,11 @@ where
         "linear_forms.len() != evaluations.len()"
     );
     assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
+    let source = commitment
+        .second_source
+        .as_ref()
+        .map(|_| config.pair_source())
+        .transpose()?;
     assert!(forms
         .iter()
         .all(|form| form.size() <= config.tuning().vector_size));
@@ -471,6 +483,7 @@ where
     if let Some(first) = config.first_round() {
         verify_round(
             first,
+            source.as_ref().zip(commitment.second_source.as_ref()),
             &mut state,
             config.joint_masks().zip(config.witness_mask(1)),
             vs,
@@ -479,6 +492,7 @@ where
     for round in config.tail_rounds() {
         verify_round(
             round,
+            None,
             &mut state,
             config
                 .joint_masks()
@@ -492,6 +506,7 @@ where
 /// Section 5.4, “ZO0K”, Steps 1–4: carry masks, fold, overlay, then aggregate.
 fn prove_round<M, H, R>(
     round: &RoundConfig<M>,
+    second: Option<(&IrsConfig<M>, IrsWitness<M::Source>)>,
     mut state: ProverRoundState<M>,
     mask_plan: Option<(&JointMaskConfig<M::Target>, WitnessMaskConfig)>,
     ps: &mut ProverState<H, R>,
@@ -548,11 +563,15 @@ where
             next_mask,
         );
     }
+    let (source, witnesses) = match second {
+        Some((source, right)) => (source, vec![state.irs_witness, right]),
+        None => (round.code_switch().source(), vec![state.irs_witness]),
+    };
     let switched = round.code_switch().prove(
         ps,
         message,
-        round.code_switch().source(),
-        vec![state.irs_witness],
+        source,
+        witnesses,
         Claim {
             covector: &mut state.covector,
             sum: &mut state.sum,
@@ -589,6 +608,7 @@ where
 
 fn verify_round<M, H>(
     round: &RoundConfig<M>,
+    second: Option<(&IrsConfig<M>, &IrsCommitment)>,
     state: &mut VerifierRoundState<M::Target>,
     mask_plan: Option<(&JointMaskConfig<M::Target>, WitnessMaskConfig)>,
     vs: &mut VerifierState<H>,
@@ -614,12 +634,16 @@ where
             &opening,
         );
     }
+    let (source, roots) = match second {
+        Some((source, right)) => (source, vec![&state.irs, right]),
+        None => (round.code_switch().source(), vec![&state.irs]),
+    };
     let (irs, update) = round.code_switch().verify_for_implicit(
         vs,
         &mut state.sum,
         &opening.round_challenges,
-        round.code_switch().source(),
-        &[&state.irs],
+        source,
+        &roots,
     )?;
     state.kernel.aggregate(&update);
     if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {

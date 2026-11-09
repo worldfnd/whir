@@ -1,4 +1,5 @@
-//! Joint-opening entry points retained while precommitted mask support is integrated.
+//! Independent-commitment pair openings remain unsupported.
+//! Use `commit_pair` with ordinary `prove` for a shared-mask pair opening.
 
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use zeroize::Zeroize;
@@ -14,13 +15,13 @@ use crate::{
 };
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    /// Joint openings are temporarily unsupported with precommitted masks.
+    /// Pair openings of independently committed witnesses remain unsupported.
     /// Returns an error for every configuration.
     pub const fn validate_pair(&self) -> VerificationResult<()> {
         Err(VerificationError)
     }
 
-    /// Joint openings are temporarily unsupported with precommitted masks.
+    /// Pair openings of independently committed witnesses remain unsupported.
     /// Returns an error without changing the transcript.
     pub fn prove_pair<H, R>(
         &self,
@@ -42,7 +43,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         Err(VerificationError)
     }
 
-    /// Joint openings are temporarily unsupported with precommitted masks.
+    /// Pair openings of independently committed witnesses remain unsupported.
     /// Returns an error without consuming or changing the transcript.
     pub fn verify_pair<H>(
         &self,

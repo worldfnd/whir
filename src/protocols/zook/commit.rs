@@ -13,12 +13,13 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
-        irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
+        irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
         params::{JointMaskConfig, ProtocolConfig, WitnessMaskConfig},
         zook::binding::{prove_binding, receive_binding, MaskBinding},
     },
     transcript::{
-        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,
+        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationError,
+        VerificationResult, VerifierState,
     },
 };
 
@@ -27,6 +28,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct CommittedWitness<M: Embedding> {
     pub(crate) state: CommittedState<M>,
+    pub(super) second_source: Option<IrsWitness<M::Source>>,
     pub(crate) joint_masks: Option<JointMaskWitness<M::Target>>,
     pub(super) mask_binding: Option<MaskBinding<M::Target>>,
 }
@@ -70,6 +72,7 @@ pub(crate) enum CommittedState<M: Embedding> {
 #[derive(Clone, Debug)]
 pub struct Commitment<F: Field> {
     pub(crate) irs: IrsCommitment,
+    pub(super) second_source: Option<IrsCommitment>,
     pub(crate) joint_masks: Option<IrsCommitment>,
     pub(super) mask_binding: Option<MaskBinding<F>>,
 }
@@ -84,7 +87,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     pub fn commit<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
-        mut witness: Buffer<M::Source>,
+        witness: Buffer<M::Source>,
     ) -> CommittedWitness<M>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
@@ -93,13 +96,56 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        assert_eq!(
-            witness.len(),
-            self.tuning().vector_size,
-            "zook witness length",
-        );
+        self.commit_inner(
+            ps,
+            witness,
+            None::<fn(&mut ProverState<H, R>) -> VerificationResult<Buffer<M::Source>>>,
+        )
+        .expect("zook witness length")
+    }
 
-        witness.resize_zeroed(self.padded_vector_size());
+    /// Commit two equal witness halves with one mask collection, then use ordinary `prove`.
+    /// Derive this configuration for their combined size with one extra first-round fold.
+    /// The callback runs after the first root and mask binding; it may sample application challenges.
+    /// Bind configuration, public forms, and evaluations in the transcript. Open each resulting handle only once.
+    pub fn commit_pair<H, R, E>(
+        &self,
+        ps: &mut ProverState<H, R>,
+        first: Buffer<M::Source>,
+        second: impl FnOnce(&mut ProverState<H, R>) -> Result<Buffer<M::Source>, E>,
+    ) -> Result<CommittedWitness<M>, E>
+    where
+        Standard: Distribution<M::Source> + Distribution<M::Target>,
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        M::Target: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+        E: From<VerificationError>,
+    {
+        self.commit_inner(ps, first, Some(second))
+    }
+
+    fn commit_inner<H, R, E>(
+        &self,
+        ps: &mut ProverState<H, R>,
+        mut witness: Buffer<M::Source>,
+        second: Option<impl FnOnce(&mut ProverState<H, R>) -> Result<Buffer<M::Source>, E>>,
+    ) -> Result<CommittedWitness<M>, E>
+    where
+        Standard: Distribution<M::Source> + Distribution<M::Target>,
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        M::Target: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+        E: From<VerificationError>,
+    {
+        let source = second.as_ref().map(|_| self.pair_source()).transpose()?;
+        let parts = 1 + usize::from(second.is_some());
+        if witness.len() != self.tuning().vector_size / parts {
+            return Err(VerificationError.into());
+        }
+
+        witness.resize_zeroed(self.padded_vector_size() / parts);
         let mut initial_mask = Zeroizing::new(Vec::new());
         let joint_masks = self.joint_masks().map(|config| {
             let (coefficients, source_mask) =
@@ -118,9 +164,14 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
 
         let state = if let Some(round) = self.first_round() {
             if let Some(masks) = round.masks() {
-                witness = overlay_mask(witness, &initial_mask, masks.witness);
+                let mut shape = masks.witness;
+                shape.num_polynomials /= parts;
+                witness = overlay_mask(witness, &initial_mask[..initial_mask.len() / parts], shape);
             }
-            let irs_witness = round.code_switch().source().commit(ps, &[&witness]);
+            let irs_witness = source
+                .as_ref()
+                .unwrap_or_else(|| round.code_switch().source())
+                .commit(ps, &[&witness]);
             CommittedState::Round {
                 message: witness,
                 irs_witness,
@@ -157,11 +208,28 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                     ps,
                 )
             });
-        CommittedWitness {
+        let mut committed = CommittedWitness {
             state,
+            second_source: None,
             joint_masks,
             mask_binding,
+        };
+        if let Some(second) = second {
+            let mut right = second(ps)?;
+            if right.len() != self.tuning().vector_size / 2 {
+                return Err(VerificationError.into());
+            }
+            if let Some(mut shape) = self.witness_mask(0) {
+                shape.num_polynomials /= 2;
+                right = overlay_mask(right, &initial_mask[initial_mask.len() / 2..], shape);
+            }
+            committed.second_source = Some(source.unwrap().commit(ps, &[&right]));
+            let CommittedState::Round { message, .. } = &mut committed.state else {
+                unreachable!()
+            };
+            *message = message.concat(&right);
         }
+        Ok(committed)
     }
 
     /// Verifier mirror of [`Self::commit`].
@@ -189,9 +257,41 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             .transpose()?;
         Ok(Commitment {
             irs,
+            second_source: None,
             joint_masks,
             mask_binding,
         })
+    }
+
+    /// Receive both roots around application messages, then use ordinary `verify`.
+    /// The callback must mirror `commit_pair` and run on the same transcript.
+    pub fn receive_pair<H, E>(
+        &self,
+        vs: &mut VerifierState<H>,
+        between: impl FnOnce(&mut VerifierState<H>) -> Result<(), E>,
+    ) -> Result<Commitment<M::Target>, E>
+    where
+        H: DuplexSpongeInterface,
+        M::Target: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+        E: From<VerificationError>,
+    {
+        let source = self.pair_source()?;
+        // Receiving a Merkle root does not depend on its committed row width.
+        let mut commitment = self.receive_commitment(vs)?;
+        between(vs)?;
+        commitment.second_source = Some(source.receive_commitment(vs)?);
+        Ok(commitment)
+    }
+
+    pub(super) fn pair_source(&self) -> VerificationResult<IrsConfig<M>> {
+        self.validate().map_err(|_| VerificationError)?;
+        if self.tuning().vector_size != self.padded_vector_size() {
+            return Err(VerificationError);
+        }
+        self.first_round()
+            .and_then(|round| round.code_switch().source().pair_half())
+            .ok_or(VerificationError)
     }
 
     fn mask_source_degree(&self) -> u64 {
