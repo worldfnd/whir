@@ -6,7 +6,8 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, R
 use zeroize::Zeroize;
 
 use super::{
-    commit::CommittedState, Commitment, CommittedWitness, FinalClaim, ProtocolConfig, ProverClaim,
+    commit::{CommittedState, PairMember},
+    Commitment, CommittedWitness, FinalClaim, ProtocolConfig, ProverClaim,
 };
 use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
@@ -63,21 +64,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let config = self.pair_claims(forms, values)?;
         let [mut left, right] = committed;
         let binding = config.pair_binding();
-        let masked = config.joint_masks().is_some();
-        if !left
-            .pair
-            .as_ref()
-            .zip(right.pair.as_ref())
-            .is_some_and(|(left, right)| left.matches(right, binding))
-            || left.pending_mask.is_some()
-            || right.pending_mask.is_some()
-            || left.second_source.is_some()
-            || right.second_source.is_some()
-            || right.joint_masks.is_some()
-            || right.mask_binding.is_some()
-            || left.joint_masks.is_some() != masked
-            || left.mask_binding.is_some() != masked
-        {
+        PairMember::check([left.pair.take(), right.pair], binding)?;
+        if left.pending_mask.is_some() {
             return Err(VerificationError);
         }
         let CommittedState::Round {
@@ -90,12 +78,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let CommittedState::Round { message, .. } = &mut left.state else {
             return Err(VerificationError);
         };
-        if message.len() != self.tuning().vector_size || right_message.len() != message.len() {
-            return Err(VerificationError);
-        }
         *message = message.concat(&right_message);
         left.second_source = Some(right_root);
-        left.pair = None;
         ps.prover_message(&binding);
         ps.prover_message(&U64(values.len() as u64));
         ps.prover_messages(values);
@@ -123,21 +107,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let config = self.pair_claims(forms, values)?;
         let [mut left, right] = commitments;
         let binding = config.pair_binding();
-        let masked = config.joint_masks().is_some();
-        if !left
-            .pair
-            .as_ref()
-            .zip(right.pair.as_ref())
-            .is_some_and(|(left, right)| left.matches(right, binding))
-            || left.second_source.is_some()
-            || right.second_source.is_some()
-            || right.joint_masks.is_some()
-            || right.mask_binding.is_some()
-            || left.joint_masks.is_some() != masked
-            || left.mask_binding.is_some() != masked
-        {
-            return Err(VerificationError);
-        }
+        PairMember::check([left.pair.take(), right.pair], binding)?;
         if vs.prover_message::<Hash>()? != binding
             || vs.prover_message::<U64>()?.0 != values.len() as u64
         {
@@ -149,7 +119,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             }
         }
         left.second_source = Some(right.irs);
-        left.pair = None;
         config.verify(vs, left, forms, values)
     }
 }

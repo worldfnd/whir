@@ -243,6 +243,7 @@ fn swapped_and_mixed_handles_are_rejected() {
         for replace in 0..3 {
             let mut vs = VerifierState::new_std(&ds, &first.proof);
             let mut handles = receive(&mut vs);
+            let valid = handles.clone();
             if replace == 2 {
                 handles.swap(0, 1);
             } else {
@@ -250,6 +251,13 @@ fn swapped_and_mixed_handles_are_rejected() {
                 handles[replace] = receive(&mut other_vs)[replace].clone();
             }
             rejects(|| config.verify_pair(&mut vs, handles, &refs, &first.values));
+            let result = config
+                .verify_pair(&mut vs, valid, &refs, &first.values)
+                .unwrap();
+            result.verify(&refs).unwrap();
+            assert_eq!(result.evaluation_point, first.result.evaluation_point);
+            assert_eq!(vs.prover_message::<F>().unwrap(), F::from(987));
+            vs.check_eof().unwrap();
         }
     }
 }
@@ -274,16 +282,30 @@ fn rejected_inputs_and_repeated_completion_leave_the_transcript_unchanged() {
         assert!(other
             .commit_pair(&mut ps, Buffer::from(vec![F::ONE; 8192]), Some(&mut first))
             .is_err());
+        let unfinished = first.clone();
         let second = config
             .commit_pair(&mut ps, Buffer::from(vec![F::ONE; 4096]), Some(&mut first))
             .unwrap();
         assert!(config
             .commit_pair(&mut ps, Buffer::from(vec![F::ONE; 4096]), Some(&mut first))
             .is_err());
+        let form = Covector::new(vec![F::ONE; 8192]);
+        let values = [F::from(8192)];
+        assert!(config
+            .prove_pair(&mut ps, [unfinished, second.clone()], &[&form], &values)
+            .is_err());
         let short = Covector::new(vec![F::ZERO; 4096]);
         assert!(config
-            .prove_pair(&mut ps, [first, second], &[&short], &[F::ZERO])
+            .prove_pair(
+                &mut ps,
+                [first.clone(), second.clone()],
+                &[&short],
+                &[F::ZERO]
+            )
             .is_err());
+        config
+            .prove_pair(&mut ps, [first, second], &[&form], &values)
+            .unwrap();
         let challenge: F = ps.verifier_message();
         ps.prover_message(&Hash([9; 32]));
         let proof = ps.proof();
@@ -294,9 +316,19 @@ fn rejected_inputs_and_repeated_completion_leave_the_transcript_unchanged() {
             let second = config.receive_pair(&mut vs, Some(&first)).unwrap();
             if attempt_invalid_opening {
                 assert!(config
-                    .verify_pair(&mut vs, [first, second], &[&short], &[F::ZERO])
+                    .verify_pair(
+                        &mut vs,
+                        [first.clone(), second.clone()],
+                        &[&short],
+                        &[F::ZERO]
+                    )
                     .is_err());
             }
+            config
+                .verify_pair(&mut vs, [first, second], &[&form], &values)
+                .unwrap()
+                .verify(&[&form])
+                .unwrap();
             assert_eq!(vs.verifier_message::<F>(), challenge);
             assert_eq!(vs.prover_message::<Hash>().unwrap(), Hash([9; 32]));
             vs.check_eof().unwrap();

@@ -41,11 +41,18 @@ impl PairMember {
         })
     }
 
-    pub(super) fn matches(&self, second: &Self, binding: Hash) -> bool {
-        self.first
-            && !second.first
-            && *self.config == binding
-            && Arc::ptr_eq(&self.config, &second.config)
+    pub(super) fn check(members: [Option<Self>; 2], binding: Hash) -> VerificationResult<()> {
+        match members {
+            [Some(first), Some(second)]
+                if first.first
+                    && !second.first
+                    && *first.config == binding
+                    && Arc::ptr_eq(&first.config, &second.config) =>
+            {
+                Ok(())
+            }
+            _ => Err(VerificationError),
+        }
     }
 }
 
@@ -125,7 +132,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        self.commit_inner(ps, witness, false)
+        self.commit_inner(ps, witness, false, None)
             .expect("zook witness length")
     }
 
@@ -135,7 +142,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     pub fn commit_pair<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
-        mut witness: Buffer<M::Source>,
+        witness: Buffer<M::Source>,
         previous: Option<&mut CommittedWitness<M>>,
     ) -> VerificationResult<CommittedWitness<M>>
     where
@@ -145,36 +152,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let config = self.pair_config()?;
-        let Some(first) = previous else {
-            return config.commit_inner(ps, witness, true);
-        };
-        let source = config.pair_source()?;
-        let pair = first
-            .pair
-            .as_ref()
-            .ok_or(VerificationError)?
-            .second(config.pair_binding())?;
-        if witness.len() != source.vector_size() {
-            return Err(VerificationError);
-        }
-        let mask = first.pending_mask.take().ok_or(VerificationError)?;
-        if let Some(mut shape) = config.witness_mask(0) {
-            shape.num_polynomials /= 2;
-            witness = overlay_mask(witness, &mask, shape);
-        }
-        let irs_witness = source.commit(ps, &[&witness]);
-        Ok(CommittedWitness {
-            state: CommittedState::Round {
-                message: witness,
-                irs_witness,
-            },
-            second_source: None,
-            pair: Some(pair),
-            pending_mask: None,
-            joint_masks: None,
-            mask_binding: None,
-        })
+        self.pair_config()?
+            .commit_inner(ps, witness, true, previous)
     }
 
     fn commit_inner<H, R>(
@@ -182,6 +161,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         ps: &mut ProverState<H, R>,
         mut witness: Buffer<M::Source>,
         paired: bool,
+        previous: Option<&mut CommittedWitness<M>>,
     ) -> VerificationResult<CommittedWitness<M>>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
@@ -196,9 +176,19 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             return Err(VerificationError);
         }
 
+        let (pair, mut initial_mask) = if let Some(first) = previous {
+            let pair = first
+                .pair
+                .as_ref()
+                .ok_or(VerificationError)?
+                .second(self.pair_binding())?;
+            let mask = first.pending_mask.take().ok_or(VerificationError)?;
+            (Some(pair), mask)
+        } else {
+            (None, Zeroizing::new(Vec::new()))
+        };
         witness.resize_zeroed(self.padded_vector_size() / parts);
-        let mut initial_mask = Zeroizing::new(Vec::new());
-        let joint_masks = self.joint_masks().map(|config| {
+        let joint_masks = self.joint_masks().filter(|_| pair.is_none()).map(|config| {
             let (coefficients, source_mask) =
                 sample_masks::<M, _>(config, self.has_rounds(), ps.rng());
             initial_mask = source_mask;
@@ -217,7 +207,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             if let Some(masks) = round.masks() {
                 let mut shape = masks.witness;
                 shape.num_polynomials /= parts;
-                witness = overlay_mask(witness, &initial_mask[..initial_mask.len() / parts], shape);
+                let mask_len = shape.num_polynomials * shape.coefficients_per_polynomial;
+                witness = overlay_mask(witness, &initial_mask[..mask_len], shape);
             }
             let irs_witness = source
                 .as_ref()
@@ -262,12 +253,12 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let mut committed = CommittedWitness {
             state,
             second_source: None,
-            pair: None,
+            pair,
             pending_mask: None,
             joint_masks,
             mask_binding,
         };
-        if paired {
+        if paired && committed.pair.is_none() {
             committed.pair = Some(PairMember {
                 config: Arc::new(self.pair_binding()),
                 first: true,
@@ -374,7 +365,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     }
 
     pub(super) fn pair_source(&self) -> VerificationResult<IrsConfig<M>> {
-        self.validate().map_err(|_| VerificationError)?;
         if self.tuning().vector_size != self.padded_vector_size() {
             return Err(VerificationError);
         }
