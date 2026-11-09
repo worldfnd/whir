@@ -1,4 +1,4 @@
-//! Joint openings reject without advancing either transcript while integration is pending.
+//! Pair openings reject independent handles without advancing either transcript.
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
@@ -25,7 +25,7 @@ where
     M::Target: Default + Zeroize + Codec,
     Standard: Distribution<M::Source> + Distribution<M::Target>,
 {
-    for vector_size in [8, 256] {
+    for vector_size in [8, 4096] {
         let config = ProtocolConfig::<M>::derive(
             SecuritySpec::new(128)
                 .with_mode(mode)
@@ -38,7 +38,7 @@ where
             },
         )
         .unwrap();
-        assert!(config.validate_pair().is_err());
+        assert_eq!(config.validate_pair().is_ok(), vector_size == 4096);
         let form = Covector::new(vec![M::Target::ZERO; 2 * vector_size]);
         let ds = DomainSeparator::protocol(&config).instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -78,21 +78,21 @@ where
 }
 
 #[test]
-fn bn254_standard_pair_is_unsupported() {
+fn bn254_standard_independent_handles_are_rejected() {
     rejects_pair_without_transcript_changes::<Identity<Field256>>(Mode::Standard);
 }
 
 #[test]
-fn bn254_zero_knowledge_pair_is_unsupported() {
+fn bn254_zero_knowledge_independent_handles_are_rejected() {
     rejects_pair_without_transcript_changes::<Identity<Field256>>(Mode::ZeroKnowledge);
 }
 
 #[test]
-fn extension_standard_pair_is_unsupported() {
+fn extension_standard_independent_handles_are_rejected() {
     rejects_pair_without_transcript_changes::<Basefield<Field64_3>>(Mode::Standard);
 }
 
 #[test]
-fn extension_zero_knowledge_pair_is_unsupported() {
+fn extension_zero_knowledge_independent_handles_are_rejected() {
     rejects_pair_without_transcript_changes::<Basefield<Field64_3>>(Mode::ZeroKnowledge);
 }

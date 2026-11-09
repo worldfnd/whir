@@ -48,6 +48,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
+        assert!(
+            committed.pair.is_none(),
+            "use prove_pair for staged commitments"
+        );
         let reduced = reduce_prover(self, ps, committed, linear_forms, evaluations);
         self.prove_final_opening(ps, reduced)
     }
