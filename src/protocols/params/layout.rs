@@ -61,6 +61,7 @@ pub(super) struct RoundLayout {
     pub(super) basecase_log_inv_rate: u32,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn round_layout<M: Embedding + Default>(
     spec: &SecuritySpec,
     tuning: &TuningSpec,

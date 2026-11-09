@@ -51,6 +51,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
+        verify!(commitment.pair.is_none());
         let reduced = reduce_verifier(self, vs, commitment, linear_forms, evaluations)?;
         self.verify_final_opening(vs, reduced)
     }
