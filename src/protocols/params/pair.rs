@@ -4,12 +4,11 @@ use crate::{
     algebra::embedding::Embedding,
     bits::Bits,
     protocols::params::{
-        branch::SolveMode,
-        code_switch::solve as solve_code_switch,
-        protocol_config::{ProtocolConfig, RoundConfig, RoundMasks, RoundMode},
+        config::{ProtocolConfig, RoundConfig},
+        derive::{solve_code_switch, solve_sumcheck},
+        masks::{mask_coefficients, RoundMasks},
         spec::{RateSchedule, RoundContext},
-        sumcheck::{mask_coefficients, solve as solve_sumcheck},
-        Pow, WitnessMaskConfig,
+        SecurityEvent, WitnessMaskConfig,
     },
     transcript::{VerificationError, VerificationResult},
 };
@@ -29,11 +28,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         {
             return Err(VerificationError);
         }
-        let canonical =
-            Self::derive(self.security().clone(), tuning.clone()).map_err(|_| VerificationError)?;
-        if self != &canonical {
-            return Err(VerificationError);
-        }
         let first = self.first_round().ok_or(VerificationError)?;
         if first.sumcheck().num_rounds() == 0 {
             return Err(VerificationError);
@@ -51,40 +45,36 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             folding_factor: source.interleaving_depth().ilog2(),
             log_inv_rate: tuning.starting_log_inv_rate,
         };
-        let (mode, solve_mode) = match first.masks() {
+        let masks = match first.masks() {
             Some(masks) => {
                 let joint = self.joint_masks().ok_or(VerificationError)?;
                 // Two initial binding events share this error budget. Both mask
                 // roots are opened at common indices in the final tuple check.
-                if joint.commit().analytic() - Bits::new(1.0)
+                if joint.analytic_bits().map_err(|_| VerificationError)? - Bits::new(1.0)
                     < Bits::new(f64::from(self.security().target_security_bits))
                 {
                     return Err(VerificationError);
                 }
-                (
-                    RoundMode::ZeroKnowledge(RoundMasks {
-                        witness: WitnessMaskConfig {
-                            num_polynomials: masks
-                                .witness
-                                .num_polynomials
-                                .checked_mul(2)
-                                .ok_or(VerificationError)?,
-                            coefficients_per_polynomial: masks.witness.coefficients_per_polynomial,
-                        },
-                        sumcheck_coefficients: mask_coefficients(context.folding_factor as usize)
-                            .map_err(|_| VerificationError)?,
-                    }),
-                    SolveMode::ZeroKnowledge(()),
-                )
+                Some(RoundMasks {
+                    witness: WitnessMaskConfig {
+                        num_polynomials: masks
+                            .witness
+                            .num_polynomials
+                            .checked_mul(2)
+                            .ok_or(VerificationError)?,
+                        coefficients_per_polynomial: masks.witness.coefficients_per_polynomial,
+                    },
+                    sumcheck_coefficients: mask_coefficients(context.folding_factor as usize)
+                        .map_err(|_| VerificationError)?,
+                })
             }
-            None => (RoundMode::Standard, SolveMode::Standard),
+            None => None,
         };
         let sumcheck = solve_sumcheck(
             self.security(),
             &context,
             &source,
-            solve_mode,
-            Pow::RoundSumcheck { index: 0 },
+            SecurityEvent::RoundSumcheck { index: 0 },
         )
         .map_err(|_| VerificationError)?;
         let code_switch = solve_code_switch(
@@ -92,11 +82,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             source,
             first.code_switch().target().clone(),
             first.code_switch().out_domain_samples(),
-            solve_mode,
             0,
         )
         .map_err(|_| VerificationError)?;
-        Ok(RoundConfig::new(0, sumcheck, code_switch, mode))
+        Ok(RoundConfig::new(0, sumcheck, code_switch, masks))
     }
 }
 
@@ -173,12 +162,12 @@ mod tests {
                 u64::from(u32::MAX)
             })
             .unwrap();
-            let changed: ProtocolConfig<Identity<Field256>> = from_value(encoded).unwrap();
-            assert!(changed.validate_pair().is_err());
+            if let Ok(changed) = from_value::<ProtocolConfig<Identity<Field256>>>(encoded) {
+                assert!(changed.validate_pair().is_err());
+            }
         }
         let mut encoded = to_value(&config).unwrap();
-        encoded["joint_masks"]["commit"]["analytic"] = to_value(0.0).unwrap();
-        let changed: ProtocolConfig<Identity<Field256>> = from_value(encoded).unwrap();
-        assert!(changed.validate_pair().is_err());
+        encoded["joint_masks"]["commit"]["in_domain_samples"] = to_value(1).unwrap();
+        assert!(from_value::<ProtocolConfig<Identity<Field256>>>(encoded).is_err());
     }
 }

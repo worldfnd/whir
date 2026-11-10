@@ -1,4 +1,4 @@
-//! Errors raised by [`super::derive::ProtocolConfig::derive`] and the
+//! Errors raised by [`super::ProtocolConfig::derive`] and the
 //! sub-protocol solvers.
 
 use std::fmt::{self, Display, Formatter};
@@ -8,12 +8,7 @@ use thiserror::Error;
 use crate::{
     bits::Bits,
     protocols::{
-        irs_commit::CodewordLengthError,
-        params::{
-            layout::LayoutError,
-            spec::{Mode, SecuritySpec},
-        },
-        proof_of_work::{Config as PowConfig, PowError},
+        irs_commit::CodewordLengthError, params::derive::LayoutError, proof_of_work::PowError,
     },
 };
 
@@ -43,9 +38,9 @@ pub enum ZookSecurityError {
     EmptyOutOfDomain,
 }
 
-/// Identifies a single PoW grind in the derived protocol.
+/// Identifies a security bound in the derived protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pow {
+pub enum SecurityEvent {
     /// Binding the single joint-mask commitment before folding.
     JointMaskBinding,
     /// Combining the sparse sumcheck mask with the current claim.
@@ -62,7 +57,7 @@ pub enum Pow {
     RoundCodeSwitch { index: usize },
 }
 
-impl Display for Pow {
+impl Display for SecurityEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::JointMaskBinding => f.write_str("joint-mask binding"),
@@ -110,7 +105,7 @@ impl Display for ChainTarget {
     }
 }
 
-/// Failure modes for [`super::derive::ProtocolConfig::derive`] and the
+/// Failure modes for [`super::ProtocolConfig::derive`] and the
 /// sub-protocol solvers it calls.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DeriveError {
@@ -129,7 +124,7 @@ pub enum DeriveError {
     /// Mask ranges, commitment dimensions, or protocol modes disagree.
     #[error("invalid joint-mask layout")]
     InvalidMaskLayout,
-    /// The `t_ood` fixed-point in [`super::build_round::solve_t_ood`] ran out of
+    /// The `t_ood` fixed-point in `solve_t_ood` ran out of
     /// iterations — usually the field is too small for the security target.
     #[error(
         "t_ood fixed-point did not converge for round {round_index}; \
@@ -144,7 +139,7 @@ pub enum DeriveError {
          switch to a less conservative decoding regime (Johnson/Capacity)"
     )]
     PowUngrindable {
-        pow: Pow,
+        pow: SecurityEvent,
         #[source]
         source: PowError,
     },
@@ -155,7 +150,11 @@ pub enum DeriveError {
         "{pow} requires {required} bits, exceeds spec.pow_budget = {max}; \
          raise pow_budget or lower target_security_bits"
     )]
-    PowBudgetExceeded { pow: Pow, required: Bits, max: Bits },
+    PowBudgetExceeded {
+        pow: SecurityEvent,
+        required: Bits,
+        max: Bits,
+    },
 
     /// Computed codeword length exceeds the NTT engine's supported order.
     #[error(
@@ -171,7 +170,7 @@ pub enum DeriveError {
     /// Cross-round (or round → basecase) shape chain broken: the next
     /// component's source `vector_size` does not match the previous
     /// component's target `vector_size`. Surfaced by
-    /// [`super::protocol_config::ProtocolConfig::validate_round_chaining`].
+    /// [`super::ProtocolConfig::validate`].
     #[error("chain broken: {from} → {to} expected vector_size {expected}, found {found}")]
     RoundChainBroken {
         from: ChainSource,
@@ -180,29 +179,13 @@ pub enum DeriveError {
         found: usize,
     },
 
-    /// A PoW slot's `analytic + pow.difficulty()` is below `target_security_bits`.
-    /// `grind_to_at` guarantees this at construction; this error fires only if
-    /// the analytic-error formulas applied at validate-time disagree with what
-    /// the per-protocol `solve` functions consumed (e.g., a planner regression
-    /// drifts away from the actual configured IRS rate). Catches the case where
-    /// the rate-schedule plumbing under-reports a per-slot rate.
+    /// A step's analytic bound and permitted grinding do not meet the target.
     #[error("{pow} soundness gap: analytic {analytic} + pow {pow_bits} < target {target}")]
     SecurityTargetNotMet {
-        pow: Pow,
+        pow: SecurityEvent,
         analytic: Bits,
         pow_bits: Bits,
         target: Bits,
-    },
-
-    /// The analytic floor recorded at solve time disagrees with a fresh
-    /// recompute from the same config's state. Indicates that the inputs to
-    /// the `analytic_error_bits` formula drifted between solve and validate
-    /// (e.g., an IRS field was overwritten after construction).
-    #[error("{pow} analytic drift: recorded {recorded} vs recompute {recompute}")]
-    AnalyticDrift {
-        pow: Pow,
-        recorded: Bits,
-        recompute: Bits,
     },
 
     /// No searched rate schedule satisfies the configured size and security bounds.
@@ -213,86 +196,5 @@ pub enum DeriveError {
 impl From<CodewordLengthError> for DeriveError {
     fn from(e: CodewordLengthError) -> Self {
         Self::CodewordExceedsNtt { length: e.length }
-    }
-}
-
-/// Lift `Result<T, PowError>` into `Result<T, DeriveError>` by attaching a
-/// [`Pow`] label.
-pub trait PowResultExt<T> {
-    fn at(self, pow: Pow) -> Result<T, DeriveError>;
-}
-
-impl<T> PowResultExt<T> for Result<T, PowError> {
-    fn at(self, pow: Pow) -> Result<T, DeriveError> {
-        self.map_err(|source| DeriveError::PowUngrindable { pow, source })
-    }
-}
-
-/// Enforce the target, allowing grinding credit only in Standard mode.
-///
-/// Zook requires the full analytic target until a grinding reduction is supplied.
-pub fn grind_to_at(
-    spec: &SecuritySpec,
-    analytic: Bits,
-    pow_kind: Pow,
-) -> Result<PowConfig, DeriveError> {
-    let target = Bits::new(f64::from(spec.target_security_bits));
-    if matches!(spec.mode, Mode::ZeroKnowledge) {
-        if analytic < target {
-            return Err(DeriveError::SecurityTargetNotMet {
-                pow: pow_kind,
-                analytic,
-                pow_bits: Bits::new(0.0),
-                target,
-            });
-        }
-        return Ok(PowConfig::none());
-    }
-    let mut pow = PowConfig::grind_to(target, analytic, spec.hash_id).at(pow_kind)?;
-    // grind_to rounds the threshold upward. Tighten a fractional gap by one
-    // threshold unit instead of accepting less than the configured target.
-    if analytic + pow.difficulty() < target {
-        pow.threshold = pow.threshold.saturating_sub(1);
-    }
-    let required = pow.difficulty();
-    let max = Bits::new(f64::from(spec.pow_budget.bits()));
-    if required > max {
-        return Err(DeriveError::PowBudgetExceeded {
-            pow: pow_kind,
-            required,
-            max,
-        });
-    }
-    Ok(pow)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocols::params::spec::PowBudget;
-
-    #[test]
-    fn standard_grinding_closes_fractional_gaps() {
-        let spec = SecuritySpec::new(80).with_pow_budget(PowBudget::per_slot(60));
-        for analytic in [20.3422, 35.623_375_386_491_45] {
-            let analytic = Bits::new(analytic);
-            let pow = grind_to_at(&spec, analytic, Pow::BasecaseSumcheck).unwrap();
-            assert!(analytic + pow.difficulty() >= Bits::new(80.0 - 1e-9));
-            assert!(pow.difficulty() <= Bits::new(60.0));
-        }
-    }
-
-    #[test]
-    fn grinding_still_enforces_budget_and_zook_target() {
-        let spec = SecuritySpec::new(80).with_pow_budget(PowBudget::per_slot(59));
-        assert!(matches!(
-            grind_to_at(&spec, Bits::new(20.3422), Pow::BasecaseSumcheck),
-            Err(DeriveError::PowBudgetExceeded { .. }),
-        ));
-        let spec = spec.with_mode(Mode::ZeroKnowledge);
-        assert!(matches!(
-            grind_to_at(&spec, Bits::new(79.9999), Pow::JointMaskBinding),
-            Err(DeriveError::SecurityTargetNotMet { .. }),
-        ));
     }
 }

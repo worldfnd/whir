@@ -1,42 +1,33 @@
-//! Parameter selection for HVZK-WHIR.
+//! Parameter selection for WHIR and Zook.
 //!
-//! Soundness and ZK bound derivations (referred to in submodule comments as
-//! "the bounds doc, §N") live at
-//! <https://hackmd.io/@1q1q-TiuQN6fAkxaN41u-Q/ryBoT_UA-e>.
+//! `derive` constructs concrete configurations; `security` evaluates their bounds.
+//! `search` selects rates through the same construction path.
+//! Mathematical references use the pinned [ProveKit whitepaper].
+//!
+//! [ProveKit whitepaper]: https://github.com/worldfnd/provekit/tree/6605cf5242567e17899a26c27db829c7ce9eb478/whitepaper
 
-pub(crate) mod adaptive;
-pub(crate) mod basecase;
-pub(crate) mod bounds;
-pub(crate) mod branch;
-pub(crate) mod build_round;
-pub(crate) mod code_switch;
+pub(crate) mod config;
 pub(crate) mod derive;
 pub(crate) mod error;
-pub(crate) mod irs_commit;
-pub(crate) mod joint;
-pub(crate) mod layout;
-pub(crate) mod mask_proximity;
-pub(crate) mod protocol_config;
-pub(crate) mod regime;
-pub(crate) mod solved;
+pub(crate) mod masks;
+pub(crate) mod pair;
+pub(crate) mod search;
+pub(crate) mod security;
 pub(crate) mod spec;
-pub(crate) mod sumcheck;
 
+#[cfg(test)]
+mod parameter_regressions;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
-pub use basecase::ZookFinalOpeningSoundness;
-pub use branch::{Branch, SolveMode};
-pub use error::{ChainSource, ChainTarget, DeriveError, Pow, ZookSecurityError};
-pub use layout::LayoutError;
-pub use mask_proximity::zook_mask_binding_bits;
-pub use protocol_config::{
-    BasecasePlan, JointMaskConfig, ProtocolConfig, RoundConfig, RoundMasks, RoundMode,
-    WitnessMaskConfig, ZookRoundSoundness,
+pub use config::{BasecasePlan, ProtocolConfig, RoundConfig};
+pub use derive::LayoutError;
+pub use error::{ChainSource, ChainTarget, DeriveError, SecurityEvent, ZookSecurityError};
+pub use masks::{JointMaskConfig, RoundMasks, WitnessMaskConfig};
+pub use security::{
+    zook_mask_binding_bits, SecurityCheck, ZookFinalOpeningSoundness, ZookRoundSoundness,
 };
-pub use solved::Solved;
 pub use spec::{
-    DecodingRegime, FoldingFactor, KneeWeight, ListSize, LogInvRate, MaskCodeMessageLen, Mode,
-    OodSampleBudget, ParseDecodingRegimeError, PowBudget, RateSchedule, RoundContext, SecuritySpec,
-    TuningSpec, ZkSpec, DEFAULT_POW_BUDGET_BITS,
+    DecodingRegime, FoldingFactor, KneeWeight, Mode, ParseDecodingRegimeError, PowBudget,
+    RateSchedule, SecuritySpec, TuningSpec, DEFAULT_POW_BUDGET_BITS,
 };

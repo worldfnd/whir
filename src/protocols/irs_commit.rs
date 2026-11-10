@@ -31,7 +31,10 @@ use crate::{
     protocols::{
         challenge_indices::challenge_indices,
         matrix_commit,
-        params::{bounds::ood_per_sample_log2, regime::DecodingRegimeParams, spec::DecodingRegime},
+        params::{
+            security::{ood_per_sample_log2, DecodingRegimeParams},
+            spec::DecodingRegime,
+        },
     },
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
@@ -701,7 +704,7 @@ impl<M: Embedding> fmt::Display for Config<M> {
 ///
 /// Solves `(L choose 2) · ((degree - 1) / |F|)^s ≤ 2^{-security_target}`
 /// where `L` is the list size and `degree` is the polynomial degree bound.
-/// See [STIR] Lemma 4.5.
+/// See STIR, Lemma 4.5.
 #[allow(clippy::cast_sign_loss)]
 pub fn num_ood_samples(
     decoding_regime: DecodingRegime,

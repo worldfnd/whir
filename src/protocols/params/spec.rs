@@ -1,14 +1,11 @@
 use std::{
-    fmt::{self, Debug, Display, Formatter},
-    hash::{Hash, Hasher},
-    marker::PhantomData,
+    fmt::{self, Display, Formatter},
     num::NonZeroU32,
-    ops::Deref,
     str::FromStr,
 };
 
 use ordered_float::OrderedFloat;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{bits::Bits, engines::EngineId, hash};
@@ -47,62 +44,6 @@ impl PowBudget {
             Self::Forbidden => 0,
             Self::PerSlot { bits } => bits.get(),
         }
-    }
-}
-
-/// Phantom-typed newtype.
-///
-/// Trait impls are written by hand so that bounds apply to `T` only — tag
-/// types stay bare, uninhabited enums.
-pub struct Tagged<T, Tag>(T, PhantomData<Tag>);
-
-impl<T: Copy, Tag> Tagged<T, Tag> {
-    pub const fn new(v: T) -> Self {
-        Self(v, PhantomData)
-    }
-
-    pub const fn get(self) -> T {
-        self.0
-    }
-}
-
-impl<T: Debug, Tag> Debug for Tagged<T, Tag> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Tagged").field(&self.0).finish()
-    }
-}
-
-impl<T: Clone, Tag> Clone for Tagged<T, Tag> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone(), PhantomData)
-    }
-}
-
-impl<T: Copy, Tag> Copy for Tagged<T, Tag> {}
-
-impl<T: PartialEq, Tag> PartialEq for Tagged<T, Tag> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl<T: Eq, Tag> Eq for Tagged<T, Tag> {}
-
-impl<T: Hash, Tag> Hash for Tagged<T, Tag> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
-impl<T: Serialize, Tag> Serialize for Tagged<T, Tag> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de, T: Deserialize<'de>, Tag> Deserialize<'de> for Tagged<T, Tag> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        T::deserialize(deserializer).map(|value| Self(value, PhantomData))
     }
 }
 
@@ -159,13 +100,6 @@ impl SecuritySpec {
     pub fn protocol_security_target_bits(&self) -> Bits {
         let pow = self.pow_budget.bits();
         Bits::new(f64::from(self.target_security_bits.saturating_sub(pow)))
-    }
-
-    /// Borrow this spec as a [`ZkSpec`] proof, or `None` in standard mode.
-    /// Prefer branching on this over matching `mode` and re-proving with
-    /// [`ZkSpec::try_new`].
-    pub fn as_zk(&self) -> Option<ZkSpec<'_>> {
-        ZkSpec::try_new(self)
     }
 }
 
@@ -317,24 +251,9 @@ pub enum Mode {
     ZeroKnowledge,
 }
 
-/// A `SecuritySpec` borrow proven to be in [`Mode::ZeroKnowledge`].
-#[derive(Debug, Clone, Copy)]
-pub struct ZkSpec<'a>(&'a SecuritySpec);
-
-impl<'a> ZkSpec<'a> {
-    pub fn try_new(spec: &'a SecuritySpec) -> Option<Self> {
-        matches!(spec.mode, Mode::ZeroKnowledge).then_some(Self(spec))
-    }
-
-    pub const fn as_inner(self) -> &'a SecuritySpec {
-        self.0
-    }
-}
-
-impl Deref for ZkSpec<'_> {
-    type Target = SecuritySpec;
-    fn deref(&self) -> &SecuritySpec {
-        self.0
+impl Mode {
+    pub const fn is_zk(self) -> bool {
+        matches!(self, Self::ZeroKnowledge)
     }
 }
 
@@ -346,11 +265,9 @@ impl Deref for ZkSpec<'_> {
 /// - `Capacity`: `δ < 1 − ρ − η`, canonical `η = ρ/20`. Conjectured list size
 ///   `d/(ρ·η)` and proximity-gap error per STIR Conjecture 5.6.
 ///
-/// WHIR's rate stepping (each round bumps `log_inv_rate` by
-/// `folding_factor − 1`) pushes ρ → 1, shrinking the unique-decoding
-/// radius. At high security targets or deep folding, `Unique` may exceed
-/// the grind cap on per-round PoW and [`super::derive::ProtocolConfig::derive`]
-/// will return `PowUngrindable` — pick `Johnson` or `Capacity` for those.
+/// High security targets or large codewords can make `Unique` exceed the
+/// per-round PoW cap. [`super::ProtocolConfig::derive`] then returns
+/// `PowUngrindable`. `Johnson` or `Capacity` can provide different bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DecodingRegime {
     Unique,
@@ -387,161 +304,5 @@ impl FromStr for DecodingRegime {
 }
 
 #[cfg(test)]
-mod decoding_regime_tests {
-    use super::*;
-
-    #[test]
-    fn from_str_round_trips_display() {
-        for r in [
-            DecodingRegime::Unique,
-            DecodingRegime::Johnson,
-            DecodingRegime::Capacity,
-        ] {
-            assert_eq!(r.to_string().parse::<DecodingRegime>().unwrap(), r);
-        }
-    }
-
-    #[test]
-    fn from_str_rejects_unknown() {
-        assert!("johnson".parse::<DecodingRegime>().is_err()); // case-sensitive
-        assert!("".parse::<DecodingRegime>().is_err());
-        assert!("capacity".parse::<DecodingRegime>().is_err());
-    }
-}
-
-pub enum OodSampleBudgetTag {}
-pub enum MaskCodeMessageLenTag {}
-pub enum LogInvRateTag {}
-
-/// OOD-sample budget (Lemma 9.9 / bounds doc §5.2).
-pub type OodSampleBudget = Tagged<usize, OodSampleBudgetTag>;
-
-impl Tagged<usize, OodSampleBudgetTag> {
-    /// Sentinel for "no OOD samples".
-    pub const ZERO: Self = Self::new(0);
-}
-
-/// C_zk message length (Theorem 9.6: `ℓ_zk ≥ source mask length`).
-pub type MaskCodeMessageLen = Tagged<usize, MaskCodeMessageLenTag>;
-
-/// `rate = 2^-log_inv_rate`.
-pub type LogInvRate = Tagged<u32, LogInvRateTag>;
-
-/// Reed–Solomon list-decoding ball size `|Λ(C, δ)|`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ListSize(OrderedFloat<f64>);
-
-impl ListSize {
-    pub const fn new(v: f64) -> Self {
-        Self(OrderedFloat(v))
-    }
-
-    pub const fn get(self) -> f64 {
-        self.0 .0
-    }
-
-    /// `log₂ |Λ|` — the form every analytic-error formula consumes.
-    pub fn log2(self) -> f64 {
-        self.get().log2()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hash;
-
-    const TARGET_BITS: u32 = 100;
-
-    fn spec(pow_budget: PowBudget) -> SecuritySpec {
-        SecuritySpec::new(TARGET_BITS)
-            .with_mode(Mode::ZeroKnowledge)
-            .with_pow_budget(pow_budget)
-    }
-
-    #[test]
-    fn new_uses_documented_defaults() {
-        let spec = SecuritySpec::new(128);
-        assert_eq!(spec.mode, Mode::Standard);
-        assert_eq!(spec.decoding_regime, DecodingRegime::Johnson);
-        assert_eq!(spec.target_security_bits, 128);
-        assert_eq!(
-            spec.pow_budget,
-            PowBudget::per_slot(DEFAULT_POW_BUDGET_BITS)
-        );
-        assert_eq!(spec.hash_id, hash::BLAKE3);
-    }
-
-    #[test]
-    fn forbidden_means_no_pow_credit() {
-        assert_eq!(
-            spec(PowBudget::Forbidden).protocol_security_target_bits(),
-            Bits::new(f64::from(TARGET_BITS)),
-        );
-    }
-
-    #[test]
-    fn per_slot_zero_collapses_to_forbidden() {
-        assert_eq!(PowBudget::per_slot(0), PowBudget::Forbidden);
-    }
-
-    #[test]
-    fn per_slot_bits_round_trip() {
-        assert_eq!(PowBudget::per_slot(20).bits(), 20);
-        assert_eq!(PowBudget::Forbidden.bits(), 0);
-    }
-
-    #[test]
-    fn pow_credit_shifts_analytic_floor() {
-        assert_eq!(
-            spec(PowBudget::per_slot(20)).protocol_security_target_bits(),
-            Bits::new(80.0),
-        );
-        assert_eq!(
-            spec(PowBudget::per_slot(60)).protocol_security_target_bits(),
-            Bits::new(40.0),
-        );
-    }
-
-    #[test]
-    fn pow_exceeding_target_saturates_to_zero() {
-        let pow_over_target = TARGET_BITS + 100;
-        assert_eq!(
-            spec(PowBudget::per_slot(pow_over_target)).protocol_security_target_bits(),
-            Bits::new(0.0),
-        );
-    }
-
-    #[test]
-    fn rate_schedule_stepping_unbounded() {
-        // Stepping adds `folding − 1` per round regardless of magnitude
-        // (legacy unbounded-stepping behavior).
-        assert_eq!(RateSchedule::Stepping.step(2, 3), 4);
-        assert_eq!(RateSchedule::Stepping.step(100, 5), 104);
-    }
-
-    #[test]
-    fn rate_schedule_capped_clamps_above_cap() {
-        let cap = RateSchedule::Capped {
-            max_log_inv_rate: 5,
-        };
-        assert_eq!(cap.step(2, 3), 4); // below cap → step normally
-        assert_eq!(cap.step(4, 3), 5); // would step to 6 → clamp to 5
-        assert_eq!(cap.step(5, 3), 5); // already at cap → stays
-        assert_eq!(cap.step(10, 3), 5); // above cap → snaps back to cap
-    }
-
-    #[test]
-    fn rate_schedule_folding_factor_one_never_steps() {
-        // folding == 1 means rate step is `1 − 1 = 0`. The IRS layer disallows
-        // folding < 1, but the math here should still be consistent.
-        assert_eq!(RateSchedule::Stepping.step(2, 1), 2);
-        assert_eq!(
-            RateSchedule::Capped {
-                max_log_inv_rate: 5
-            }
-            .step(2, 1),
-            2,
-        );
-    }
-}
+#[path = "tests/spec.rs"]
+mod tests;

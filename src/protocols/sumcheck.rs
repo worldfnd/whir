@@ -33,7 +33,7 @@ pub struct SumcheckOpening<F: Field> {
 /// has 3 coefficients (degree-2), so the mask must have at least as many to
 /// hide it. Lemma 6.4 itself only requires `ℓ_zk ≥ 2`; the `3` floor is a
 /// WHIR design choice tied to the degree-2 round polynomial (see
-/// `params::sumcheck::zk_mask_length`).
+/// `params::masks::mask_coefficients`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SumcheckMaskLen(usize);
 

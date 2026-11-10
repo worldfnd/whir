@@ -3,7 +3,7 @@
 //! Picks per-round `target_log_inv_rate` values by enumerating candidates,
 //! scoring them on a (prover_time_proxy, proof_size_proxy) pareto knee, and
 //! returning the schedule chosen by [`KneeWeight`]. Driven by
-//! [`super::layout::round_layout`] when [`super::spec::RateSchedule::Adaptive`]
+//! [`super::derive::round_layout`] when [`super::spec::RateSchedule::Adaptive`]
 //! is selected.
 
 use std::collections::HashMap;
@@ -16,14 +16,11 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
-            basecase::{solve as solve_basecase, ZookFinalOpeningSoundness},
-            branch::RoundBuildMode,
-            build_round::build_round_config,
+            config::{embedding_degree, RoundConfig},
+            derive::{build_round_config, solve_basecase, solve_irs, RoundShape},
             error::DeriveError,
-            irs_commit::solve as solve_irs,
-            layout::RoundShape,
-            mask_proximity::{solve_commit as solve_joint_commit, zook_mask_binding_bits},
-            protocol_config::{embedding_degree, RoundConfig},
+            masks::solve_commit as solve_joint_commit,
+            security::{zook_mask_binding_bits, ZookFinalOpeningSoundness},
             spec::{KneeWeight, RoundContext, SecuritySpec, TuningSpec},
         },
     },
@@ -121,9 +118,8 @@ pub(super) fn plan_adaptive_rates<M: Embedding + Default>(
     knee_weight: KneeWeight,
     skeleton: &[RoundShape],
     basecase_vector_size: usize,
-    mode: RoundBuildMode,
 ) -> Result<Vec<u32>, DeriveError> {
-    let mut planner: Planner<'_, M> = Planner::new(spec, skeleton, basecase_vector_size, mode);
+    let mut planner: Planner<'_, M> = Planner::new(spec, skeleton, basecase_vector_size);
     let candidates = planner.search(tuning.starting_log_inv_rate);
     // Report infeasibility within this search space before selecting a schedule.
     if candidates.is_empty() {
@@ -139,7 +135,6 @@ struct Planner<'a, M> {
     spec: &'a SecuritySpec,
     skeleton: &'a [RoundShape],
     basecase_vector_size: usize,
-    mode: RoundBuildMode,
     field_bytes: f64,
     hash_bytes: f64,
     /// Memoize per `(round_idx, source_rate, target_rate)`. `Some(dims)` is
@@ -155,13 +150,11 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
         spec: &'a SecuritySpec,
         skeleton: &'a [RoundShape],
         basecase_vector_size: usize,
-        mode: RoundBuildMode,
     ) -> Self {
         Self {
             spec,
             skeleton,
             basecase_vector_size,
-            mode,
             field_bytes: <M::Target as FieldWithSize>::field_size_bits() / 8.0,
             hash_bytes: 32.0,
             round_cache: HashMap::new(),
@@ -208,7 +201,7 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
             if let Some(dims) = dims {
                 let (e, p) = round_cost_from_dims(dims, self.field_bytes, self.hash_bytes);
                 let mut cost = acc.add((e, p));
-                if self.mode.is_zk() {
+                if self.spec.mode.is_zk() {
                     let Some(payload) = mask_coefficients.checked_add(dims.mask_coefficients)
                     else {
                         return;
@@ -275,11 +268,10 @@ impl<'a, M: Embedding + Default> Planner<'a, M> {
                 break;
             }
             let spec = self.spec;
-            let mode = self.mode;
             let dims = *self
                 .round_cache
                 .entry((idx, cur_rate, next_rate))
-                .or_insert_with(|| try_round_dims::<M>(spec, &shape, cur_rate, next_rate, mode));
+                .or_insert_with(|| try_round_dims::<M>(spec, &shape, cur_rate, next_rate));
             let Some(dims) = dims else { continue };
             let (e, p) = round_cost_from_dims(dims, self.field_bytes, self.hash_bytes);
             chosen.push(next_rate);
@@ -361,7 +353,6 @@ fn try_round_dims<M: Embedding + Default>(
     shape: &RoundShape,
     source_log_inv_rate: u32,
     target_log_inv_rate: u32,
-    mode: RoundBuildMode,
 ) -> Option<RoundDims> {
     let shape = RoundShape {
         source_log_inv_rate,
@@ -369,9 +360,9 @@ fn try_round_dims<M: Embedding + Default>(
         ..*shape
     };
     if shape.round_index == 0 {
-        round_dimensions(&build_round_config::<M>(spec, &shape, mode).ok()?)
+        round_dimensions(&build_round_config::<M>(spec, &shape).ok()?)
     } else {
-        round_dimensions(&build_round_config::<Identity<M::Target>>(spec, &shape, mode).ok()?)
+        round_dimensions(&build_round_config::<Identity<M::Target>>(spec, &shape).ok()?)
     }
 }
 

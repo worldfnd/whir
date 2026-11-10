@@ -1,0 +1,90 @@
+{
+  "baseline_revision": "b9a4e7823cadce9d2d5727380a1cab3d5304c54f",
+  "baseline_source": "PR #283 archive, with test module and test-only seeded constructor.",
+  "fingerprint_algorithm": "BLAKE3 over the canonical parameter projection in parameter_regressions.rs.",
+  "excludes": "Configuration wire layout, computed security reports, type names, transcript bytes, and proof bytes.",
+  "cases": [
+    {
+      "name": "standard_basecase",
+      "rounds": 0,
+      "parameters_blake3": "47e9956afdb847fd19b8275bdac126fbaa419aa2ae5a9ee6f57b346ebf09102e"
+    },
+    {
+      "name": "standard_mixed",
+      "rounds": 5,
+      "parameters_blake3": "ea67c26de9d4d4bb1498d30e43719b3ec7417728816520094b3192c7893942ff"
+    },
+    {
+      "name": "standard_mixed_pair",
+      "rounds": 5,
+      "parameters_blake3": "ea67c26de9d4d4bb1498d30e43719b3ec7417728816520094b3192c7893942ff"
+    },
+    {
+      "name": "standard_pair",
+      "rounds": 5,
+      "parameters_blake3": "ea67c26de9d4d4bb1498d30e43719b3ec7417728816520094b3192c7893942ff"
+    },
+    {
+      "name": "standard_rounds",
+      "rounds": 5,
+      "parameters_blake3": "ea67c26de9d4d4bb1498d30e43719b3ec7417728816520094b3192c7893942ff"
+    },
+    {
+      "name": "zk_basecase",
+      "rounds": 0,
+      "parameters_blake3": "b9e221de9dfe66662e7f94cdf3582494b4600846cd726bc3943a3906a9ab5782"
+    },
+    {
+      "name": "zk_mixed",
+      "rounds": 2,
+      "parameters_blake3": "5b7e17f066f7e849e7c440619c16af0a4b00d5ca6211b8d4e90fd609cd22b4d6"
+    },
+    {
+      "name": "zk_mixed_pair",
+      "rounds": 2,
+      "parameters_blake3": "5b7e17f066f7e849e7c440619c16af0a4b00d5ca6211b8d4e90fd609cd22b4d6"
+    },
+    {
+      "name": "zk_pair",
+      "rounds": 2,
+      "parameters_blake3": "e5176416f0166fab5b136d85cf70cf74190226e7203b6a2f4e74a57d6b208ad4"
+    },
+    {
+      "name": "zk_rounds",
+      "rounds": 2,
+      "parameters_blake3": "e5176416f0166fab5b136d85cf70cf74190226e7203b6a2f4e74a57d6b208ad4"
+    }
+  ],
+  "configurations": [
+    {
+      "name": "standard_adaptive",
+      "rounds": 5,
+      "parameters_blake3": "33a4c6204db2c8767f03aa5ee49cf212f1d1b0993fd4f6f94c4e377609f2ff26"
+    },
+    {
+      "name": "zk_adaptive",
+      "rounds": 2,
+      "parameters_blake3": "90d9a96fd9d4e73e0168ab8760f0097c3eeeba849572a27e3531b4ccf406233a"
+    },
+    {
+      "name": "standard_capped",
+      "rounds": 5,
+      "parameters_blake3": "01f24ba3e9c0073102502ba8c14baa9f84e16bf5a24ba2b77867322b23476d23"
+    },
+    {
+      "name": "zk_capped",
+      "rounds": 2,
+      "parameters_blake3": "e87d24d53a27706685e7fb10278dde0ce57a4b3f6fb277b87f637c05b56c824d"
+    },
+    {
+      "name": "standard_unique",
+      "rounds": 5,
+      "parameters_blake3": "870d28257646d0f58350606bfcf59fb36bc2db418f2742dd073f1fd2ee27225d"
+    },
+    {
+      "name": "standard_capacity",
+      "rounds": 5,
+      "parameters_blake3": "671fcd4bf0000eb32d75abaa6d3578f3049b89bccc3953b3bba1567e1ea88bcb"
+    }
+  ]
+}

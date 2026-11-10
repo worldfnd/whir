@@ -11,7 +11,7 @@ pub mod verifier;
 use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};
 
-pub use crate::protocols::params::protocol_config::ProtocolConfig;
+pub use crate::protocols::params::config::ProtocolConfig;
 use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, verify};
 
 /// Output of [`ProtocolConfig::verify`].

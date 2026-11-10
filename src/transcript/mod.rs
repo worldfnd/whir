@@ -178,6 +178,19 @@ impl ProverState<StdHash, StdRng> {
     {
         Self::new(ds, StdHash::default())
     }
+
+    /// Fixed private coins for parameter regression tests; never available in production.
+    #[cfg(test)]
+    pub(crate) fn new_std_seeded<I>(ds: &DomainSeparator<'_, I>, seed: u64) -> Self
+    where
+        I: Encoding<[u8]>,
+    {
+        use ark_std::rand::SeedableRng;
+
+        let mut state = Self::new_std(ds);
+        *state.inner.rng() = StdRng::seed_from_u64(seed).into();
+        state
+    }
 }
 
 impl<H, R> ProverState<H, R>

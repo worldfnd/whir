@@ -35,7 +35,7 @@ pub trait LinearForm<F: Field>: Any + Send + Sync {
     /// the tensor product $a = a_0 ⊗ a_1 ⊗ ⋯ ⊗ a_(k-1)$ where $k ≥ ⌈log_2 size⌉$ and
     /// $a_i = (1-point_i, point_i)$ truncated to `self.size()`.
     ///
-    /// This function can be used by the verifier to check the [`FinalClaim`].
+    /// The verifier uses this function to check its final claim.
     fn mle_evaluate(&self, point: &[F]) -> F;
 
     /// Accumulate the covector representation of the linear form.
