@@ -17,7 +17,6 @@
 //! tight iters. `max` therefore tends to be inflated by the first sample.
 
 use std::{
-    borrow::Cow,
     fs::File,
     io::Write,
     time::{Duration, Instant},
@@ -30,13 +29,11 @@ use whir::{
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
         random_vector,
     },
+    buffer::Buffer,
     hash,
     parameters::ProtocolParameters,
     protocols::{
-        params::{
-            DecodingRegime, FoldingFactor, Mode, PowBudget, ProtocolConfig, RateSchedule,
-            SecuritySpec, TuningSpec,
-        },
+        params::{DecodingRegime, Params, ProtocolConfig, RateSchedule},
         whir as whir_non_zk,
     },
     transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
@@ -122,6 +119,7 @@ fn bench_whir(log_size: u32) -> Result<PhaseSamples, String> {
     };
     let config = whir_non_zk::Config::<Embed>::new(size, &whir_params);
     let (witness, form, evaluation) = make_workload(log_size);
+    let witness = Buffer::from(witness);
     let mut samples = PhaseSamples::default();
 
     for _ in 0..ITERATIONS {
@@ -144,10 +142,10 @@ fn bench_whir(log_size: u32) -> Result<PhaseSamples, String> {
         let t = Instant::now();
         let _ = config.prove(
             &mut ps,
-            vec![Cow::Owned(witness_owned)],
-            vec![Cow::Owned(committed)],
+            &[&witness_owned],
+            vec![&committed],
             vec![form_box],
-            Cow::Owned(vec![evaluation]),
+            Buffer::from(vec![evaluation]),
         );
         samples.prove.push(t.elapsed());
 
@@ -172,36 +170,31 @@ fn bench_whir(log_size: u32) -> Result<PhaseSamples, String> {
 
 fn bench_zook(
     log_size: u32,
-    mode: Mode,
+    zk: bool,
     rate_schedule: RateSchedule,
 ) -> Result<PhaseSamples, String> {
     let size = 1usize << log_size;
     let schedule_tag = match rate_schedule {
-        RateSchedule::Adaptive { .. } => "adaptive",
+        RateSchedule::Adaptive(_) => "adaptive",
         RateSchedule::Stepping => "stepping",
-        RateSchedule::Capped { .. } => "capped",
+        RateSchedule::Capped(_) => "capped",
     };
-    let mode_tag = match mode {
-        Mode::Standard => "standard",
-        Mode::ZeroKnowledge => "zk",
-    };
+    let mode_tag = if zk { "zk" } else { "standard" };
     let label = format!("zook-{mode_tag}-{schedule_tag}");
-    let spec = SecuritySpec {
-        mode,
-        decoding_regime: DecodingRegime::Johnson,
-        target_security_bits: SECURITY_LEVEL,
-        pow_budget: PowBudget::per_slot(POW_BITS),
-        hash_id: hash::SHA2,
-    };
-    let tuning = TuningSpec {
-        vector_size: size,
-        starting_log_inv_rate: STARTING_LOG_INV_RATE,
-        folding_factor: FoldingFactor::Constant(FOLDING_FACTOR),
-        rate_schedule,
-    };
-    let config = ProtocolConfig::<Embed>::derive(spec, tuning)
-        .map_err(|e| format!("{label} derive: {e:?}"))?;
+    let config = ProtocolConfig::<Embed>::derive(Params {
+        zk,
+        regime: DecodingRegime::Johnson,
+        bits: SECURITY_LEVEL,
+        pow: POW_BITS,
+        hash: hash::SHA2,
+        size,
+        rate: STARTING_LOG_INV_RATE,
+        folds: [FOLDING_FACTOR, FOLDING_FACTOR],
+        schedule: rate_schedule,
+    })
+    .map_err(|e| format!("{label} derive: {e:?}"))?;
     let (witness, form, evaluation) = make_workload(log_size);
+    let witness = Buffer::from(witness);
     let mut samples = PhaseSamples::default();
 
     for _ in 0..ITERATIONS {
@@ -211,8 +204,9 @@ fn bench_zook(
         let mut ps = ProverState::new_std(&ds);
 
         // ---- commit ----
+        let witness_owned = witness.clone();
         let t = Instant::now();
-        let committed = config.commit(&mut ps, &witness);
+        let committed = config.commit(&mut ps, witness_owned);
         samples.commit.push(t.elapsed());
 
         // ---- prove ----
@@ -337,7 +331,7 @@ fn main() {
         // the rate-schedule delta.
         let stepping = RateSchedule::Stepping;
         eprintln!("[2^{log_size}] zook_standard_stepping ...");
-        match bench_zook(log_size, Mode::Standard, stepping) {
+        match bench_zook(log_size, false, stepping) {
             Ok(s) => {
                 let pb = s.proof_bytes;
                 record_cell(
@@ -372,7 +366,7 @@ fn main() {
         }
 
         eprintln!("[2^{log_size}] zook_zk_stepping ...");
-        match bench_zook(log_size, Mode::ZeroKnowledge, RateSchedule::Stepping) {
+        match bench_zook(log_size, true, RateSchedule::Stepping) {
             Ok(s) => {
                 let pb = s.proof_bytes;
                 record_cell(

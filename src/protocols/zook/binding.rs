@@ -29,7 +29,7 @@ pub(super) struct MaskBinding<F: Field> {
 
 impl<F: Field> MaskBinding<F> {
     pub(super) fn evaluate(&self, config: &JointMaskConfig<F>, coefficients: &[F]) -> [F; 3] {
-        assert_eq!(coefficients.len(), config.commit().vector_size());
+        assert_eq!(coefficients.len(), config.commit.vector_size());
         [
             univariate_evaluate(coefficients, self.points[0]),
             membership_evaluate(config, coefficients, self.points[0]),
@@ -51,7 +51,7 @@ where
     R: RngCore + CryptoRng,
 {
     let point = binding_challenge(ps);
-    assert_eq!(coefficients.len(), config.commit().vector_size());
+    assert_eq!(coefficients.len(), config.commit.vector_size());
     let evaluation = univariate_evaluate(coefficients, point);
     let membership = membership_evaluate(config, coefficients, point);
     ps.prover_message(&evaluation);
@@ -104,8 +104,8 @@ where
 
 /// Evaluate the logical concatenation of the initial mask and membership blinder.
 fn membership_evaluate<F: Field>(config: &JointMaskConfig<F>, coefficients: &[F], point: F) -> F {
-    let initial = &coefficients[config.witness_masks()[0].clone()];
-    let blinder = &coefficients[config.basefield_blinder().clone()];
+    let initial = &coefficients[config.witness_masks[0].clone()];
+    let blinder = &coefficients[config.basefield_blinder.clone()];
     univariate_evaluate(initial, point)
         + point.pow([initial.len() as u64]) * univariate_evaluate(blinder, point)
 }
@@ -121,9 +121,7 @@ mod tests {
             fields::{Field64, Field64_2},
             linear_form::{Covector, Evaluate, UnivariateEvaluation},
         },
-        protocols::params::{
-            FoldingFactor, Mode, PowBudget, ProtocolConfig, RateSchedule, SecuritySpec, TuningSpec,
-        },
+        protocols::params::{Params, ProtocolConfig, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator, MockSponge},
     };
 
@@ -135,7 +133,7 @@ mod tests {
         [
             Covector::from(&UnivariateEvaluation::new(
                 point,
-                config.commit().vector_size(),
+                config.commit.vector_size(),
             )),
             membership_form(config, point),
             membership_form(config, Frobenius::new(source_degree).map(point)),
@@ -147,11 +145,11 @@ mod tests {
     /// The two ranges need not be adjacent in the joint commitment. Their weights
     /// use consecutive powers starting at one, independent of their stored offsets.
     fn membership_form<F: Field>(config: &JointMaskConfig<F>, point: F) -> Covector<F> {
-        let mut weights = vec![F::ZERO; config.commit().vector_size()];
+        let mut weights = vec![F::ZERO; config.commit.vector_size()];
         let mut power = F::ONE;
-        for index in config.witness_masks()[0]
+        for index in config.witness_masks[0]
             .clone()
-            .chain(config.basefield_blinder().clone())
+            .chain(config.basefield_blinder.clone())
         {
             weights[index] = power;
             power *= point;
@@ -160,17 +158,17 @@ mod tests {
     }
 
     fn config() -> ProtocolConfig<Basefield<Field64_2>> {
-        ProtocolConfig::derive(
-            SecuritySpec::new(80)
-                .with_mode(Mode::ZeroKnowledge)
-                .with_pow_budget(PowBudget::Forbidden),
-            TuningSpec {
-                vector_size: 4096,
-                starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
-                rate_schedule: RateSchedule::Stepping,
-            },
-        )
+        ProtocolConfig::derive(Params {
+            bits: 80,
+            zk: true,
+            regime: crate::protocols::params::DecodingRegime::Johnson,
+            pow: 0,
+            hash: crate::hash::BLAKE3,
+            size: 4096,
+            rate: 2,
+            folds: [2, 2],
+            schedule: RateSchedule::Stepping,
+        })
         .unwrap()
     }
 
@@ -178,8 +176,8 @@ mod tests {
     fn binding_resamples_zero_and_preserves_transcript_agreement() {
         let config = config();
         let layout = config.joint_masks().unwrap();
-        let mut coefficients = vec![Field64_2::ZERO; layout.commit().vector_size()];
-        coefficients[layout.basefield_blinder().start] = Field64_2::ONE;
+        let mut coefficients = vec![Field64_2::ZERO; layout.commit.vector_size()];
+        coefficients[layout.basefield_blinder.start] = Field64_2::ONE;
         let ds = DomainSeparator::protocol(&"zook-binding-test")
             .session(&"zero challenges")
             .instance(&Empty);
@@ -211,11 +209,11 @@ mod tests {
     fn membership_uses_logical_concatenation_not_storage_offsets() {
         let config = config();
         let layout = config.joint_masks().unwrap();
-        let initial = layout.witness_masks()[0].clone();
-        let blinder = layout.basefield_blinder().clone();
+        let initial = layout.witness_masks[0].clone();
+        let blinder = layout.basefield_blinder.clone();
         assert!(initial.start > 0);
         assert!(blinder.start > initial.end);
-        let coefficients: Vec<_> = (1..=layout.commit().vector_size())
+        let coefficients: Vec<_> = (1..=layout.commit.vector_size())
             .map(|index| Field64_2::from(index as u64))
             .collect();
         for point in [Field64_2::ZERO, Field64_2::ONE, Field64_2::from(7)] {
@@ -231,7 +229,7 @@ mod tests {
     fn compact_binding_matches_dense_forms() {
         let config = config();
         let layout = config.joint_masks().unwrap();
-        let coefficients: Vec<_> = (0..layout.commit().vector_size())
+        let coefficients: Vec<_> = (0..layout.commit.vector_size())
             .map(|i| Field64_2::new(Field64::from(i as u64), Field64::from((i + 3) as u64)))
             .collect();
         for point in [
@@ -259,8 +257,8 @@ mod tests {
         let config = config();
         let layout = config.joint_masks().unwrap();
         let point = Field64_2::new(Field64::ONE, Field64::ONE);
-        let mut coefficients = vec![Field64_2::ZERO; layout.commit().vector_size()];
-        coefficients[layout.witness_masks()[0].start + 1] = Field64_2::ONE;
+        let mut coefficients = vec![Field64_2::ZERO; layout.commit.vector_size()];
+        coefficients[layout.witness_masks[0].start + 1] = Field64_2::ONE;
         let mut binding = MaskBinding {
             points: [point, point.frobenius_map(1)],
             values: [Field64_2::ZERO; 3],
@@ -271,7 +269,7 @@ mod tests {
 
         // A non-source-field constant leaves the first evaluation well-defined
         // but violates the Frobenius equation for the same committed vector.
-        coefficients[layout.witness_masks()[0].start] = point;
+        coefficients[layout.witness_masks[0].start] = point;
         let [_, value, conjugate] = binding.evaluate(layout, &coefficients);
         assert_ne!(conjugate, value.frobenius_map(1));
 
@@ -291,7 +289,7 @@ mod tests {
     fn false_evaluations_remain_unsatisfied_deferred_equations() {
         let config = config();
         let layout = config.joint_masks().unwrap();
-        let coefficients = vec![Field64_2::ONE; layout.commit().vector_size()];
+        let coefficients = vec![Field64_2::ONE; layout.commit.vector_size()];
         let ds = DomainSeparator::protocol(&"zook-binding-test")
             .session(&"false evaluations")
             .instance(&Empty);
@@ -321,7 +319,7 @@ mod tests {
     fn truncated_binding_message_is_rejected() {
         let config = config();
         let layout = config.joint_masks().unwrap();
-        let coefficients = vec![Field64_2::ONE; layout.commit().vector_size()];
+        let coefficients = vec![Field64_2::ONE; layout.commit.vector_size()];
         let ds = DomainSeparator::protocol(&"zook-binding-test")
             .session(&"truncated evaluation")
             .instance(&Empty);

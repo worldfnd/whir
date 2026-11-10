@@ -18,7 +18,7 @@ use crate::{
     protocols::{
         basecase::Opening,
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
-        params::{BasecasePlan, ProtocolConfig},
+        params::ProtocolConfig,
         zook::{
             commit::Commitment,
             round::{reduce_verifier, VerifierRoundState},
@@ -53,7 +53,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         Hash: ProverMessage<[H::U]>,
     {
         let reduced = reduce_verifier(self, vs, commitment, None, None, linear_forms, evaluations)?;
-        self.verify_final_opening(vs, reduced, self.tuning().vector_size)
+        self.verify_final_opening(vs, reduced, self.params().size)
     }
 
     pub(super) fn verify_final_opening<H>(
@@ -70,21 +70,19 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let opening = match self.basecase() {
-            BasecasePlan::Standard { config, .. } => {
-                assert!(state.masks.is_empty());
-                config.verify(vs, &state.irs, state.sum)?
+        let basecase = self.basecase();
+        let opening = if self.params().zk {
+            let (message, mut sum) = self.receive_final_claim(vs, &state)?;
+            let point = basecase.sumcheck().verify(vs, &mut sum)?.round_challenges;
+            let value = multilinear_extend(&message, &point);
+            verify!(!value.is_zero());
+            Opening {
+                evaluation_points: point,
+                linear_form_evaluation: sum / value,
             }
-            BasecasePlan::ZeroKnowledge { sumcheck, .. } => {
-                let (message, mut sum) = self.receive_final_claim(vs, &state)?;
-                let point = sumcheck.verify(vs, &mut sum)?.round_challenges;
-                let value = multilinear_extend(&message, &point);
-                verify!(!value.is_zero());
-                Opening {
-                    evaluation_points: point,
-                    linear_form_evaluation: sum / value,
-                }
-            }
+        } else {
+            assert!(state.masks.is_empty());
+            basecase.verify(vs, &state.irs, state.sum)?
         };
         Ok(state.kernel.finish(&opening, original_size))
     }
@@ -105,7 +103,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     {
         let layout = self.joint_masks().expect("final opening mask layout");
         assert!(!state.masks.is_empty());
-        let commit = self.basecase().commit();
+        let commit = self.final_commit();
         let witness_blind_commit = commit.receive_commitment(vs)?;
         let blind_sum: M::Target = vs.prover_message()?;
         let blind_binding: Vec<M::Target> = vs.prover_messages_vec(3 * state.masks.len())?;
@@ -113,7 +111,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let message = vs.prover_messages_vec(commit.vector_size())?;
         let mut mask_messages = Vec::with_capacity(state.masks.len());
         for _ in &state.masks {
-            mask_messages.push(vs.prover_messages_vec(layout.commit().vector_size())?);
+            mask_messages.push(vs.prover_messages_vec(layout.commit.vector_size())?);
         }
         verify_combination(
             commit,
@@ -124,7 +122,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         )?;
         // Keep the two columns of every mask root in the same query event.
         let roots: Vec<_> = state.masks.iter().map(|masks| &masks.joint).collect();
-        let evaluations = layout.commit().verify(vs, &roots)?;
+        let evaluations = layout.commit.verify(vs, &roots)?;
         for (collection, ((masks, mask_message), blind)) in state
             .masks
             .iter()
@@ -215,7 +213,7 @@ mod tests {
         },
         buffer::{Buffer, BufferMath, BufferOps},
         protocols::{
-            params::{FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec},
+            params::{Params, RateSchedule},
             zook::{commit::CommittedWitness, round::reduce_prover},
         },
         transcript::{codecs::Empty, DomainSeparator, ProverState},
@@ -255,17 +253,17 @@ mod tests {
         accept: bool,
     ) {
         for size in [8_usize, 4096] {
-            let config = ProtocolConfig::<Basefield<Field64_2>>::derive(
-                SecuritySpec::new(80)
-                    .with_mode(Mode::ZeroKnowledge)
-                    .with_pow_budget(PowBudget::Forbidden),
-                TuningSpec {
-                    vector_size: size,
-                    starting_log_inv_rate: 2,
-                    folding_factor: FoldingFactor::Constant(2),
-                    rate_schedule: RateSchedule::Stepping,
-                },
-            )
+            let config = ProtocolConfig::<Basefield<Field64_2>>::derive(Params {
+                bits: 80,
+                zk: true,
+                regime: crate::protocols::params::DecodingRegime::Johnson,
+                pow: 0,
+                hash: crate::hash::BLAKE3,
+                size,
+                rate: 2,
+                folds: [2, 2],
+                schedule: RateSchedule::Stepping,
+            })
             .unwrap();
             let mut rng = StdRng::seed_from_u64(102);
             let witness = Buffer::random(&mut rng, size);
@@ -363,19 +361,20 @@ mod tests {
         accept: bool,
     ) {
         let size = 4096;
-        let config = ProtocolConfig::<Basefield<Field64_2>>::derive(
-            SecuritySpec::new(80)
-                .with_mode(Mode::ZeroKnowledge)
-                .with_pow_budget(PowBudget::Forbidden),
-            TuningSpec {
-                vector_size: size,
-                starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
-                rate_schedule: RateSchedule::Stepping,
-            },
-        )
+        let config = ProtocolConfig::<Basefield<Field64_2>>::derive(Params {
+            bits: 80,
+            zk: true,
+            regime: crate::protocols::params::DecodingRegime::Johnson,
+            pow: 0,
+            hash: crate::hash::BLAKE3,
+            size,
+            rate: 2,
+            folds: [2, 2],
+            schedule: RateSchedule::Stepping,
+        })
         .unwrap();
-        let first = config.pair_round().unwrap();
+        let source = config.pair_source().unwrap();
+        let first = config.pair_round(&source).unwrap();
         let mut rng = StdRng::seed_from_u64(225);
         let left = Buffer::random(&mut rng, size);
         let right = Buffer::random(&mut rng, size);

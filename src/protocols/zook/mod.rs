@@ -11,7 +11,7 @@ pub mod verifier;
 use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};
 
-pub use crate::protocols::params::protocol_config::ProtocolConfig;
+pub use crate::protocols::params::ProtocolConfig;
 use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, verify};
 
 /// Output of [`ProtocolConfig::verify`].
@@ -97,9 +97,7 @@ mod tests {
         },
         buffer::{Buffer, BufferMath, BufferOps},
         hash,
-        protocols::params::spec::{
-            DecodingRegime, FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
-        },
+        protocols::params::{DecodingRegime, Params, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
     };
 
@@ -108,33 +106,17 @@ mod tests {
     type SmallF = Field64_2;
     type SmallEmbed = Identity<SmallF>;
 
-    fn small_spec(mode: Mode) -> SecuritySpec {
-        SecuritySpec {
-            mode,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: 40,
-            pow_budget: PowBudget::per_slot(10),
-            hash_id: hash::BLAKE3,
-        }
-    }
-
-    /// 2^12 witness: multiple rounds with enough room for overlaid masks.
-    fn multi_round_tuning() -> TuningSpec {
-        TuningSpec {
-            vector_size: 1 << 12,
-            starting_log_inv_rate: 1,
-            folding_factor: FoldingFactor::Constant(2),
-            rate_schedule: RateSchedule::Stepping,
-        }
-    }
-
-    /// 2^3 witness → basecase-only (too small for any round).
-    fn basecase_tuning() -> TuningSpec {
-        TuningSpec {
-            vector_size: 1 << 3,
-            starting_log_inv_rate: 1,
-            folding_factor: FoldingFactor::Constant(2),
-            rate_schedule: RateSchedule::Stepping,
+    fn small_params(zk: bool, size: usize) -> Params {
+        Params {
+            zk,
+            regime: DecodingRegime::Johnson,
+            bits: 40,
+            pow: 10,
+            hash: hash::BLAKE3,
+            size,
+            rate: 1,
+            folds: [2, 2],
+            schedule: RateSchedule::Stepping,
         }
     }
 
@@ -168,8 +150,8 @@ mod tests {
     ) -> Proven {
         let embedding = <SmallEmbed as Default>::default();
         let mut rng = StdRng::seed_from_u64(seed);
-        let witness = Buffer::<SmallF>::random(&mut rng, config.tuning().vector_size);
-        let mu = config.tuning().vector_size.trailing_zeros() as usize;
+        let witness = Buffer::<SmallF>::random(&mut rng, config.params().size);
+        let mu = config.params().size.trailing_zeros() as usize;
 
         let forms: Vec<MultilinearExtension<SmallF>> = (0..num_claims)
             .map(|_| MultilinearExtension {
@@ -258,8 +240,8 @@ mod tests {
     ) {
         let embedding = <MixedEmbed as Default>::default();
         let mut rng = StdRng::seed_from_u64(seed);
-        let witness = Buffer::<MixedSource>::random(&mut rng, config.tuning().vector_size);
-        let mu = config.tuning().vector_size.trailing_zeros() as usize;
+        let witness = Buffer::<MixedSource>::random(&mut rng, config.params().size);
+        let mu = config.params().size.trailing_zeros() as usize;
 
         let forms: Vec<MultilinearExtension<MixedField>> = (0..num_claims)
             .map(|_| MultilinearExtension {
@@ -304,79 +286,55 @@ mod tests {
 
     #[test]
     fn roundtrip_zk_with_rounds() {
-        let config = ProtocolConfig::<SmallEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(true, 1 << 12)).unwrap();
         assert!(config.has_rounds(), "expected at least one round");
         full_roundtrip(&config, 1, 0, "roundtrip_zk_with_rounds");
     }
 
     #[test]
     fn roundtrip_standard_with_rounds() {
-        let config =
-            ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
-                .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(false, 1 << 12)).unwrap();
         assert!(config.has_rounds(), "expected at least one round");
         full_roundtrip(&config, 1, 1, "roundtrip_standard_with_rounds");
     }
 
     #[test]
     fn roundtrip_standard_with_rounds_basefield() {
-        let config =
-            ProtocolConfig::<MixedEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
-                .unwrap();
+        let config = ProtocolConfig::<MixedEmbed>::derive(small_params(false, 1 << 12)).unwrap();
         assert!(config.has_rounds(), "expected at least one round");
         full_roundtrip_mixed(&config, 1, 10, "roundtrip_standard_with_rounds_basefield");
     }
 
     #[test]
     fn roundtrip_zk_with_rounds_basefield() {
-        let config = ProtocolConfig::<MixedEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<MixedEmbed>::derive(small_params(true, 1 << 12)).unwrap();
         assert!(config.has_rounds(), "expected at least one round");
         full_roundtrip_mixed(&config, 3, 11, "roundtrip_zk_with_rounds_basefield");
     }
 
     #[test]
     fn roundtrip_zk_basecase_only() {
-        let config = ProtocolConfig::<SmallEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            basecase_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(true, 1 << 3)).unwrap();
         assert!(!config.has_rounds(), "expected basecase-only plan");
         full_roundtrip(&config, 1, 2, "roundtrip_zk_basecase_only");
     }
 
     #[test]
     fn roundtrip_standard_basecase_only() {
-        let config =
-            ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), basecase_tuning())
-                .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(false, 1 << 3)).unwrap();
         assert!(!config.has_rounds(), "expected basecase-only plan");
         full_roundtrip(&config, 1, 3, "roundtrip_standard_basecase_only");
     }
 
     #[test]
     fn roundtrip_multiple_claims_zk() {
-        let config = ProtocolConfig::<SmallEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(true, 1 << 12)).unwrap();
         full_roundtrip(&config, 4, 4, "roundtrip_multiple_claims_zk");
     }
 
     #[test]
     fn roundtrip_multiple_claims_standard() {
-        let config =
-            ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
-                .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(false, 1 << 12)).unwrap();
         full_roundtrip(&config, 4, 5, "roundtrip_multiple_claims_standard");
     }
 
@@ -385,12 +343,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "linear_forms.len() != evaluations.len()")]
     fn prove_rejects_form_evaluation_count_mismatch() {
-        let config =
-            ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
-                .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(false, 1 << 12)).unwrap();
         let mut rng = StdRng::seed_from_u64(0);
-        let witness = Buffer::<SmallF>::random(&mut rng, config.tuning().vector_size);
-        let mu = config.tuning().vector_size.trailing_zeros() as usize;
+        let witness = Buffer::<SmallF>::random(&mut rng, config.params().size);
+        let mu = config.params().size.trailing_zeros() as usize;
         let form: MultilinearExtension<SmallF> = MultilinearExtension {
             point: random_vector(&mut rng, mu),
         };
@@ -411,11 +367,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "zook requires ≥ 1")]
     fn prove_rejects_empty_forms() {
-        let config =
-            ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
-                .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(false, 1 << 12)).unwrap();
         let mut rng = StdRng::seed_from_u64(0);
-        let witness = Buffer::<SmallF>::random(&mut rng, config.tuning().vector_size);
+        let witness = Buffer::<SmallF>::random(&mut rng, config.params().size);
         let ds = DomainSeparator::protocol(&"zook-test")
             .session(&"empty-forms".to_string())
             .instance(&Empty);
@@ -429,11 +383,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_evaluation_zk() {
-        let config = ProtocolConfig::<SmallEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(true, 1 << 12)).unwrap();
         let Proven {
             proof,
             ds,
@@ -458,9 +408,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_evaluation_standard() {
-        let config =
-            ProtocolConfig::<SmallEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
-                .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(false, 1 << 12)).unwrap();
         let Proven {
             proof,
             ds,
@@ -484,11 +432,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_evaluation_multiple_claims() {
-        let config = ProtocolConfig::<SmallEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(true, 1 << 12)).unwrap();
         let Proven {
             proof,
             ds,
@@ -520,11 +464,7 @@ mod tests {
     fn final_claim_rejects_wrong_form() {
         // Correct proof + correct verify, but FinalClaim::verify called with a
         // different form → must be detected.
-        let config = ProtocolConfig::<SmallEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(true, 1 << 12)).unwrap();
         let Proven {
             proof,
             ds,
@@ -544,7 +484,7 @@ mod tests {
 
         // Construct a different form at a different evaluation point
         let mut rng = StdRng::seed_from_u64(999);
-        let mu = config.tuning().vector_size.trailing_zeros() as usize;
+        let mu = config.params().size.trailing_zeros() as usize;
         let wrong_form: MultilinearExtension<SmallF> = MultilinearExtension {
             point: random_vector(&mut rng, mu),
         };
@@ -556,11 +496,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_tampered_proof() {
-        let config = ProtocolConfig::<SmallEmbed>::derive(
-            small_spec(Mode::ZeroKnowledge),
-            multi_round_tuning(),
-        )
-        .unwrap();
+        let config = ProtocolConfig::<SmallEmbed>::derive(small_params(true, 1 << 12)).unwrap();
         let Proven {
             mut proof,
             ds,
@@ -592,36 +528,22 @@ mod tests {
     type LargeF = Field256;
     type LargeEmbed = Identity<LargeF>;
 
-    fn large_spec(mode: Mode) -> SecuritySpec {
-        SecuritySpec {
-            mode,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: 128,
-            pow_budget: PowBudget::per_slot(10),
-            hash_id: hash::SHA2,
-        }
-    }
-
-    fn large_tuning() -> TuningSpec {
-        TuningSpec {
-            vector_size: 1 << 19,
-            starting_log_inv_rate: 2,
-            folding_factor: FoldingFactor::ConstantFromSecondRound {
-                initial: 3,
-                rest: 3,
-            },
-            rate_schedule: RateSchedule::Stepping,
-        }
-    }
-
-    fn large_roundtrip(mode: Mode, seed: u64) {
+    fn large_roundtrip(mode: bool, seed: u64) {
         crate::tests::init();
-        let config =
-            ProtocolConfig::<LargeEmbed>::derive(large_spec(mode), large_tuning()).unwrap();
+        let config = ProtocolConfig::<LargeEmbed>::derive(Params {
+            zk: mode,
+            bits: 128,
+            hash: hash::SHA2,
+            size: 1 << 19,
+            rate: 2,
+            folds: [3, 3],
+            ..small_params(mode, 1 << 19)
+        })
+        .unwrap();
 
         let mut rng = StdRng::seed_from_u64(seed);
-        let witness = Buffer::<LargeF>::random(&mut rng, config.tuning().vector_size);
-        let mu = config.tuning().vector_size.trailing_zeros() as usize;
+        let witness = Buffer::<LargeF>::random(&mut rng, config.params().size);
+        let mu = config.params().size.trailing_zeros() as usize;
         let embedding = <LargeEmbed as Default>::default();
 
         let forms: Vec<MultilinearExtension<LargeF>> = (0..3)
@@ -657,11 +579,11 @@ mod tests {
 
     #[test]
     fn roundtrip_2_pow_20_three_claims_zk() {
-        large_roundtrip(Mode::ZeroKnowledge, 0);
+        large_roundtrip(true, 0);
     }
 
     #[test]
     fn roundtrip_2_pow_20_three_claims_standard() {
-        large_roundtrip(Mode::Standard, 1);
+        large_roundtrip(false, 1);
     }
 }

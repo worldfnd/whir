@@ -17,7 +17,7 @@ use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
     buffer::BufferOps,
     hash::Hash,
-    protocols::params::RoundConfig,
+    protocols::{irs_commit::Config as IrsConfig, params::RoundConfig},
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerificationError, VerificationResult, VerifierState,
@@ -30,20 +30,21 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Bounds retain the configured per-step target; the pair adds a selector
     /// step and a second initial mask-binding event to the protocol's union bound.
     pub fn validate_pair(&self) -> VerificationResult<()> {
-        self.pair_round().map(|_| ())
+        self.pair_round(&self.pair_source()?).map(|_| ())
     }
 
-    fn pair_opening_round(
-        &self,
+    fn pair_opening_round<'a>(
+        &'a self,
+        source: &'a IrsConfig<M>,
         forms: &[&dyn LinearForm<M::Target>],
         values: &[M::Target],
-    ) -> VerificationResult<RoundConfig<M>> {
-        let first = self.pair_round()?;
+    ) -> VerificationResult<RoundConfig<'a, M>> {
+        let first = self.pair_round(source)?;
         if forms.is_empty()
             || forms.len() != values.len()
             || forms
                 .iter()
-                .any(|form| form.size() != first.sumcheck().initial_size())
+                .any(|form| form.size() != first.sumcheck.initial_size())
         {
             return Err(VerificationError);
         }
@@ -71,11 +72,12 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let first = self.pair_opening_round(forms, values)?;
+        let source = self.pair_source()?;
+        let first = self.pair_opening_round(&source, forms, values)?;
         let source = self
             .first_round()
             .ok_or(VerificationError)?
-            .code_switch()
+            .code_switch
             .source();
         let binding = self.commitment_config_binding();
         if committed.iter().any(|w| {
@@ -87,10 +89,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                         && irs_witness.matrix_witness.num_nodes() == source.matrix_commit().merkle_tree.num_nodes());
             let masks_match = match (self.joint_masks(), &w.joint_masks, &w.mask_binding) {
                 (Some(layout), Some(masks), Some(_)) => {
-                    masks.coefficients.len() == layout.commit().vector_size()
-                        && masks.opening_blinder.len() == layout.commit().vector_size()
-                        && masks.irs_witness.matrix.len() == layout.commit().size()
-                        && masks.irs_witness.matrix_witness.num_nodes() == layout.commit().matrix_commit().merkle_tree.num_nodes()
+                    masks.coefficients.len() == layout.commit.vector_size()
+                        && masks.opening_blinder.len() == layout.commit.vector_size()
+                        && masks.irs_witness.matrix.len() == layout.commit.size()
+                        && masks.irs_witness.matrix_witness.num_nodes() == layout.commit.matrix_commit().merkle_tree.num_nodes()
                 }
                 (None, None, None) => true,
                 _ => false,
@@ -111,7 +113,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         ps.prover_messages(values);
         let [left, right] = committed;
         let reduced = reduce_prover(self, ps, left, Some(right), Some(&first), forms, values);
-        Ok(self.prove_final_opening(ps, reduced, first.sumcheck().initial_size()))
+        Ok(self.prove_final_opening(ps, reduced, first.sumcheck.initial_size()))
     }
 
     /// Verify a pair of independent, single-use commitments under this configuration.
@@ -133,7 +135,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let first = self.pair_opening_round(forms, values)?;
+        let source = self.pair_source()?;
+        let first = self.pair_opening_round(&source, forms, values)?;
         let expected_binding = self.commitment_config_binding();
         if commitments
             .iter()
@@ -163,6 +166,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         }
         let [left, right] = commitments;
         let reduced = reduce_verifier(self, vs, left, Some(right), Some(&first), forms, values)?;
-        self.verify_final_opening(vs, reduced, first.sumcheck().initial_size())
+        self.verify_final_opening(vs, reduced, first.sumcheck.initial_size())
     }
 }

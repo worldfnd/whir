@@ -31,7 +31,7 @@ should_panic_without_expect = "allow"
 suboptimal_flops = "allow"
 similar_names = "allow"
 redundant_closure_for_method_calls = "allow"
-# uninhabited tag types (`Tagged` phantom params) and zerocopy derive expansions
+# zerocopy derive expansions
 empty_enums = "allow"
 
 [dependencies]
