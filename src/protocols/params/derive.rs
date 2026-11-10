@@ -1,17 +1,11 @@
-//! Construct commitment dimensions, round bounds, and masks before proving.
-
+//! Construction and execution use the same bounds and mask dimensions.
+use ark_ff::Field;
+use security::{grind_to_at, rate, round_bits, usize_to_f64};
 use thiserror::Error;
 
 use super::{
-    embedding_degree,
-    masks::{mask_coefficients, solve as solve_joint_masks, WitnessMaskConfig},
-    search::plan_adaptive_rates,
-    security::{
-        code_switch_error_bits, grind_to_at, rate, revealed_sumcheck_error_bits,
-        sumcheck_error_bits, usize_to_f64, validate_zook_code,
-    },
-    DecodingRegime, Mode, Node, ProtocolConfig, ProtocolSpec, RateSchedule, RoundConfig,
-    RoundContext, SecuritySpec, TuningSpec,
+    embedding_degree, masks, require, search, security, DecodingRegime, Params, ProtocolConfig,
+    ProtocolSpec, RateSchedule, Result, RoundConfig, RoundContext, WitnessMaskConfig,
 };
 use crate::{
     algebra::{
@@ -20,71 +14,68 @@ use crate::{
     },
     bits::Bits,
     protocols::{
-        irs_commit::{CodewordLengthError, Config as IrsConfig, IrsMode, IrsParams},
-        proof_of_work::PowError,
+        code_switch::{CodeSwitchMode, Config as CodeSwitchConfig},
+        irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
+        sumcheck::{Config as SumcheckConfig, SumcheckMaskLen, SumcheckMode},
     },
     transcript::{VerificationError, VerificationResult},
+    type_info::Typed,
 };
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("{0}")]
+pub struct DeriveError(pub &'static str);
+
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    /// Derive a canonical commitment sequence before sampling prover randomness.
-    pub fn derive(spec: SecuritySpec, tuning: TuningSpec) -> Result<Self, DeriveError> {
-        if spec.mode.is_zk() && !matches!(spec.decoding_regime, DecodingRegime::Johnson) {
-            return Err(DeriveError::Invalid("Zook requires Johnson decoding"));
-        }
-        let layout = round_layout::<M>(&spec, &tuning)?;
+    pub fn derive(spec: Params) -> Result<Self> {
+        require(
+            !spec.zk || spec.regime == DecodingRegime::Johnson,
+            "Zook requires Johnson decoding",
+        )?;
+        let layout = round_layout::<M>(&spec)?;
+        Self::build(&spec, &layout)
+    }
+    pub(super) fn build(spec: &Params, layout: &[RoundContext]) -> Result<Self> {
         let has_rounds = layout.len() > 1;
-        let mut targets: Vec<Node<Identity<M::Target>>> = Vec::new();
-        for (index, context) in layout
+        let targets = layout
             .iter()
-            .enumerate()
             .skip(usize::from(has_rounds))
-            .rev()
-        {
-            let target = targets.last().map(|node| &node.code);
-            targets.push(solve_node(
-                &spec,
-                solve_irs(&spec, context)?,
-                target,
-                index,
-            )?);
-        }
-        targets.reverse();
-        let first = if has_rounds {
-            Some(solve_node(
-                &spec,
-                solve_irs::<M>(&spec, &layout[0])?,
-                Some(&targets[0].code),
-                0,
-            )?)
-        } else {
-            None
-        };
+            .map(|ctx| solve_irs(spec, ctx))
+            .collect::<Result<Vec<_>>>()?;
+        let first = has_rounds
+            .then(|| solve_irs::<M>(spec, &layout[0]))
+            .transpose()?;
         let mut config = Self {
             request: ProtocolSpec {
-                embedding: crate::type_info::Typed::new(M::default()),
-                security: spec,
-                tuning,
+                embedding: Typed::new(M::default()),
+                params: *spec,
             },
             first,
             targets,
             joint_masks: None,
         };
-        if config.security().mode.is_zk() {
-            let sumchecks = layout[..layout.len() - 1]
+        if let Some(first) = &config.first {
+            round(spec, first, &config.targets[0], 0)?;
+        }
+        for (index, codes) in config.targets.windows(2).enumerate() {
+            round(spec, &codes[0], &codes[1], index + 1)?;
+        }
+        let _ = terminal(spec, config.final_commit(), usize::from(has_rounds))?;
+        if spec.zk {
+            let sumchecks: Vec<_> = layout[..layout.len() - 1]
                 .iter()
-                .map(|context| mask_coefficients(context.folding_factor as usize))
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|ctx| 2 * ctx.folds as usize + 1)
+                .collect();
             let witnesses = (0..=config.num_rounds())
                 .map(|i| config.witness_mask(i).unwrap().num_coefficients())
-                .collect::<Result<Vec<_>, _>>()?;
-            let degree = if config.has_rounds() {
+                .collect::<Result<Vec<_>>>()?;
+            let degree = if has_rounds {
                 embedding_degree::<M>()?
             } else {
                 1
             };
-            config.joint_masks = Some(solve_joint_masks(
-                config.security(),
+            config.joint_masks = Some(masks::joint_code(
+                spec,
                 &sumchecks,
                 &witnesses,
                 config.final_commit(),
@@ -93,130 +84,159 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         }
         Ok(config)
     }
+    pub(crate) fn pair_source(&self) -> VerificationResult<IrsConfig<M>> {
+        if self.params().size != self.padded_vector_size()
+            || self.params().size.checked_mul(2).is_none()
+        {
+            return Err(VerificationError);
+        }
+        let first = self.first.as_ref().ok_or(VerificationError)?;
+        if let Some(joint) = self.joint_masks() {
+            if security::final_bits(self.final_commit(), &joint.commit)
+                .map(|bits| bits.0)
+                .map_err(|_| VerificationError)?
+                - Bits::new(1.0)
+                < Bits::new(f64::from(self.params().bits))
+            {
+                return Err(VerificationError);
+            }
+        }
+        first.joint_pair_source().ok_or(VerificationError)
+    }
+    pub(crate) fn pair_round<'a>(
+        &'a self,
+        source: &'a IrsConfig<M>,
+    ) -> VerificationResult<RoundConfig<'a, M>> {
+        self.first.as_ref().ok_or(VerificationError)?;
+        round(self.params(), source, &self.targets[0], 0).map_err(|_| VerificationError)
+    }
 }
 
-pub(super) fn solve_node<M: Embedding>(
-    spec: &SecuritySpec,
-    code: IrsConfig<M>,
-    target: Option<&IrsConfig<Identity<M::Target>>>,
+pub(super) fn round<'a, M: Embedding>(
+    spec: &Params,
+    source: &'a IrsConfig<M>,
+    target: &'a IrsConfig<Identity<M::Target>>,
     index: usize,
-) -> Result<Node<M>, DeriveError> {
-    if spec.mode.is_zk() {
-        WitnessMaskConfig::for_code(&code, usize::from(index != 0))?;
+) -> Result<RoundConfig<'a, M>> {
+    let zk = spec.zk;
+    let masks = zk
+        .then(|| WitnessMaskConfig::for_code(source, usize::from(index != 0)))
+        .transpose()?;
+    if zk {
+        WitnessMaskConfig::for_code(target, 1)?;
     }
-    let (analytic, event, switch) = if let Some(target) = target {
-        let ood = if spec.mode.is_zk() {
-            WitnessMaskConfig::for_code(target, 1)?;
-            1
-        } else {
-            solve_t_ood(spec, &code, target, index)?
-        };
-        let switch_pow = grind_to_at(
-            spec,
-            code_switch_error_bits(&code, target, ood, spec.mode.is_zk())?,
-            "code switch",
-        )?;
-        (
-            sumcheck_error_bits(&code, spec.mode.is_zk())?,
-            "sumcheck",
-            Some((ood, switch_pow)),
-        )
+    let ood = if zk {
+        1
     } else {
-        let analytic = if spec.mode.is_zk() {
-            validate_zook_code(&code, Some(1))?;
-            revealed_sumcheck_error_bits::<M::Target>()
-        } else {
-            sumcheck_error_bits(&code, false)?
-        };
-        (analytic, "final sumcheck", None)
+        solve_t_ood(spec, source, target)?
     };
-    Ok(Node {
-        code,
-        sumcheck_pow: grind_to_at(spec, analytic, event)?,
-        switch,
+    let (sumcheck, switch) = round_bits(source, Some(target), ood, zk)?;
+    let mode = if zk {
+        SumcheckMode::ZeroKnowledge {
+            mask_length: SumcheckMaskLen::new(3),
+        }
+    } else {
+        SumcheckMode::Standard
+    };
+    Ok(RoundConfig {
+        index,
+        masks,
+        sumcheck: SumcheckConfig::new(
+            source.vector_size(),
+            grind_to_at(spec, sumcheck, "sumcheck")?,
+            source.interleaving_depth().ilog2() as usize,
+            mode,
+        ),
+        code_switch: CodeSwitchConfig::new(
+            source,
+            target,
+            ood,
+            CodeSwitchMode::Standard,
+            grind_to_at(spec, switch.unwrap(), "code switch")?,
+        ),
     })
 }
+pub(super) fn terminal<F: Field>(
+    spec: &Params,
+    code: &IrsConfig<Identity<F>>,
+    incoming: usize,
+) -> Result<SumcheckConfig<F>> {
+    if spec.zk {
+        WitnessMaskConfig::for_code(code, incoming)?;
+    }
+    let (bits, _) = round_bits(code, None, 1, spec.zk)?;
+    Ok(SumcheckConfig::new(
+        code.vector_size(),
+        grind_to_at(spec, bits, "final sumcheck")?,
+        code.vector_size().ilog2() as usize,
+        SumcheckMode::Standard,
+    ))
+}
 
-fn round_layout<M: Embedding + Default>(
-    spec: &SecuritySpec,
-    tuning: &TuningSpec,
-) -> Result<Vec<RoundContext>, DeriveError> {
-    if !tuning.vector_size.is_power_of_two() {
-        return Err(DeriveError::Invalid("vector length must be a power of two"));
+fn round_layout<M: Embedding + Default>(spec: &Params) -> Result<Vec<RoundContext>> {
+    if !spec.size.is_power_of_two() {
+        return Err(DeriveError("vector length must be a power of two"));
     }
-    if tuning.folding_factor.contains(&0) {
-        return Err(DeriveError::Invalid("folding factors must be positive"));
+    if spec.folds.contains(&0) {
+        return Err(DeriveError("folding factors must be positive"));
     }
-    if tuning.starting_log_inv_rate == 0
-        || matches!(
-            tuning.rate_schedule,
-            RateSchedule::Capped {
-                max_log_inv_rate: 0
-            }
-        )
-    {
-        return Err(DeriveError::Invalid("inverse rates must be positive"));
+    if spec.rate == 0 || matches!(spec.schedule, RateSchedule::Capped(0)) {
+        return Err(DeriveError("inverse rates must be positive"));
     }
     let mut source = RoundContext {
-        vector_size: tuning.vector_size,
-        log_inv_rate: tuning.starting_log_inv_rate,
-        folding_factor: 0,
+        size: spec.size,
+        rate: spec.rate,
+        folds: 0,
     };
-    if spec.mode.is_zk() {
+    if spec.zk {
         while !mask_fits::<Identity<M::Target>>(spec, &source, 0)? {
-            source.vector_size = source
-                .vector_size
+            source.size = source
+                .size
                 .checked_mul(2)
-                .ok_or(DeriveError::SizeOverflow)?;
+                .ok_or(DeriveError("dimension overflow"))?;
         }
     }
     // An oversized initial fold selects the basecase, as in the original layout.
-    source.folding_factor = u32::try_from(tuning.folding_factor[0]).unwrap_or(u32::MAX);
+    source.folds = u32::try_from(spec.folds[0]).unwrap_or(u32::MAX);
     let mut layout = Vec::new();
-    while let Some(remaining) =
-        (source.vector_size.ilog2() as usize).checked_sub(source.folding_factor as usize)
-    {
-        let next_folding = tuning.folding_factor[1];
-        if !spec.mode.is_zk() && remaining < next_folding {
+    while let Some(remaining) = (source.size.ilog2() as usize).checked_sub(source.folds as usize) {
+        let next_folding = spec.folds[1];
+        if !spec.zk && remaining < next_folding {
             break;
         }
         let mut target = RoundContext {
-            vector_size: 1usize << remaining,
-            log_inv_rate: tuning
-                .rate_schedule
-                .step(source.log_inv_rate, source.folding_factor),
-            folding_factor: u32::try_from(next_folding).map_err(|_| DeriveError::SizeOverflow)?,
+            size: 1usize << remaining,
+            rate: spec.schedule.step(source.rate, source.folds),
+            folds: u32::try_from(next_folding).map_err(|_| DeriveError("dimension overflow"))?,
         };
-        if spec.mode.is_zk() {
+        if spec.zk {
             let fits = if layout.is_empty() {
                 mask_fits::<M>(spec, &source, 0)?
             } else {
                 mask_fits::<Identity<M::Target>>(spec, &source, 1)?
             };
-            let final_code = RoundContext {
-                folding_factor: 0,
-                ..target
-            };
+            let final_code = RoundContext { folds: 0, ..target };
             if !fits || !mask_fits::<Identity<M::Target>>(spec, &final_code, 1)? {
                 break;
             }
             if remaining < next_folding || !mask_fits::<Identity<M::Target>>(spec, &target, 1)? {
-                target.folding_factor = 0;
+                target.folds = 0;
             }
         }
         layout.push(source);
         source = target;
-        if source.folding_factor == 0 {
+        if source.folds == 0 {
             break;
         }
     }
-    source.folding_factor = 0;
+    source.folds = 0;
     layout.push(source);
-    if let RateSchedule::Adaptive { knee_weight } = tuning.rate_schedule {
+    if let RateSchedule::Adaptive(knee_weight) = spec.schedule {
         if layout.len() > 1 {
-            let rates = plan_adaptive_rates::<M>(spec, tuning, knee_weight, &layout)?;
+            let rates =
+                search::plan_adaptive_rates::<M>(spec, knee_weight.0.into_inner(), &layout)?;
             for (context, rate) in layout.iter_mut().skip(1).zip(rates) {
-                context.log_inv_rate = rate;
+                context.rate = rate;
             }
         }
     }
@@ -224,156 +244,74 @@ fn round_layout<M: Embedding + Default>(
 }
 
 fn mask_fits<M: Embedding + Default>(
-    spec: &SecuritySpec,
+    spec: &Params,
     context: &RoundContext,
     incoming: usize,
-) -> Result<bool, DeriveError> {
+) -> Result<bool> {
     match WitnessMaskConfig::for_code(&solve_irs::<M>(spec, context)?, incoming) {
         Ok(_) => Ok(true),
-        Err(DeriveError::MaskDoesNotFit { .. }) => Ok(false),
+        Err(DeriveError("mask does not fit")) => Ok(false),
         Err(error) => Err(error),
     }
 }
 
-const T_OOD_MAX_ITER: usize = 32;
-
 /// Standard WHIR can repeat DEEP samples to reach its analytic target.
 pub(super) fn solve_t_ood<M: Embedding>(
-    spec: &SecuritySpec,
+    spec: &Params,
     source: &IrsConfig<M>,
     target: &IrsConfig<Identity<M::Target>>,
-    round_index: usize,
-) -> Result<usize, DeriveError> {
-    if matches!(spec.decoding_regime, DecodingRegime::Unique) {
+) -> Result<usize> {
+    if matches!(spec.regime, DecodingRegime::Unique) {
         return Ok(1);
     }
-    let security_target = f64::from(spec.protocol_security_target_bits());
+    let security_target = f64::from(spec.bits.saturating_sub(spec.pow));
     let per_sample = M::Target::field_size_bits() - usize_to_f64(source.message_length()).log2();
     let list_bits = target.list_size().log2();
-    (1..=T_OOD_MAX_ITER)
+    (1..=32)
         .find(|&t| usize_to_f64(t) * per_sample - 2.0 * list_bits + 1.0 >= security_target)
-        .ok_or(DeriveError::FixedPointDidNotConverge { round_index })
+        .ok_or(DeriveError("DEEP sample bound exceeds 32"))
 }
 
 /// Encode the supplied vector without appending randomness.
 pub(super) fn solve_irs<M: Embedding + Default>(
-    spec: &SecuritySpec,
+    spec: &Params,
     ctx: &RoundContext,
-) -> Result<IrsConfig<M>, DeriveError> {
+) -> Result<IrsConfig<M>> {
     solve_with_num_vectors(spec, ctx, 1)
 }
 
 /// Encode equal-length vectors in one commitment with shared query paths.
 pub(super) fn solve_with_num_vectors<M: Embedding + Default>(
-    spec: &SecuritySpec,
+    spec: &Params,
     ctx: &RoundContext,
     num_vectors: usize,
-) -> Result<IrsConfig<M>, DeriveError> {
+) -> Result<IrsConfig<M>> {
     let depth = 1_usize
-        .checked_shl(ctx.folding_factor)
-        .ok_or(DeriveError::SizeOverflow)?;
-    if ctx.vector_size == 0 || !ctx.vector_size.is_multiple_of(depth) {
-        return Err(DeriveError::InvalidMaskLayout);
+        .checked_shl(ctx.folds)
+        .ok_or(DeriveError("dimension overflow"))?;
+    if ctx.size == 0 || !ctx.size.is_multiple_of(depth) {
+        return Err(DeriveError("invalid code dimensions"));
     }
-    let rate = rate(f64::from(ctx.log_inv_rate));
+    let rate = rate(f64::from(ctx.rate));
     if rate == 0.0 {
-        return Err(DeriveError::SizeOverflow);
+        return Err(DeriveError("dimension overflow"));
     }
     // Zook query steps sum two error terms; reserve half the error budget
     // for the in-domain term. No grinding credit is used for these IOP bounds.
-    let security_target = match spec.mode {
-        Mode::Standard => f64::from(spec.protocol_security_target_bits()),
-        Mode::ZeroKnowledge => f64::from(spec.target_security_bits) + 1.0,
+    let security_target = if spec.zk {
+        f64::from(spec.bits) + 1.0
+    } else {
+        f64::from(spec.bits.saturating_sub(spec.pow))
     };
-    Ok(IrsConfig::try_new(IrsParams {
+    IrsConfig::try_new(IrsParams {
         security_target,
-        decoding_regime: spec.decoding_regime,
-        hash_id: spec.hash_id,
+        decoding_regime: spec.regime,
+        hash_id: spec.hash,
         num_vectors,
-        vector_size: ctx.vector_size,
+        vector_size: ctx.size,
         interleaving_depth: depth,
         rate,
         mode: IrsMode::Standard,
-    })?)
-}
-
-impl<M: Embedding + Default> ProtocolConfig<M> {
-    pub(crate) fn pair_source(&self) -> VerificationResult<Node<M>> {
-        if self.tuning().vector_size != self.padded_vector_size()
-            || self.tuning().vector_size.checked_mul(2).is_none()
-        {
-            return Err(VerificationError);
-        }
-        let first = self.first_round().ok_or(VerificationError)?;
-        if let Some(joint) = self.joint_masks() {
-            // Two initial mask-binding events share this error budget.
-            if super::security::zook_mask_binding_bits(&joint.commit)
-                .map_err(|_| VerificationError)?
-                - Bits::new(1.0)
-                < Bits::new(f64::from(self.security().target_security_bits))
-            {
-                return Err(VerificationError);
-            }
-        }
-        // The tuple code retains degree, rate, distance, and list size.
-        let source = first
-            .code_switch
-            .source()
-            .joint_pair_source()
-            .ok_or(VerificationError)?;
-        solve_node(self.security(), source, Some(first.code_switch.target()), 0)
-            .map_err(|_| VerificationError)
-    }
-
-    pub(crate) fn pair_round<'a>(
-        &'a self,
-        node: &'a Node<M>,
-    ) -> VerificationResult<RoundConfig<'a, M>> {
-        let first = self.first_round().ok_or(VerificationError)?;
-        Ok(node.round(first.code_switch.target(), 0, self.security().mode.is_zk()))
-    }
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum DeriveError {
-    #[error("{0}")]
-    Invalid(&'static str),
-    #[error("protocol dimensions overflow usize")]
-    SizeOverflow,
-    #[error("mask requires {required} coefficients, polynomial has {available}")]
-    MaskDoesNotFit { required: usize, available: usize },
-    #[error("invalid joint-mask layout")]
-    InvalidMaskLayout,
-    #[error("t_ood fixed-point did not converge for round {round_index}")]
-    FixedPointDidNotConverge { round_index: usize },
-    #[error("{pow} cannot be ground: {source}")]
-    PowUngrindable {
-        pow: &'static str,
-        #[source]
-        source: PowError,
-    },
-    #[error("{pow} requires {required} bits, exceeds pow_budget = {max}")]
-    PowBudgetExceeded {
-        pow: &'static str,
-        required: Bits,
-        max: Bits,
-    },
-    #[error("codeword length {length} exceeds the NTT engine's supported order")]
-    CodewordExceedsNtt { length: usize },
-    #[error("{pow} soundness gap: analytic {analytic} < target {target}")]
-    SecurityTargetNotMet {
-        pow: &'static str,
-        analytic: Bits,
-        target: Bits,
-    },
-    #[error("adaptive rate planner found no feasible schedule")]
-    AdaptiveNoFeasibleSchedule,
-}
-
-impl From<CodewordLengthError> for DeriveError {
-    fn from(error: CodewordLengthError) -> Self {
-        Self::CodewordExceedsNtt {
-            length: error.length,
-        }
-    }
+    })
+    .map_err(|_| DeriveError("codeword exceeds NTT order"))
 }

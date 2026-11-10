@@ -1,13 +1,12 @@
-//! Enumerate feasible rate schedules, then select a weighted Pareto knee.
+//! Enumerate feasible schedules with cached shared protocol construction.
 
 use std::collections::HashMap;
 
 use super::{
-    derive::{solve_irs, solve_node},
+    derive::{round, solve_irs, terminal},
     embedding_degree,
-    masks::{solve_commit, WitnessMaskConfig},
-    security::{zook_final_opening_bits, zook_mask_binding_bits},
-    DeriveError, KneeWeight, RoundContext, SecuritySpec, TuningSpec,
+    masks::{checked_code, WitnessMaskConfig},
+    DeriveError, Params, RoundContext,
 };
 use crate::{
     algebra::{
@@ -17,13 +16,10 @@ use crate::{
     protocols::irs_commit::Config as IrsConfig,
 };
 
-// Search limits are tuning choices; every candidate still passes protocol bounds.
-const ADAPTIVE_MAX_LOG_INV_RATE: u32 = 20;
 // Setup cost per encode call, calibrated from Apple Silicon traces.
 const ENCODE_FIXED_OVERHEAD: f64 = 4096.0;
-
-// [encoding work, proof bytes]. Keep each addition in protocol order.
 type Cost = [f64; 2];
+// Separate terminal and mask costs preserve the original addition order.
 type FinalCosts = (Cost, Option<Cost>);
 fn code_cost<M: Embedding>(code: &IrsConfig<M>) -> Cost {
     let n = code.codeword_length() as f64;
@@ -37,9 +33,8 @@ fn code_cost<M: Embedding>(code: &IrsConfig<M>) -> Cost {
 }
 
 pub(super) fn plan_adaptive_rates<M: Embedding + Default>(
-    spec: &SecuritySpec,
-    tuning: &TuningSpec,
-    weight: KneeWeight,
+    spec: &Params,
+    weight: f64,
     layout: &[RoundContext],
 ) -> Result<Vec<u32>, DeriveError> {
     let mut planner = Planner {
@@ -48,27 +43,28 @@ pub(super) fn plan_adaptive_rates<M: Embedding + Default>(
         rounds: HashMap::new(),
         finals: HashMap::new(),
         path: Vec::new(),
-        candidates: Vec::new(),
+        frontier: Vec::new(),
     };
-    planner.visit::<M>(tuning.starting_log_inv_rate, [0.0; 2], 0);
-    pick_knee(pareto_frontier(planner.candidates), weight.get())
-        .ok_or(DeriveError::AdaptiveNoFeasibleSchedule)
+    planner.visit::<M>(spec.rate, [0.0; 2], 0);
+    pick_knee(planner.frontier, weight).ok_or(DeriveError(
+        "adaptive rate planner found no feasible schedule",
+    ))
 }
 
 struct Planner<'a> {
-    spec: &'a SecuritySpec,
+    spec: &'a Params,
     layout: &'a [RoundContext],
     rounds: HashMap<(usize, u32, u32), Option<(Cost, usize)>>,
     finals: HashMap<(u32, usize), Option<FinalCosts>>,
     path: Vec<u32>,
-    candidates: Vec<(Vec<u32>, Cost)>,
+    frontier: Vec<(Vec<u32>, Cost)>,
 }
 impl Planner<'_> {
     fn visit<M: Embedding + Default>(&mut self, rate: u32, cost: Cost, masks: usize) {
         let add = |a: Cost, b: Cost| [a[0] + b[0], a[1] + b[1]];
         let index = self.path.len();
         let source = RoundContext {
-            log_inv_rate: rate,
+            rate,
             ..self.layout[index]
         };
         if index + 1 == self.layout.len() {
@@ -77,22 +73,25 @@ impl Planner<'_> {
             });
             if let Some((basecase, masks)) = final_cost {
                 let cost = add(cost, basecase);
-                self.candidates.push((
-                    self.path.clone(),
-                    masks.map_or(cost, |mask| add(cost, mask)),
-                ));
+                let cost = masks.map_or(cost, |mask| add(cost, mask));
+                let dominates =
+                    |a: Cost, b: Cost| a[0] <= b[0] && a[1] <= b[1] && (a[0] < b[0] || a[1] < b[1]);
+                if !self
+                    .frontier
+                    .iter()
+                    .any(|(_, other)| dominates(*other, cost))
+                {
+                    self.frontier.retain(|(_, other)| !dominates(cost, *other));
+                    self.frontier.push((self.path.clone(), cost));
+                }
             }
             return;
         }
-        // Search up to twice WHIR's canonical rate increment.
-        let max_step = source.folding_factor.saturating_sub(1).saturating_mul(2);
-        for delta in 0..=max_step {
-            let next = rate.saturating_add(delta);
-            if next > ADAPTIVE_MAX_LOG_INV_RATE {
-                break;
-            }
+        // Search up to twice WHIR's canonical increment, in ascending order.
+        let end = rate.saturating_add(source.folds.saturating_sub(1).saturating_mul(2));
+        for next in rate..=end.min(20) {
             let target = RoundContext {
-                log_inv_rate: next,
+                rate: next,
                 ..self.layout[index + 1]
             };
             let round = *self.rounds.entry((index, rate, next)).or_insert_with(|| {
@@ -116,40 +115,37 @@ impl Planner<'_> {
 }
 
 fn round_cost<M: Embedding + Default>(
-    spec: &SecuritySpec,
+    spec: &Params,
     source: &RoundContext,
     target: &RoundContext,
     index: usize,
 ) -> Option<(Cost, usize)> {
     let source = solve_irs::<M>(spec, source).ok()?;
     let target = solve_irs(spec, target).ok()?;
-    let node = solve_node(spec, source, Some(&target), index).ok()?;
-    let masks = node.round(&target, index, spec.mode.is_zk()).masks;
-    let masks = masks.map_or(Some(0), |masks| {
-        masks
-            .witness
-            .num_coefficients()
+    let round = round(spec, &source, &target, index).ok()?;
+    let masks = round.masks.map_or(Some(0), |mask| {
+        mask.num_coefficients()
             .ok()?
-            .checked_add(masks.sumcheck_coefficients)
+            .checked_add(2 * round.sumcheck.num_rounds() + 1)
     })?;
     Some((code_cost(&target), masks))
 }
 
 fn terminal_cost<M: Embedding + Default>(
-    spec: &SecuritySpec,
+    spec: &Params,
     context: &RoundContext,
     incoming: usize,
     masks: usize,
 ) -> Option<FinalCosts> {
     let code = solve_irs::<Identity<M::Target>>(spec, context).ok()?;
-    let node = solve_node(spec, code, None, incoming).ok()?;
-    let cost = code_cost(&node.code);
-    if !spec.mode.is_zk() {
+    let _ = terminal(spec, &code, incoming).ok()?;
+    let cost = code_cost(&code);
+    if !spec.zk {
         return Some((cost, None));
     }
     let payload = masks.checked_add(
-        WitnessMaskConfig::for_code(&node.code, incoming)
-            .and_then(|mask| mask.num_coefficients())
+        WitnessMaskConfig::for_code(&code, incoming)
+            .and_then(WitnessMaskConfig::num_coefficients)
             .ok()?,
     )?;
     let degree = if incoming == 0 {
@@ -157,32 +153,10 @@ fn terminal_cost<M: Embedding + Default>(
     } else {
         embedding_degree::<M>().ok()?
     };
-    let masks = solve_commit::<M::Target>(spec, payload, degree).ok()?;
-    let binding = zook_mask_binding_bits(&masks).ok()?;
-    let (combination, queries) = zook_final_opening_bits(&node.code, &masks).ok()?;
-    if [binding, combination, queries]
-        .into_iter()
-        .any(|bits| f64::from(bits) < f64::from(spec.target_security_bits))
-    {
-        return None;
-    }
+    let masks = checked_code(spec, payload, degree, &code).ok()?;
     let mut mask_cost = code_cost(&masks);
     mask_cost[1] += masks.vector_size() as f64 * (M::Target::field_size_bits() / 8.0);
     Some((cost, Some(mask_cost)))
-}
-
-// Preserve enumeration order and equal-cost ties.
-fn pareto_frontier(candidates: Vec<(Vec<u32>, Cost)>) -> Vec<(Vec<u32>, Cost)> {
-    let dominates = |a: Cost, b: Cost| a[0] <= b[0] && a[1] <= b[1] && (a[0] < b[0] || a[1] < b[1]);
-    let mut frontier: Vec<(Vec<u32>, Cost)> = Vec::new();
-    for (rates, cost) in candidates {
-        if frontier.iter().any(|(_, other)| dominates(*other, cost)) {
-            continue;
-        }
-        frontier.retain(|(_, other)| !dominates(cost, *other));
-        frontier.push((rates, cost));
-    }
-    frontier
 }
 
 // Weighted distance from per-axis minima in log space; equal scores keep enumeration order.
@@ -208,7 +182,7 @@ fn pick_knee(frontier: Vec<(Vec<u32>, Cost)>, weight: f64) -> Option<Vec<u32>> {
 mod tests {
     use super::*;
     use crate::{
-        algebra::fields::Field64_2,
+        algebra::{embedding::Identity, fields::Field64_2},
         protocols::params::tests::{assert_close, code},
     };
 

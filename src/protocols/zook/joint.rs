@@ -17,7 +17,7 @@ use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
     buffer::BufferOps,
     hash::Hash,
-    protocols::params::{Node, RoundConfig},
+    protocols::{irs_commit::Config as IrsConfig, params::RoundConfig},
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerificationError, VerificationResult, VerifierState,
@@ -35,7 +35,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
 
     fn pair_opening_round<'a>(
         &'a self,
-        source: &'a Node<M>,
+        source: &'a IrsConfig<M>,
         forms: &[&dyn LinearForm<M::Target>],
         values: &[M::Target],
     ) -> VerificationResult<RoundConfig<'a, M>> {
@@ -89,10 +89,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                         && irs_witness.matrix_witness.num_nodes() == source.matrix_commit().merkle_tree.num_nodes());
             let masks_match = match (self.joint_masks(), &w.joint_masks, &w.mask_binding) {
                 (Some(layout), Some(masks), Some(_)) => {
-                    masks.coefficients.len() == layout.commit().vector_size()
-                        && masks.opening_blinder.len() == layout.commit().vector_size()
-                        && masks.irs_witness.matrix.len() == layout.commit().size()
-                        && masks.irs_witness.matrix_witness.num_nodes() == layout.commit().matrix_commit().merkle_tree.num_nodes()
+                    masks.coefficients.len() == layout.commit.vector_size()
+                        && masks.opening_blinder.len() == layout.commit.vector_size()
+                        && masks.irs_witness.matrix.len() == layout.commit.size()
+                        && masks.irs_witness.matrix_witness.num_nodes() == layout.commit.matrix_commit().merkle_tree.num_nodes()
                 }
                 (None, None, None) => true,
                 _ => false,

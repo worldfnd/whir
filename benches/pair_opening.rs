@@ -13,7 +13,7 @@ use whir::{
         random_vector,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    protocols::params::{Mode, ProtocolConfig, RateSchedule, SecuritySpec, TuningSpec},
+    protocols::params::{Params, ProtocolConfig, RateSchedule},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -24,19 +24,17 @@ where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
 {
     let size = 1 << log_size;
-    let config = ProtocolConfig::<M>::derive(
-        SecuritySpec::new(128)
-            .with_mode(Mode::ZeroKnowledge)
-            .with_pow_budget(0),
-        TuningSpec {
-            vector_size: size,
-            starting_log_inv_rate: 2,
-            folding_factor: [4, 4],
-            rate_schedule: RateSchedule::Capped {
-                max_log_inv_rate: 4,
-            },
-        },
-    )
+    let config = ProtocolConfig::<M>::derive(Params {
+        bits: 128,
+        zk: true,
+        regime: whir::protocols::params::DecodingRegime::Johnson,
+        pow: 0,
+        hash: whir::hash::BLAKE3,
+        size,
+        rate: 2,
+        folds: [4, 4],
+        schedule: RateSchedule::Capped(4),
+    })
     .unwrap();
     config.validate_pair().unwrap();
     let mut rng = StdRng::seed_from_u64(731);

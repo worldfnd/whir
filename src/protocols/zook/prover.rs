@@ -49,7 +49,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         Hash: ProverMessage<[H::U]>,
     {
         let reduced = reduce_prover(self, ps, committed, None, None, linear_forms, evaluations);
-        self.prove_final_opening(ps, reduced, self.tuning().vector_size)
+        self.prove_final_opening(ps, reduced, self.params().size)
     }
 
     pub(super) fn prove_final_opening<H, R>(
@@ -69,7 +69,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         Hash: ProverMessage<[H::U]>,
     {
         let basecase = self.basecase();
-        let suffix = if self.security().mode.is_zk() {
+        let suffix = if self.params().zk {
             self.blind_final_claim(ps, &mut state);
             let (value, opening) = basecase.sumcheck().prove(
                 ps,
@@ -125,7 +125,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let layout = self.joint_masks().expect("final opening mask layout");
         assert!(!state.masks.is_empty());
         let commit = self.final_commit();
-        let mask_commit = layout.commit();
+        let mask_commit = &layout.commit;
         let mut witness_blinder = Buffer::random(ps.rng(), commit.vector_size());
         let mut mask_blinders: Vec<_> = state
             .masks

@@ -5,7 +5,7 @@ use whir::{
         embedding::{Basefield, Identity},
         fields::{Field64_2, Field64_3},
     },
-    protocols::params::{Mode, ProtocolConfig, RateSchedule, SecuritySpec, TuningSpec},
+    protocols::params::{Params, ProtocolConfig, RateSchedule},
 };
 type Config = ProtocolConfig<Identity<Field64_2>>;
 
@@ -20,18 +20,20 @@ fn rejects(input: &Value) {
 
 #[test]
 fn rejects_malformed_requests_and_embedding_changes() {
-    let config = Config::derive(
-        SecuritySpec::new(40).with_pow_budget(0),
-        TuningSpec {
-            vector_size: 8,
-            starting_log_inv_rate: 2,
-            folding_factor: [2, 2],
-            rate_schedule: RateSchedule::Stepping,
-        },
-    )
+    let config = Config::derive(Params {
+        bits: 40,
+        zk: false,
+        regime: whir::protocols::params::DecodingRegime::Johnson,
+        pow: 0,
+        hash: whir::hash::BLAKE3,
+        size: 8,
+        rate: 2,
+        folds: [2, 2],
+        schedule: RateSchedule::Stepping,
+    })
     .unwrap();
     let original = serde_json::to_value(&config).unwrap();
-    assert_eq!(original.as_object().unwrap().len(), 3);
+    assert_eq!(original.as_object().unwrap().len(), 2);
     assert!(
         serde_json::from_value::<ProtocolConfig<Identity<Field64_3>>>(original.clone()).is_err()
     );
@@ -53,19 +55,16 @@ fn rejects_malformed_requests_and_embedding_changes() {
     }
     for (pointer, invalid) in [
         ("/embedding", Value::Null),
-        ("/tuning/vector_size", json!(0)),
-        ("/tuning/vector_size", json!(3)),
-        ("/tuning/vector_size", json!(usize::MAX)),
-        ("/tuning/starting_log_inv_rate", json!(0)),
-        ("/tuning/starting_log_inv_rate", json!(u32::MAX)),
-        ("/tuning/folding_factor", json!([0, 2])),
-        ("/tuning/folding_factor", json!([2, 0])),
-        (
-            "/tuning/rate_schedule",
-            json!({"Capped": {"max_log_inv_rate": 0}}),
-        ),
-        ("/security/target_security_bits", json!(u32::MAX)),
-        ("/security/hash_id", json!([])),
+        ("/params/size", json!(0)),
+        ("/params/size", json!(3)),
+        ("/params/size", json!(usize::MAX)),
+        ("/params/rate", json!(0)),
+        ("/params/rate", json!(u32::MAX)),
+        ("/params/folds", json!([0, 2])),
+        ("/params/folds", json!([2, 0])),
+        ("/params/schedule", json!({"Capped": 0})),
+        ("/params/bits", json!(u32::MAX)),
+        ("/params/hash", json!([])),
     ] {
         let mut input = original.clone();
         *input.pointer_mut(pointer).unwrap() = invalid;
@@ -73,13 +72,14 @@ fn rejects_malformed_requests_and_embedding_changes() {
     }
     for regime in ["Unique", "Capacity"] {
         let mut input = original.clone();
-        input["security"]["mode"] = json!(Mode::ZeroKnowledge);
-        input["security"]["decoding_regime"] = json!(regime);
+        input["params"]["zk"] = json!(true);
+        input["params"]["regime"] = json!(regime);
         rejects(&input);
     }
     let mut input = original;
-    input["tuning"] = json!({"vector_size": 1usize << (usize::BITS - 1),
-        "starting_log_inv_rate": 1, "folding_factor": [usize::BITS - 2, 1],
-        "rate_schedule": {"Capped": {"max_log_inv_rate": 1}}});
+    input["params"]["size"] = json!(1usize << (usize::BITS - 1));
+    input["params"]["rate"] = json!(1);
+    input["params"]["folds"] = json!([usize::BITS - 2, 1]);
+    input["params"]["schedule"] = json!({"Capped": 1});
     rejects(&input);
 }

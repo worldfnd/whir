@@ -1,65 +1,94 @@
-//! Joint-mask commitment sizing and mask ranges.
-
+//! Degree-preserving witness prefixes and the shared mask commitment (§5.4, §6.4).
 use std::ops::Range;
 
 use ark_ff::Field;
-use serde::{Deserialize, Serialize};
 
+use super::{
+    derive::solve_with_num_vectors,
+    security::{final_bits, grind_to_at},
+    DeriveError, Params, Result, RoundContext,
+};
 use crate::{
     algebra::embedding::{Embedding, Identity},
-    protocols::{
-        irs_commit::{num_in_domain_queries, Config as IrsConfig},
-        params::{
-            derive::solve_with_num_vectors,
-            security::{grind_to_at, rate, zook_final_opening_bits, zook_mask_binding_bits},
-            DeriveError, RoundContext, SecuritySpec,
-        },
-    },
+    protocols::irs_commit::{num_in_domain_queries, Config as IrsConfig},
 };
 
-// Fixed tuning choice inherited from the mask solver, not a security assumption.
-// The resulting code must still satisfy the binding and final-opening bounds.
-const MASK_LOG_INV_RATE: u32 = 4;
-
-/// The joint-mask column contains sparse sumcheck masks, witness masks, and two blinders.
-///
-/// ProveKit Prover Whitepaper §5.4, “ZO0K”, “The required masks”.
-/// Sizes are summed from the components: each folding mask has `2 * folds + 1`
-/// coefficients, the commitment blinder has `queries + 1`, and the basefield
-/// blinder has one coefficient per extension dimension.
-pub(super) fn solve<F: Field>(
-    spec: &SecuritySpec,
-    sumcheck_lengths: &[usize],
-    witness_lengths: &[usize],
-    final_commit: &IrsConfig<Identity<F>>,
-    extension_degree: usize,
-) -> Result<JointMaskConfig<F>, DeriveError> {
-    let mut end = 0;
-    let sumcheck_masks = sumcheck_lengths
-        .iter()
-        .map(|&len| next_range(&mut end, len))
-        .collect::<Result<Vec<_>, _>>()?;
-    let witness_masks = witness_lengths
-        .iter()
-        .map(|&len| next_range(&mut end, len))
-        .collect::<Result<Vec<_>, _>>()?;
-    let commit = solve_commit(spec, end, extension_degree)?;
-    let blinder_len = commit
-        .in_domain_samples()
-        .checked_add(1)
-        .ok_or(DeriveError::SizeOverflow)?;
-    let blinder = next_range(&mut end, blinder_len)?;
-    let basefield_blinder = next_range(&mut end, extension_degree)?;
-    if end > commit.vector_size() {
-        return Err(DeriveError::InvalidMaskLayout);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WitnessMaskConfig {
+    pub num_polynomials: usize,
+    pub coefficients_per_polynomial: usize,
+}
+impl WitnessMaskConfig {
+    pub(crate) fn for_code<M: Embedding>(code: &IrsConfig<M>, incoming: usize) -> Result<Self> {
+        let length = code
+            .in_domain_samples()
+            .checked_add(incoming)
+            .ok_or(DeriveError("dimension overflow"))?;
+        if code.num_vectors() != 1 || code.mask_length() != 0 {
+            return Err(DeriveError("invalid witness mask"));
+        }
+        if length > code.message_length() {
+            return Err(DeriveError("mask does not fit"));
+        }
+        Ok(Self {
+            num_polynomials: code.interleaving_depth(),
+            coefficients_per_polynomial: length,
+        })
     }
-    let (combination, queries) = zook_final_opening_bits(final_commit, &commit)?;
-    for (bits, event) in [
-        (zook_mask_binding_bits(&commit)?, "mask binding"),
-        (combination, "final combination"),
-        (queries, "final queries"),
-    ] {
-        grind_to_at(spec, bits, event)?;
+    pub fn num_coefficients(self) -> Result<usize> {
+        self.num_polynomials
+            .checked_mul(self.coefficients_per_polynomial)
+            .ok_or(DeriveError("dimension overflow"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JointMaskConfig<F: Field> {
+    pub commit: IrsConfig<Identity<F>>,
+    pub sumcheck_masks: Vec<Range<usize>>,
+    pub witness_masks: Vec<Range<usize>>,
+    pub blinder: Range<usize>,
+    pub basefield_blinder: Range<usize>,
+}
+
+/// Reserve queries at rate 1/16, then use actual NTT-rounded queries for the blinder.
+pub(super) fn joint_code<F: Field>(
+    spec: &Params,
+    sumchecks: &[usize],
+    witnesses: &[usize],
+    final_commit: &IrsConfig<Identity<F>>,
+    degree: usize,
+) -> Result<JointMaskConfig<F>> {
+    let mut end = 0usize;
+    let mut allocate = |length: usize| {
+        let start = end;
+        end = end
+            .checked_add(length)
+            .ok_or(DeriveError("dimension overflow"))?;
+        Ok(start..end)
+    };
+    let sumcheck_masks = sumchecks
+        .iter()
+        .map(|&n| allocate(n))
+        .collect::<Result<Vec<_>>>()?;
+    let witness_masks = witnesses
+        .iter()
+        .map(|&n| allocate(n))
+        .collect::<Result<Vec<_>>>()?;
+    let payload = witness_masks
+        .last()
+        .or_else(|| sumcheck_masks.last())
+        .map_or(0, |range| range.end);
+    let commit = checked_code(spec, payload, degree, final_commit)?;
+    let blinder = allocate(
+        commit
+            .in_domain_samples()
+            .checked_add(1)
+            .ok_or(DeriveError("dimension overflow"))?,
+    )?;
+    let basefield_blinder = allocate(degree)?;
+    if end > commit.vector_size() {
+        return Err(DeriveError("mask does not fit"));
     }
     Ok(JointMaskConfig {
         commit,
@@ -70,140 +99,35 @@ pub(super) fn solve<F: Field>(
     })
 }
 
-/// Size the shared code using an upper bound on its query count.
-///
-/// NTT rounding can lower the effective rate, so it cannot require more queries
-/// than this reservation. Actual query counts determine the stored mask ranges.
-/// Only the codeword length needs NTT rounding; the mask message is not folded.
-pub(super) fn solve_commit<F: Field>(
-    spec: &SecuritySpec,
-    payload_length: usize,
-    extension_degree: usize,
-) -> Result<IrsConfig<Identity<F>>, DeriveError> {
-    let queries = num_in_domain_queries(
-        spec.decoding_regime,
-        f64::from(spec.target_security_bits) + 1.0,
-        rate(f64::from(MASK_LOG_INV_RATE)),
-    )
-    .get();
-    let vector_size = payload_length
+/// Construction and adaptive search share commitment sizing and all final-opening bounds.
+pub(super) fn checked_code<F: Field>(
+    spec: &Params,
+    payload: usize,
+    degree: usize,
+    final_commit: &IrsConfig<Identity<F>>,
+) -> Result<IrsConfig<Identity<F>>> {
+    let queries = num_in_domain_queries(spec.regime, f64::from(spec.bits) + 1.0, 0.0625).get();
+    let vector_size = payload
         .checked_add(queries)
         .and_then(|n| n.checked_add(1))
-        .and_then(|n| n.checked_add(extension_degree))
-        .ok_or(DeriveError::SizeOverflow)?;
-    solve_with_num_vectors(
+        .and_then(|n| n.checked_add(degree))
+        .ok_or(DeriveError("dimension overflow"))?;
+    let commit = solve_with_num_vectors(
         spec,
         &RoundContext {
-            vector_size,
-            log_inv_rate: MASK_LOG_INV_RATE,
-            folding_factor: 0,
+            size: vector_size,
+            rate: 4,
+            folds: 0,
         },
         2,
-    )
-}
-
-fn next_range(end: &mut usize, length: usize) -> Result<Range<usize>, DeriveError> {
-    let start = *end;
-    *end = start.checked_add(length).ok_or(DeriveError::SizeOverflow)?;
-    Ok(start..*end)
-}
-
-/// Sparse sumcheck mask length: one constant and two coefficients per variable.
-///
-/// ProveKit Prover Whitepaper §5.4, “ZO0K”, “The required masks”: `2 * folds + 1`.
-pub(super) fn mask_coefficients(folds: usize) -> Result<usize, DeriveError> {
-    folds
-        .checked_mul(2)
-        .and_then(|n| n.checked_add(1))
-        .ok_or(DeriveError::SizeOverflow)
-}
-
-/// Prefix mask for each contiguous coefficient block encoded by IRS.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WitnessMaskConfig {
-    /// Independent encoded polynomials in this commitment.
-    pub num_polynomials: usize,
-    /// Random prefix length in each polynomial.
-    pub coefficients_per_polynomial: usize,
-}
-
-impl WitnessMaskConfig {
-    /// Cover every opened row and incoming DEEP evaluation without increasing degree.
-    ///
-    /// Section 5.4, “ZO0K”, “The required masks”, budgets openings per witness.
-    /// IRS rows reveal every column, so each polynomial receives its own prefix.
-    /// An incoming DEEP evaluation reserves one extra coefficient per polynomial.
-    /// This includes the final witness: it is evaluated before the final opening.
-    pub(crate) fn for_code<M: Embedding>(
-        code: &IrsConfig<M>,
-        incoming_deep: usize,
-    ) -> Result<Self, DeriveError> {
-        let required = code
-            .in_domain_samples()
-            .checked_add(incoming_deep)
-            .ok_or(DeriveError::SizeOverflow)?;
-        if code.num_vectors() != 1 || code.mask_length() != 0 {
-            return Err(DeriveError::InvalidMaskLayout);
-        }
-        if required > code.message_length() {
-            return Err(DeriveError::MaskDoesNotFit {
-                required,
-                available: code.message_length(),
-            });
-        }
-        Ok(Self {
-            num_polynomials: code.interleaving_depth(),
-            coefficients_per_polynomial: required,
-        })
+    )?;
+    let (binding, combination, queries) = final_bits(final_commit, &commit)?;
+    for (bits, event) in [
+        (binding, "mask binding"),
+        (combination, "final combination"),
+        (queries, "final queries"),
+    ] {
+        grind_to_at(spec, bits, event)?;
     }
-
-    /// Number of random coefficients to sample for this witness commitment.
-    pub fn num_coefficients(self) -> Result<usize, DeriveError> {
-        self.num_polynomials
-            .checked_mul(self.coefficients_per_polynomial)
-            .ok_or(DeriveError::SizeOverflow)
-    }
-}
-
-/// Masks consumed by one folding round.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoundMasks {
-    /// Independent overlaid prefix in every source polynomial.
-    pub witness: WitnessMaskConfig,
-    /// One constant and two coefficients per folded variable: `2 * folds + 1`.
-    pub sumcheck_coefficients: usize,
-}
-
-/// One mask commitment, with disjoint ranges in coefficient order.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct JointMaskConfig<F: Field> {
-    pub(crate) commit: IrsConfig<Identity<F>>,
-    pub(crate) sumcheck_masks: Vec<Range<usize>>,
-    pub(crate) witness_masks: Vec<Range<usize>>,
-    pub(crate) blinder: Range<usize>,
-    pub(crate) basefield_blinder: Range<usize>,
-}
-
-impl<F: Field> JointMaskConfig<F> {
-    /// Ordinary IRS commitment for the joint masks.
-    pub const fn commit(&self) -> &IrsConfig<Identity<F>> {
-        &self.commit
-    }
-    /// Sparse sumcheck coefficient ranges, in round order.
-    pub fn sumcheck_masks(&self) -> &[Range<usize>] {
-        &self.sumcheck_masks
-    }
-    /// Witness mask ranges, from the initial commitment through the final witness.
-    pub fn witness_masks(&self) -> &[Range<usize>] {
-        &self.witness_masks
-    }
-    /// Random coefficients covering joint-mask queries and its binding evaluation.
-    pub const fn blinder(&self) -> &Range<usize> {
-        &self.blinder
-    }
-    /// Membership-check blinder sampled in the initial witness commitment's field.
-    pub const fn basefield_blinder(&self) -> &Range<usize> {
-        &self.basefield_blinder
-    }
+    Ok(commit)
 }

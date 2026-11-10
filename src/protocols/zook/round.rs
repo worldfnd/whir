@@ -341,7 +341,7 @@ where
     let claim_weights = geometric_sequence(M::Target::ONE, ps.verifier_message(), forms.len());
     let mut covector = vec![M::Target::ZERO; size];
     for (form, &weight) in forms.iter().zip(&claim_weights) {
-        assert!(form.size() <= config.tuning().vector_size * count);
+        assert!(form.size() <= config.params().size * count);
         form.accumulate(&mut covector[..form.size()], weight);
     }
     let sum = evaluations
@@ -443,9 +443,9 @@ fn initial_prover_state<M: Embedding>(
         committed.mask_binding,
     ) {
         (Some(layout), Some(mask), Some(joint), Some(binding)) => {
-            let mut claims = MaskClaims::new(layout.commit().vector_size());
+            let mut claims = MaskClaims::new(layout.commit.vector_size());
             claims.subtract_witness_mask(
-                layout.witness_masks()[0].clone(),
+                layout.witness_masks[0].clone(),
                 mask,
                 config.padded_vector_size() / mask.num_polynomials,
                 |index| covector[index],
@@ -491,7 +491,7 @@ where
     let count = 1 + usize::from(second.is_some());
     assert!(forms
         .iter()
-        .all(|f| f.size() <= config.tuning().vector_size * count));
+        .all(|f| f.size() <= config.params().size * count));
     let claim_weights = geometric_sequence(M::Target::ONE, vs.verifier_message(), forms.len());
     let sum = evaluations
         .iter()
@@ -520,12 +520,12 @@ where
             commitment.mask_binding,
         ) {
             (Some(layout), Some(mask), Some(joint), Some(binding)) => {
-                let mut claims = MaskClaims::new(layout.commit().vector_size());
+                let mut claims = MaskClaims::new(layout.commit.vector_size());
                 let coefficients = coefficients.as_ref().expect("masked kernel coefficients");
                 let message_length = config.padded_vector_size() / mask.num_polynomials;
                 let offset = i * mask.num_polynomials * mask.coefficients_per_polynomial;
                 claims.subtract_witness_mask(
-                    layout.witness_masks()[0].clone(),
+                    layout.witness_masks[0].clone(),
                     mask,
                     message_length,
                     |index| {
@@ -606,7 +606,7 @@ where
         .map(|masks| masks.claims.evaluate(masks.joint.coefficients.to_slice()))
         .sum();
     let blinding = if let Some((layout, _)) = mask_plan {
-        let range = layout.sumcheck_masks()[index].clone();
+        let range = layout.sumcheck_masks[index].clone();
         let left = &state.masks[0].joint.coefficients.to_slice()[range.clone()];
         if second.is_some() {
             let right = &state.masks[1].joint.coefficients.to_slice()[range];
@@ -642,15 +642,14 @@ where
     if let Some((layout, next_mask)) = mask_plan {
         fold_mask_claims(
             state.masks.iter_mut().map(|m| &mut m.claims),
-            layout.sumcheck_masks()[index].clone(),
+            layout.sumcheck_masks[index].clone(),
             remaining_size,
             &opening,
             second.is_some(),
         );
         message = overlay_mask(
             message,
-            &state.masks[0].joint.coefficients.to_slice()
-                [layout.witness_masks()[index + 1].clone()],
+            &state.masks[0].joint.coefficients.to_slice()[layout.witness_masks[index + 1].clone()],
             next_mask,
         );
     }
@@ -672,7 +671,7 @@ where
             masks.claims.scale(switched.update.original_sl_coeff);
         }
         state.masks[0].claims.subtract_target_mask(
-            layout.witness_masks()[index + 1].clone(),
+            layout.witness_masks[index + 1].clone(),
             next_mask,
             round.code_switch.target().message_length(),
             &switched.update,
@@ -724,7 +723,7 @@ where
     if let Some((layout, _)) = mask_plan {
         fold_mask_claims(
             state.masks.iter_mut().map(|m| &mut m.claims),
-            layout.sumcheck_masks()[index].clone(),
+            layout.sumcheck_masks[index].clone(),
             state.kernel.size,
             &opening,
             second.is_some(),
@@ -746,7 +745,7 @@ where
         let coefficients = state.kernel.mask_coefficients(next_mask);
         let message_length = round.code_switch.target().message_length();
         state.masks[0].claims.subtract_target_mask(
-            layout.witness_masks()[index + 1].clone(),
+            layout.witness_masks[index + 1].clone(),
             next_mask,
             message_length,
             &update,
@@ -800,7 +799,7 @@ mod tests {
             linear_form::{Covector, Evaluate},
             random_vector, univariate_evaluate,
         },
-        protocols::params::{Mode, RateSchedule, SecuritySpec, TuningSpec},
+        protocols::params::{Params, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator},
     };
 
@@ -988,21 +987,23 @@ mod tests {
     }
 
     fn roundtrip<M: Embedding<Target = Field64_2> + Default>(
-        mode: Mode,
+        mode: bool,
         size: usize,
         univariate_size: usize,
     ) where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
-        let config = ProtocolConfig::<M>::derive(
-            SecuritySpec::new(80).with_mode(mode).with_pow_budget(0),
-            TuningSpec {
-                vector_size: size,
-                starting_log_inv_rate: 2,
-                folding_factor: [2, 2],
-                rate_schedule: RateSchedule::Stepping,
-            },
-        )
+        let config = ProtocolConfig::<M>::derive(Params {
+            bits: 80,
+            zk: mode,
+            regime: crate::protocols::params::DecodingRegime::Johnson,
+            pow: 0,
+            hash: crate::hash::BLAKE3,
+            size,
+            rate: 2,
+            folds: [2, 2],
+            schedule: RateSchedule::Stepping,
+        })
         .unwrap();
         if size == 4096 {
             assert!(config.num_rounds() >= 2);
@@ -1032,7 +1033,7 @@ mod tests {
         assert_overlays(&config, initial, &state);
         let _ = config.final_commit().open(&mut ps, &[&state.irs_witness]);
         if let Some((layout, masks)) = config.joint_masks().zip(state.masks.first()) {
-            let _ = layout.commit().open(&mut ps, &[&masks.joint.irs_witness]);
+            let _ = layout.commit.open(&mut ps, &[&masks.joint.irs_witness]);
         }
         let challenge: Field64_2 = ps.verifier_message();
         let proof = ps.proof();
@@ -1089,7 +1090,7 @@ mod tests {
             if let Some((layout, masks)) = config.joint_masks().zip(state.masks.first()) {
                 expected = overlay_mask(
                     expected,
-                    &masks.joint.coefficients.to_slice()[layout.witness_masks()[index + 1].clone()],
+                    &masks.joint.coefficients.to_slice()[layout.witness_masks[index + 1].clone()],
                     config.witness_mask(index + 1).unwrap(),
                 );
             }
@@ -1116,7 +1117,7 @@ mod tests {
                     state.sum,
                     state.message.dot(&state.covector) + checked.claims.evaluate(coefficients)
                 );
-                let evaluations = layout.commit().verify(vs, &[&checked.joint]).unwrap();
+                let evaluations = layout.commit.verify(vs, &[&checked.joint]).unwrap();
                 assert_eq!(evaluations.matrix.len(), 2 * evaluations.points.len());
                 for (&point, row) in evaluations
                     .points
@@ -1138,30 +1139,30 @@ mod tests {
     #[test]
     fn joint_mask_rounds_with_basefield_witness() {
         for size in [8, 128, 4096] {
-            roundtrip::<Basefield<Field64_2>>(Mode::ZeroKnowledge, size, size);
+            roundtrip::<Basefield<Field64_2>>(true, size, size);
         }
     }
 
     #[test]
     fn joint_mask_rounds_with_extension_field_witness() {
         for size in [8, 128, 4096] {
-            roundtrip::<Identity<Field64_2>>(Mode::ZeroKnowledge, size, size);
+            roundtrip::<Identity<Field64_2>>(true, size, size);
         }
     }
 
     #[test]
     fn standard_rounds_preserve_the_unmasked_claim() {
         for size in [8, 128, 4096] {
-            roundtrip::<Basefield<Field64_2>>(Mode::Standard, size, size);
+            roundtrip::<Basefield<Field64_2>>(false, size, size);
         }
     }
 
     #[test]
     fn short_univariate_forms_match_dense_kernels() {
         for size in [8, 4096] {
-            roundtrip::<Basefield<Field64_2>>(Mode::ZeroKnowledge, size, 3);
-            roundtrip::<Identity<Field64_2>>(Mode::ZeroKnowledge, size, 3);
-            roundtrip::<Basefield<Field64_2>>(Mode::Standard, size, 3);
+            roundtrip::<Basefield<Field64_2>>(true, size, 3);
+            roundtrip::<Identity<Field64_2>>(true, size, 3);
+            roundtrip::<Basefield<Field64_2>>(false, size, 3);
         }
     }
 }

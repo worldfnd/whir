@@ -18,6 +18,45 @@ pub(super) fn assert_close(actual: f64, expected: f64) {
         "actual {actual}, expected {expected}"
     );
 }
+#[test]
+fn adaptive_weight_preserves_normalization() {
+    for (input, expected) in [
+        (-1.0, 0.0),
+        (0.0, 0.0),
+        (0.3, 0.3),
+        (2.0, 1.0),
+        (f64::NAN, 0.5),
+    ] {
+        assert_close(KneeWeight::from(input).0.into_inner(), expected);
+    }
+}
+
+#[derive(ark_ff::MontConfig)]
+#[modulus = "17"]
+#[generator = "3"]
+struct UnregisteredFieldConfig;
+
+#[test]
+fn unsupported_zook_regime_fails_before_ntt_lookup() {
+    type F = ark_ff::Fp64<ark_ff::MontBackend<UnregisteredFieldConfig, 1>>;
+    for regime in [Unique, Capacity] {
+        let result = ProtocolConfig::<Identity<F>>::derive(Params {
+            zk: true,
+            regime,
+            bits: 40,
+            pow: 0,
+            hash: BLAKE3,
+            size: 8,
+            rate: 2,
+            folds: [2, 2],
+            schedule: RateSchedule::Stepping,
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            DeriveError("Zook requires Johnson decoding")
+        );
+    }
+}
 pub(super) fn code<M: Embedding + Default>(
     size: usize,
     depth: usize,
@@ -43,10 +82,10 @@ fn independent_decoding_and_probability_anchors() {
         (Johnson, 40.0, 0.525, -38.623_375_386_827_36),
         (Capacity, 5120.0, 0.2625, -49.678_071_905_112_64),
     ] {
-        let regime = DecodingRegimeParams::from_policy(policy, 0.25);
-        assert_close(regime.list_size(4.0, 2.0), list);
-        assert_close(regime.one_minus_distance_log2(2.0), f64::log2(distance));
-        assert_close(regime.eps_mca_log2(2.0, 16, 64.0), mca);
+        let actual = decoding(policy, 0.25, 16, 64.0);
+        assert_close(actual[0], list);
+        assert_close(actual[1], f64::log2(distance));
+        assert_close(actual[2], mca);
         assert_eq!(
             policy.to_string().parse::<DecodingRegime>().unwrap(),
             policy
@@ -81,18 +120,13 @@ fn zook_equations_and_hypotheses() {
     // Agreement: L*((2/3)*L^4*rho+1)*n/Q; DEEP: L²*m/(2*(Q-n)).
     // Binding: L*(L+1)*m/(2*(Q-1)); final queries sum two equal errors.
     let (queries, aggregation) = zook_query_error_bits(&source, &target).unwrap();
-    let (combination, final_queries) = zook_final_opening_bits(&witness, &masks).unwrap();
+    let (sumcheck, _) = round_bits(&source, Some(&target), 1, true).unwrap();
+    let (binding, combination, final_queries) = final_bits(&witness, &masks).unwrap();
     for (actual, expected) in [
-        (
-            sumcheck_error_bits(&source, true).unwrap(),
-            95.975_318_644_3,
-        ),
+        (sumcheck, 95.975_318_644_3),
         (queries, 80.876_128_471_521_71),
         (aggregation, 115.235_128_408_592_1),
-        (
-            zook_mask_binding_bits(&masks).unwrap(),
-            110.320_519_899_822_74,
-        ),
+        (binding, 110.320_519_899_822_74),
         (combination, 93.975_318_644_3),
         (final_queries, 79.876_128_473_448_38),
     ] {
@@ -120,28 +154,30 @@ fn standard_round_equations_and_layout() {
         (Capacity, 47.678_071_905_112_64, 21.225_717_393_194_62),
     ] {
         for folds in 1..=3 {
-            let spec = SecuritySpec::new(80)
-                .with_decoding_regime(regime)
-                .with_pow_budget(60);
-            let config = ProtocolConfig::<Identity<Field64>>::derive(
-                spec,
-                TuningSpec {
-                    vector_size: 256,
-                    starting_log_inv_rate: 2,
-                    folding_factor: [folds, 2],
-                    rate_schedule: RateSchedule::Stepping,
-                },
-            )
+            let config = ProtocolConfig::<Identity<Field64>>::derive(Params {
+                zk: false,
+                regime,
+                bits: 80,
+                pow: 60,
+                hash: BLAKE3,
+                size: 256,
+                rate: 2,
+                folds: [folds, 2],
+                schedule: RateSchedule::Stepping,
+            })
             .unwrap();
             let first = config.first_round().unwrap();
             let switch = &first.code_switch;
             let source = switch.source();
-            let bound = sumcheck_error_bits(source, false).unwrap();
+            let (bound, actual) = round_bits(
+                source,
+                Some(switch.target()),
+                switch.out_domain_samples(),
+                false,
+            )
+            .unwrap();
             assert_close(f64::from(bound), sumcheck + folds as f64 - 2.0);
-            let actual =
-                code_switch_error_bits(source, switch.target(), switch.out_domain_samples(), false)
-                    .unwrap();
-            assert_close(f64::from(actual), queries);
+            assert_close(f64::from(actual.unwrap()), queries);
             assert!(f64::from(bound + first.sumcheck.round_pow().difficulty()) >= 80.0 - 1e-9);
             assert!(queries + f64::from(first.code_switch.pow().difficulty()) >= 80.0 - 1e-9);
             let mut rate = 2;
@@ -164,15 +200,25 @@ fn standard_round_equations_and_layout() {
 
 #[test]
 fn grinding_respects_fractional_targets_and_mode() {
-    let spec = SecuritySpec::new(80).with_pow_budget(60);
+    let spec = Params {
+        zk: false,
+        regime: Johnson,
+        bits: 80,
+        pow: 60,
+        hash: BLAKE3,
+        size: 256,
+        rate: 2,
+        folds: [2, 2],
+        schedule: RateSchedule::Stepping,
+    };
     for analytic in [20.3422, 35.623_375_386_491_45] {
         let pow = grind_to_at(&spec, Bits::new(analytic), "test").unwrap();
         assert!(analytic + f64::from(pow.difficulty()) >= 80.0 - 1e-9);
         assert!(f64::from(pow.difficulty()) <= 60.0);
     }
     for (spec, bound) in [
-        (spec.clone().with_pow_budget(59), 20.3422),
-        (spec.with_mode(Mode::ZeroKnowledge), 79.9999),
+        (Params { pow: 59, ..spec }, 20.3422),
+        (Params { zk: true, ..spec }, 79.9999),
     ] {
         assert!(grind_to_at(&spec, Bits::new(bound), "test").is_err());
     }

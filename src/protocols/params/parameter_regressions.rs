@@ -64,7 +64,7 @@ fn round_parameters<M: Embedding>(round: &RoundConfig<'_, M>) -> Value {
         "switch_zk": switch.is_zk(),
         "pow": pow_parameters(switch.pow()),
         "sumcheck": sumcheck_parameters(&round.sumcheck),
-        "sumcheck_mask_coefficients": round.masks.map(|masks| masks.sumcheck_coefficients),
+        "sumcheck_mask_coefficients": round.masks.map(|_| 2 * round.sumcheck.num_rounds() + 1),
     })
 }
 
@@ -83,17 +83,17 @@ fn parameters<M: Embedding>(config: &ProtocolConfig<M>) -> Value {
         })
         .collect();
     let joint = config.joint_masks().map(|joint| json!({
-        "code": code_parameters(joint.commit()),
-        "sumcheck_ranges": joint.sumcheck_masks().iter().map(|range| [range.start, range.end]).collect::<Vec<_>>(),
-        "witness_ranges": joint.witness_masks().iter().map(|range| [range.start, range.end]).collect::<Vec<_>>(),
-        "blinder": [joint.blinder().start, joint.blinder().end],
-        "basefield_blinder": [joint.basefield_blinder().start, joint.basefield_blinder().end],
+        "code": code_parameters(&joint.commit),
+        "sumcheck_ranges": joint.sumcheck_masks.iter().map(|range| [range.start, range.end]).collect::<Vec<_>>(),
+        "witness_ranges": joint.witness_masks.iter().map(|range| [range.start, range.end]).collect::<Vec<_>>(),
+        "blinder": [joint.blinder.start, joint.blinder.end],
+        "basefield_blinder": [joint.basefield_blinder.start, joint.basefield_blinder.end],
     }));
     json!({
         "padded_vector_size": config.padded_vector_size(),
         "rounds": rounds,
         "basecase": {
-            "zk": config.security().mode.is_zk(),
+            "zk": config.params().zk,
             "code": code_parameters(config.basecase().commit()),
             "sumcheck": sumcheck_parameters(basecase.sumcheck()),
             "pow": pow_parameters(basecase.pow()),
@@ -165,8 +165,8 @@ where
     let name = expected["name"].as_str().unwrap();
     let (prefix, kind) = name.split_once('_').unwrap();
     let mode = match prefix {
-        "standard" => Mode::Standard,
-        "zk" => Mode::ZeroKnowledge,
+        "standard" => false,
+        "zk" => true,
         _ => panic!("unknown mode"),
     };
     let regime = match kind {
@@ -175,12 +175,8 @@ where
         _ => DecodingRegime::Johnson,
     };
     let schedule = match kind {
-        "adaptive" => RateSchedule::Adaptive {
-            knee_weight: KneeWeight::DEFAULT,
-        },
-        "capped" => RateSchedule::Capped {
-            max_log_inv_rate: 2,
-        },
+        "adaptive" => RateSchedule::Adaptive(0.5.into()),
+        "capped" => RateSchedule::Capped(2),
         _ => RateSchedule::Stepping,
     };
     let basecase = kind == "basecase";
@@ -189,24 +185,23 @@ where
         kind,
         "basecase" | "rounds" | "mixed" | "pair" | "mixed_pair"
     );
-    let config = ProtocolConfig::<M>::derive(
-        SecuritySpec::new(128)
-            .with_mode(mode)
-            .with_decoding_regime(regime)
-            .with_pow_budget(if proof_case { 0 } else { 16 }),
-        TuningSpec {
-            vector_size: if basecase { 8 } else { 4096 },
-            starting_log_inv_rate: 1,
-            folding_factor: [2, 2],
-            rate_schedule: schedule,
-        },
-    )
+    let config = ProtocolConfig::<M>::derive(Params {
+        bits: 128,
+        zk: mode,
+        regime,
+        pow: if proof_case { 0 } else { 16 },
+        hash: crate::hash::BLAKE3,
+        size: if basecase { 8 } else { 4096 },
+        rate: 1,
+        folds: [2, 2],
+        schedule,
+    })
     .unwrap();
     let from_json = check(expected, &config);
     if !proof_case {
         return;
     }
-    let n = config.tuning().vector_size;
+    let n = config.params().size;
     let count = if pair { 2 } else { 1 };
     let mut rng = StdRng::seed_from_u64(0x7768_6972_2830_0001);
     let witness: Vec<M::Source> = random_vector(&mut rng, n * count);

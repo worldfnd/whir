@@ -32,7 +32,7 @@ use crate::{
         challenge_indices::challenge_indices,
         matrix_commit,
         params::{
-            security::{ood_per_sample_log2, DecodingRegimeParams},
+            security::{decoding, decoding_distance, ood_per_sample_log2},
             DecodingRegime,
         },
     },
@@ -83,8 +83,8 @@ pub struct Config<M: Embedding> {
     /// The matrix commitment configuration.
     matrix_commit: matrix_commit::Config<M::Source>,
 
-    /// Materialized Reed–Solomon decoding regime (Unique / Johnson w/ slack).
-    regime: DecodingRegimeParams,
+    /// Reed–Solomon decoding policy; its canonical slack follows the actual rate.
+    regime: DecodingRegime,
 
     /// The number of in-domain samples.
     in_domain_samples: usize,
@@ -216,7 +216,6 @@ impl<M: Embedding> Config<M> {
         };
         let rate = masked_message_length as f64 / codeword_length as f64;
 
-        let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
         let in_domain_samples = num_in_domain_queries(decoding_regime, security_target, rate).get();
 
         Ok(Self {
@@ -230,7 +229,7 @@ impl<M: Embedding> Config<M> {
                 codeword_length,
                 interleaving_depth * num_vectors,
             ),
-            regime,
+            regime: decoding_regime,
             in_domain_samples,
             deduplicate_in_domain: false,
             mode,
@@ -275,7 +274,7 @@ impl<M: Embedding> Config<M> {
         &self.matrix_commit
     }
 
-    pub const fn regime(&self) -> DecodingRegimeParams {
+    pub const fn regime(&self) -> DecodingRegime {
         self.regime
     }
 
@@ -340,33 +339,33 @@ impl<M: Embedding> Config<M> {
     }
 
     pub const fn unique_decoding(&self) -> bool {
-        self.regime.is_unique()
+        matches!(self.regime, DecodingRegime::Unique)
     }
 
-    fn log_inv_rate(&self) -> f64 {
-        -self.rate().log2()
+    fn decoding(&self) -> [f64; 3] {
+        decoding(
+            self.regime,
+            self.rate(),
+            self.masked_message_length(),
+            M::Target::field_size_bits(),
+        )
     }
 
     /// Compute a list size bound.
     pub fn list_size(&self) -> f64 {
-        let log_degree = (self.masked_message_length() as f64).log2();
-        self.regime.list_size(log_degree, self.log_inv_rate())
+        self.decoding()[0]
     }
 
     /// Round-by-round soundness of the in-domain queries in bits.
     pub fn rbr_queries(&self) -> f64 {
         // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
-        -(self.in_domain_samples as f64) * self.regime.one_minus_distance_log2(self.log_inv_rate())
+        -(self.in_domain_samples as f64) * decoding_distance(self.regime, self.rate())
     }
 
     /// Round-by-round soundness of the proximity-gaps fold in bits.
     /// See WHIR Theorem 4.8.
     pub fn rbr_soundness_fold_prox_gaps(&self) -> f64 {
-        -self.regime.eps_mca_log2(
-            self.log_inv_rate(),
-            self.masked_message_length(),
-            M::Target::field_size_bits(),
-        )
+        -self.decoding()[2]
     }
 
     /// Commit to one or more vectors.
@@ -737,9 +736,8 @@ pub(crate) fn num_in_domain_queries(
     security_target: f64,
     rate: f64,
 ) -> NonZeroUsize {
-    let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
     // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
-    let log_one_minus_delta = regime.one_minus_distance_log2(-rate.log2());
+    let log_one_minus_delta = decoding_distance(decoding_regime, rate);
     // Query soundness requires a positive decoding distance (1 − δ < 1). At
     // rate == 1 (and beyond the decoding radius generally) `1 − δ ≥ 1`, so
     // `log_one_minus_delta ≥ 0` and the division below is by a non-positive
@@ -773,6 +771,24 @@ pub(crate) mod tests {
         },
         transcript::{codecs::U64, DomainSeparator},
     };
+
+    #[test]
+    fn query_counts_preserve_subnormal_and_boundary_rates() {
+        for (regime, tiny_count, quarter_count) in [
+            (DecodingRegime::Unique, 80, 118),
+            (DecodingRegime::Johnson, 1, 87),
+            (DecodingRegime::Capacity, 1, 42),
+        ] {
+            for rate in [f64::from_bits(1), f64::MIN_POSITIVE] {
+                assert_eq!(num_in_domain_queries(regime, 80.0, rate).get(), tiny_count);
+            }
+            assert_eq!(
+                num_in_domain_queries(regime, 80.0, 0.25).get(),
+                quarter_count
+            );
+            assert!(std::panic::catch_unwind(|| num_in_domain_queries(regime, 80.0, 1.0)).is_err());
+        }
+    }
 
     impl<M: Embedding> Config<M> {
         pub fn arbitrary(
@@ -824,7 +840,7 @@ pub(crate) mod tests {
                         codeword_length,
                         interleaving_depth,
                         matrix_commit,
-                        regime: DecodingRegimeParams::Unique,
+                        regime: DecodingRegime::Unique,
                         in_domain_samples,
                         deduplicate_in_domain,
                         mode,
