@@ -18,7 +18,7 @@ use crate::{
     protocols::{
         basecase::Opening,
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
-        params::{BasecasePlan, ProtocolConfig},
+        params::ProtocolConfig,
         zook::{
             commit::Commitment,
             round::{reduce_verifier, VerifierRoundState},
@@ -70,21 +70,19 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let opening = match self.basecase() {
-            BasecasePlan::Standard { config, .. } => {
-                assert!(state.masks.is_empty());
-                config.verify(vs, &state.irs, state.sum)?
+        let basecase = self.basecase();
+        let opening = if self.security().mode.is_zk() {
+            let (message, mut sum) = self.receive_final_claim(vs, &state)?;
+            let point = basecase.sumcheck().verify(vs, &mut sum)?.round_challenges;
+            let value = multilinear_extend(&message, &point);
+            verify!(!value.is_zero());
+            Opening {
+                evaluation_points: point,
+                linear_form_evaluation: sum / value,
             }
-            BasecasePlan::ZeroKnowledge { sumcheck, .. } => {
-                let (message, mut sum) = self.receive_final_claim(vs, &state)?;
-                let point = sumcheck.verify(vs, &mut sum)?.round_challenges;
-                let value = multilinear_extend(&message, &point);
-                verify!(!value.is_zero());
-                Opening {
-                    evaluation_points: point,
-                    linear_form_evaluation: sum / value,
-                }
-            }
+        } else {
+            assert!(state.masks.is_empty());
+            basecase.verify(vs, &state.irs, state.sum)?
         };
         Ok(state.kernel.finish(&opening, original_size))
     }
@@ -105,7 +103,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     {
         let layout = self.joint_masks().expect("final opening mask layout");
         assert!(!state.masks.is_empty());
-        let commit = self.basecase().commit();
+        let commit = self.final_commit();
         let witness_blind_commit = commit.receive_commitment(vs)?;
         let blind_sum: M::Target = vs.prover_message()?;
         let blind_binding: Vec<M::Target> = vs.prover_messages_vec(3 * state.masks.len())?;
@@ -215,7 +213,7 @@ mod tests {
         },
         buffer::{Buffer, BufferMath, BufferOps},
         protocols::{
-            params::{FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec},
+            params::{Mode, RateSchedule, SecuritySpec, TuningSpec},
             zook::{commit::CommittedWitness, round::reduce_prover},
         },
         transcript::{codecs::Empty, DomainSeparator, ProverState},
@@ -258,11 +256,11 @@ mod tests {
             let config = ProtocolConfig::<Basefield<Field64_2>>::derive(
                 SecuritySpec::new(80)
                     .with_mode(Mode::ZeroKnowledge)
-                    .with_pow_budget(PowBudget::Forbidden),
+                    .with_pow_budget(0),
                 TuningSpec {
                     vector_size: size,
                     starting_log_inv_rate: 2,
-                    folding_factor: FoldingFactor::Constant(2),
+                    folding_factor: [2, 2],
                     rate_schedule: RateSchedule::Stepping,
                 },
             )
@@ -366,11 +364,11 @@ mod tests {
         let config = ProtocolConfig::<Basefield<Field64_2>>::derive(
             SecuritySpec::new(80)
                 .with_mode(Mode::ZeroKnowledge)
-                .with_pow_budget(PowBudget::Forbidden),
+                .with_pow_budget(0),
             TuningSpec {
                 vector_size: size,
                 starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
+                folding_factor: [2, 2],
                 rate_schedule: RateSchedule::Stepping,
             },
         )

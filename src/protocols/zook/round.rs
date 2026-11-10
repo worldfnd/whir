@@ -399,7 +399,7 @@ where
             };
             prove_round(
                 first.unwrap_or(&original),
-                original.code_switch().source(),
+                original.code_switch.source(),
                 second_witness,
                 ProverRoundState::<M> {
                     message,
@@ -419,12 +419,12 @@ where
     for round in config.tail_rounds() {
         state = prove_round(
             &round,
-            round.code_switch().source(),
+            round.code_switch.source(),
             None,
             state,
             config
                 .joint_masks()
-                .zip(config.witness_mask(round.round_index() + 1)),
+                .zip(config.witness_mask(round.index + 1)),
             ps,
         );
     }
@@ -555,7 +555,7 @@ where
     if let Some(original) = config.first_round() {
         verify_round(
             first.unwrap_or(&original),
-            original.code_switch().source(),
+            original.code_switch.source(),
             second.as_ref(),
             &mut state,
             config.joint_masks().zip(config.witness_mask(1)),
@@ -565,12 +565,12 @@ where
     for round in config.tail_rounds() {
         verify_round(
             &round,
-            round.code_switch().source(),
+            round.code_switch.source(),
             None,
             &mut state,
             config
                 .joint_masks()
-                .zip(config.witness_mask(round.round_index() + 1)),
+                .zip(config.witness_mask(round.index + 1)),
             vs,
         )?;
     }
@@ -598,8 +598,8 @@ where
     Hash: ProverMessage<[H::U]>,
 {
     assert_eq!(!state.masks.is_empty(), mask_plan.is_some());
-    let index = round.round_index();
-    let remaining_size = round.sumcheck().final_size();
+    let index = round.index;
+    let remaining_size = round.sumcheck.final_size();
     let carried = state
         .masks
         .iter()
@@ -625,9 +625,9 @@ where
     };
     // The generic prover accepts the dot and carried terms separately.
     state.sum -= carried;
-    let (mut message, opening) = round.sumcheck().prove_with_carried_sum(
+    let (mut message, opening) = round.sumcheck.prove_with_carried_sum(
         ps,
-        round.code_switch().source().embedding(),
+        round.code_switch.source().embedding(),
         state.message,
         &mut state.covector,
         &mut state.sum,
@@ -655,7 +655,7 @@ where
         );
     }
     let witnesses = once(state.irs_witness).chain(second).collect();
-    let switched = round.code_switch().prove(
+    let switched = round.code_switch.prove(
         ps,
         message,
         committed_source,
@@ -674,7 +674,7 @@ where
         state.masks[0].claims.subtract_target_mask(
             layout.witness_masks()[index + 1].clone(),
             next_mask,
-            round.code_switch().target().message_length(),
+            round.code_switch.target().message_length(),
             &switched.update,
             |coefficient| state.covector.to_slice()[coefficient],
         );
@@ -718,8 +718,8 @@ where
     Hash: ProverMessage<[H::U]>,
 {
     assert_eq!(!state.masks.is_empty(), mask_plan.is_some());
-    let index = round.round_index();
-    let opening = round.sumcheck().verify(vs, &mut state.sum)?;
+    let index = round.index;
+    let opening = round.sumcheck.verify(vs, &mut state.sum)?;
     state.kernel.fold(&opening);
     if let Some((layout, _)) = mask_plan {
         fold_mask_claims(
@@ -731,7 +731,7 @@ where
         );
     }
     let commitments: Vec<_> = once(&state.irs).chain(second).collect();
-    let (irs, update) = round.code_switch().verify_for_implicit(
+    let (irs, update) = round.code_switch.verify_for_implicit(
         vs,
         &mut state.sum,
         &opening.round_challenges,
@@ -744,7 +744,7 @@ where
             masks.claims.scale(update.original_sl_coeff);
         }
         let coefficients = state.kernel.mask_coefficients(next_mask);
-        let message_length = round.code_switch().target().message_length();
+        let message_length = round.code_switch.target().message_length();
         state.masks[0].claims.subtract_target_mask(
             layout.witness_masks()[index + 1].clone(),
             next_mask,
@@ -800,9 +800,7 @@ mod tests {
             linear_form::{Covector, Evaluate},
             random_vector, univariate_evaluate,
         },
-        protocols::params::{
-            FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
-        },
+        protocols::params::{Mode, RateSchedule, SecuritySpec, TuningSpec},
         transcript::{codecs::Empty, DomainSeparator},
     };
 
@@ -997,13 +995,11 @@ mod tests {
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
         let config = ProtocolConfig::<M>::derive(
-            SecuritySpec::new(80)
-                .with_mode(mode)
-                .with_pow_budget(PowBudget::Forbidden),
+            SecuritySpec::new(80).with_mode(mode).with_pow_budget(0),
             TuningSpec {
                 vector_size: size,
                 starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
+                folding_factor: [2, 2],
                 rate_schedule: RateSchedule::Stepping,
             },
         )
@@ -1034,10 +1030,7 @@ mod tests {
         };
         let state = reduce_prover(&config, &mut ps, committed, None, None, &forms, &values);
         assert_overlays(&config, initial, &state);
-        let _ = config
-            .basecase()
-            .commit()
-            .open(&mut ps, &[&state.irs_witness]);
+        let _ = config.final_commit().open(&mut ps, &[&state.irs_witness]);
         if let Some((layout, masks)) = config.joint_masks().zip(state.masks.first()) {
             let _ = layout.commit().open(&mut ps, &[&masks.joint.irs_witness]);
         }
@@ -1055,11 +1048,10 @@ mod tests {
             .collect();
         assert_eq!(state.covector.to_slice(), kernel);
         let final_values = config
-            .basecase()
-            .commit()
+            .final_commit()
             .verify(&mut vs, &[&received.irs])
             .unwrap();
-        let block_size = config.basecase().commit().message_length();
+        let block_size = config.final_commit().message_length();
         for (row, &point) in final_values
             .matrix
             .to_slice()
@@ -1086,8 +1078,8 @@ mod tests {
         let folds = config
             .first_round()
             .into_iter()
-            .map(|r| r.sumcheck().num_rounds())
-            .chain(config.tail_rounds().map(|r| r.sumcheck().num_rounds()));
+            .map(|r| r.sumcheck.num_rounds())
+            .chain(config.tail_rounds().map(|r| r.sumcheck.num_rounds()));
         let mut offset = 0;
         for (index, count) in folds.enumerate() {
             for &challenge in &state.challenges[offset..offset + count] {

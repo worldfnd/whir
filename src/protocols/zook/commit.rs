@@ -128,10 +128,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         });
 
         let state = if let Some(round) = self.first_round() {
-            if let Some(masks) = round.masks() {
+            if let Some(masks) = round.masks {
                 witness = overlay_mask(witness, &initial_mask, masks.witness);
             }
-            let irs_witness = round.code_switch().source().commit(ps, &[&witness]);
+            let irs_witness = round.code_switch.source().commit(ps, &[&witness]);
             CommittedState::Round {
                 message: witness,
                 irs_witness,
@@ -143,15 +143,15 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             if let (Some(config), Some(joint), Some(mask)) = (
                 self.joint_masks(),
                 joint_masks.as_ref(),
-                self.basecase().witness_mask(),
+                self.witness_mask(0),
             ) {
                 message = overlay_mask(
                     message,
                     &joint.coefficients.to_slice()[config.witness_masks()[0].clone()],
-                    *mask,
+                    mask,
                 );
             }
-            let irs_witness = self.basecase().commit().commit(ps, &[&message]);
+            let irs_witness = self.final_commit().commit(ps, &[&message]);
             CommittedState::Basecase {
                 message,
                 irs_witness,
@@ -192,8 +192,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             .map(|config| config.commit().receive_commitment(vs))
             .transpose()?;
         let irs = match self.first_round() {
-            Some(round) => round.code_switch().source().receive_commitment(vs)?,
-            None => self.basecase().commit().receive_commitment(vs)?,
+            Some(round) => round.code_switch.source().receive_commitment(vs)?,
+            None => self.final_commit().receive_commitment(vs)?,
         };
         let mask_binding = self
             .joint_masks()
@@ -309,7 +309,7 @@ mod tests {
         },
         protocols::{
             irs_commit::Evaluations,
-            params::{FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec},
+            params::{Mode, RateSchedule, SecuritySpec, TuningSpec},
         },
         transcript::{codecs::Empty, DomainSeparator, VerifierMessage},
     };
@@ -318,13 +318,11 @@ mod tests {
 
     fn config<M: Embedding + Default>(mode: Mode, vector_size: usize) -> ProtocolConfig<M> {
         ProtocolConfig::derive(
-            SecuritySpec::new(80)
-                .with_mode(mode)
-                .with_pow_budget(PowBudget::Forbidden),
+            SecuritySpec::new(80).with_mode(mode).with_pow_budget(0),
             TuningSpec {
                 vector_size,
                 starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
+                folding_factor: [2, 2],
                 rate_schedule: RateSchedule::Stepping,
             },
         )
@@ -350,12 +348,12 @@ mod tests {
                 let _ = config
                     .first_round()
                     .unwrap()
-                    .code_switch()
+                    .code_switch
                     .source()
                     .open(&mut ps, &[irs_witness]);
             }
             CommittedState::Basecase { irs_witness, .. } => {
-                let _ = config.basecase().commit().open(&mut ps, &[irs_witness]);
+                let _ = config.final_commit().open(&mut ps, &[irs_witness]);
             }
         }
         let prover_challenge: M::Target = ps.verifier_message();
@@ -407,14 +405,13 @@ mod tests {
         }
         match &committed.state {
             CommittedState::Round { message, .. } => {
-                let code = config.first_round().unwrap().code_switch().source();
+                let code = config.first_round().unwrap().code_switch.source();
                 let values = code.verify(&mut vs, &[&received.irs]).unwrap();
                 assert_openings(&values, message, code.interleaving_depth());
             }
             CommittedState::Basecase { message, .. } => {
                 let values = config
-                    .basecase()
-                    .commit()
+                    .final_commit()
                     .verify(&mut vs, &[&received.irs])
                     .unwrap();
                 assert_openings(&values, message, 1);
@@ -465,7 +462,7 @@ mod tests {
         let joint = committed.joint_masks.as_ref().unwrap();
         let layout = config.joint_masks().unwrap();
         let round = config.first_round().unwrap();
-        let mask = round.masks().unwrap().witness;
+        let mask = round.masks.unwrap().witness;
         let range = layout.witness_masks()[0].clone();
         let CommittedState::Round {
             message,
@@ -477,7 +474,7 @@ mod tests {
         assert_eq!(message.len(), config.padded_vector_size());
         assert!(irs_witness.masks.is_empty());
         assert!(joint.irs_witness.masks.is_empty());
-        let block_len = round.code_switch().source().message_length();
+        let block_len = round.code_switch.source().message_length();
         for (index, &value) in message.to_slice().iter().enumerate() {
             let column = index / block_len;
             let coefficient = index % block_len;

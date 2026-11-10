@@ -34,7 +34,7 @@ use whir::{
     parameters::ProtocolParameters,
     protocols::{
         params::{
-            DecodingRegime, FoldingFactor, Mode, PowBudget, ProtocolConfig, RateSchedule,
+            DecodingRegime, Mode, ProtocolConfig, RateSchedule,
             SecuritySpec, TuningSpec,
         },
         whir as whir_non_zk,
@@ -190,13 +190,13 @@ fn bench_zook(
         mode,
         decoding_regime: DecodingRegime::Johnson,
         target_security_bits: SECURITY_LEVEL,
-        pow_budget: PowBudget::per_slot(POW_BITS),
+        pow_budget: POW_BITS,
         hash_id: hash::SHA2,
     };
     let tuning = TuningSpec {
         vector_size: size,
         starting_log_inv_rate: STARTING_LOG_INV_RATE,
-        folding_factor: FoldingFactor::Constant(FOLDING_FACTOR),
+        folding_factor: [FOLDING_FACTOR, FOLDING_FACTOR],
         rate_schedule,
     };
     let config = ProtocolConfig::<Embed>::derive(spec, tuning)

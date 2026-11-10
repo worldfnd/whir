@@ -14,9 +14,7 @@ use whir::{
     buffer::Buffer,
     hash::{Hash, BLAKE3, SHA2},
     protocols::{
-        params::{
-            DecodingRegime, FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
-        },
+        params::{DecodingRegime, Mode, RateSchedule, SecuritySpec, TuningSpec},
         zook::{ProtocolConfig, ProverClaim},
     },
     transcript::{
@@ -32,13 +30,13 @@ fn source<M: Embedding + Default>(mode: Mode) -> ProtocolConfig<M> {
             mode,
             decoding_regime: DecodingRegime::Johnson,
             target_security_bits: 128,
-            pow_budget: PowBudget::per_slot(10),
+            pow_budget: 10,
             hash_id: BLAKE3,
         },
         TuningSpec {
             vector_size: 4096,
             starting_log_inv_rate: 1,
-            folding_factor: FoldingFactor::Constant(2),
+            folding_factor: [2, 2],
             rate_schedule: RateSchedule::Stepping,
         },
     )
@@ -197,7 +195,7 @@ fn selector_fold_preserves_a_short_tail_or_an_immediate_basecase() {
                 source.security().clone(),
                 TuningSpec {
                     vector_size,
-                    folding_factor: FoldingFactor::ConstantFromSecondRound { initial, rest: 2 },
+                    folding_factor: [initial, 2],
                     rate_schedule: if vector_size == 2048 {
                         RateSchedule::Capped {
                             max_log_inv_rate: 1,
@@ -330,7 +328,7 @@ fn incompatible_source_handles_fail_before_transcript_mutation() {
         let mut different_rate = source.tuning().clone();
         different_rate.starting_log_inv_rate += 1;
         let mut different_folding = source.tuning().clone();
-        different_folding.folding_factor = FoldingFactor::Constant(3);
+        different_folding.folding_factor = [3, 3];
         let alternatives = [
             ProtocolConfig::<M>::derive(
                 source.security().clone().with_hash(SHA2),

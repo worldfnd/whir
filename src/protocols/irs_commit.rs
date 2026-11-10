@@ -33,7 +33,7 @@ use crate::{
         matrix_commit,
         params::{
             security::{ood_per_sample_log2, DecodingRegimeParams},
-            spec::DecodingRegime,
+            DecodingRegime,
         },
     },
     transcript::{
@@ -745,8 +745,7 @@ pub(crate) fn num_in_domain_queries(
     // `log_one_minus_delta ≥ 0` and the division below is by a non-positive
     // number: `ceil() as usize` then saturates to 0 and the `NonZeroUsize` clamp
     // silently yields q = 1 — a single query with almost no soundness. The layout
-    // guard rejects rate == 1 up front; this backstops any other caller. See
-    // `LayoutError::StartingRateBelowOne`.
+    // guard rejects rate == 1 up front; this backstops any other caller.
     assert!(
         log_one_minus_delta < 0.0,
         "rate too high for query soundness: 1 − δ ≥ 1 (log₂ = {log_one_minus_delta})",

@@ -121,9 +121,7 @@ mod tests {
             fields::{Field64, Field64_2},
             linear_form::{Covector, Evaluate, UnivariateEvaluation},
         },
-        protocols::params::{
-            FoldingFactor, Mode, PowBudget, ProtocolConfig, RateSchedule, SecuritySpec, TuningSpec,
-        },
+        protocols::params::{Mode, ProtocolConfig, RateSchedule, SecuritySpec, TuningSpec},
         transcript::{codecs::Empty, DomainSeparator, MockSponge},
     };
 
@@ -163,11 +161,11 @@ mod tests {
         ProtocolConfig::derive(
             SecuritySpec::new(80)
                 .with_mode(Mode::ZeroKnowledge)
-                .with_pow_budget(PowBudget::Forbidden),
+                .with_pow_budget(0),
             TuningSpec {
                 vector_size: 4096,
                 starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
+                folding_factor: [2, 2],
                 rate_schedule: RateSchedule::Stepping,
             },
         )

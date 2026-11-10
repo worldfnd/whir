@@ -7,14 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     algebra::embedding::{Embedding, Identity},
-    bits::Bits,
     protocols::{
         irs_commit::{num_in_domain_queries, Config as IrsConfig},
         params::{
             derive::solve_with_num_vectors,
-            error::{DeriveError, SecurityEvent, ZookSecurityError},
-            security::{grind_to_at, rate, zook_mask_binding_bits, ZookFinalOpeningSoundness},
-            spec::{RoundContext, SecuritySpec},
+            security::{grind_to_at, rate, zook_final_opening_bits, zook_mask_binding_bits},
+            DeriveError, RoundContext, SecuritySpec,
         },
     },
 };
@@ -55,15 +53,14 @@ pub(super) fn solve<F: Field>(
     if end > commit.vector_size() {
         return Err(DeriveError::InvalidMaskLayout);
     }
-    let binding = zook_mask_binding_bits(&commit)?;
-    let opening = ZookFinalOpeningSoundness::for_codes(final_commit, &commit)?;
-    grind_to_at(spec, binding, SecurityEvent::JointMaskBinding)?;
-    grind_to_at(
-        spec,
-        opening.combination,
-        SecurityEvent::FinalOpeningCombination,
-    )?;
-    grind_to_at(spec, opening.queries, SecurityEvent::FinalOpeningQueries)?;
+    let (combination, queries) = zook_final_opening_bits(final_commit, &commit)?;
+    for (bits, event) in [
+        (zook_mask_binding_bits(&commit)?, "mask binding"),
+        (combination, "final combination"),
+        (queries, "final queries"),
+    ] {
+        grind_to_at(spec, bits, event)?;
+    }
     Ok(JointMaskConfig {
         commit,
         sumcheck_masks,
@@ -208,16 +205,5 @@ impl<F: Field> JointMaskConfig<F> {
     /// Membership-check blinder sampled in the initial witness commitment's field.
     pub const fn basefield_blinder(&self) -> &Range<usize> {
         &self.basefield_blinder
-    }
-    /// Security bounds for opening the final witness and accumulated mask claims.
-    pub fn opening(
-        &self,
-        witness: &IrsConfig<Identity<F>>,
-    ) -> Result<ZookFinalOpeningSoundness, ZookSecurityError> {
-        ZookFinalOpeningSoundness::for_codes(witness, &self.commit)
-    }
-
-    pub fn analytic_bits(&self) -> Result<Bits, ZookSecurityError> {
-        zook_mask_binding_bits(&self.commit)
     }
 }

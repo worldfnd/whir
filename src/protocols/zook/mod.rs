@@ -11,7 +11,7 @@ pub mod verifier;
 use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};
 
-pub use crate::protocols::params::config::ProtocolConfig;
+pub use crate::protocols::params::ProtocolConfig;
 use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, verify};
 
 /// Output of [`ProtocolConfig::verify`].
@@ -97,9 +97,7 @@ mod tests {
         },
         buffer::{Buffer, BufferMath, BufferOps},
         hash,
-        protocols::params::spec::{
-            DecodingRegime, FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
-        },
+        protocols::params::{DecodingRegime, Mode, RateSchedule, SecuritySpec, TuningSpec},
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
     };
 
@@ -113,7 +111,7 @@ mod tests {
             mode,
             decoding_regime: DecodingRegime::Johnson,
             target_security_bits: 40,
-            pow_budget: PowBudget::per_slot(10),
+            pow_budget: 10,
             hash_id: hash::BLAKE3,
         }
     }
@@ -123,7 +121,7 @@ mod tests {
         TuningSpec {
             vector_size: 1 << 12,
             starting_log_inv_rate: 1,
-            folding_factor: FoldingFactor::Constant(2),
+            folding_factor: [2, 2],
             rate_schedule: RateSchedule::Stepping,
         }
     }
@@ -133,7 +131,7 @@ mod tests {
         TuningSpec {
             vector_size: 1 << 3,
             starting_log_inv_rate: 1,
-            folding_factor: FoldingFactor::Constant(2),
+            folding_factor: [2, 2],
             rate_schedule: RateSchedule::Stepping,
         }
     }
@@ -597,7 +595,7 @@ mod tests {
             mode,
             decoding_regime: DecodingRegime::Johnson,
             target_security_bits: 128,
-            pow_budget: PowBudget::per_slot(10),
+            pow_budget: 10,
             hash_id: hash::SHA2,
         }
     }
@@ -606,10 +604,7 @@ mod tests {
         TuningSpec {
             vector_size: 1 << 19,
             starting_log_inv_rate: 2,
-            folding_factor: FoldingFactor::ConstantFromSecondRound {
-                initial: 3,
-                rest: 3,
-            },
+            folding_factor: [3, 3],
             rate_schedule: RateSchedule::Stepping,
         }
     }

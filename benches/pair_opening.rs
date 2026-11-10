@@ -13,9 +13,7 @@ use whir::{
         random_vector,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    protocols::params::{
-        FoldingFactor, Mode, PowBudget, ProtocolConfig, RateSchedule, SecuritySpec, TuningSpec,
-    },
+    protocols::params::{Mode, ProtocolConfig, RateSchedule, SecuritySpec, TuningSpec},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -29,11 +27,11 @@ where
     let config = ProtocolConfig::<M>::derive(
         SecuritySpec::new(128)
             .with_mode(Mode::ZeroKnowledge)
-            .with_pow_budget(PowBudget::Forbidden),
+            .with_pow_budget(0),
         TuningSpec {
             vector_size: size,
             starting_log_inv_rate: 2,
-            folding_factor: FoldingFactor::Constant(4),
+            folding_factor: [4, 4],
             rate_schedule: RateSchedule::Capped {
                 max_log_inv_rate: 4,
             },

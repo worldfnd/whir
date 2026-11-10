@@ -17,7 +17,7 @@ use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
     buffer::BufferOps,
     hash::Hash,
-    protocols::params::{config::Node, RoundConfig},
+    protocols::params::{Node, RoundConfig},
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerificationError, VerificationResult, VerifierState,
@@ -44,7 +44,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             || forms.len() != values.len()
             || forms
                 .iter()
-                .any(|form| form.size() != first.sumcheck().initial_size())
+                .any(|form| form.size() != first.sumcheck.initial_size())
         {
             return Err(VerificationError);
         }
@@ -77,7 +77,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let source = self
             .first_round()
             .ok_or(VerificationError)?
-            .code_switch()
+            .code_switch
             .source();
         let binding = self.commitment_config_binding();
         if committed.iter().any(|w| {
@@ -113,7 +113,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         ps.prover_messages(values);
         let [left, right] = committed;
         let reduced = reduce_prover(self, ps, left, Some(right), Some(&first), forms, values);
-        Ok(self.prove_final_opening(ps, reduced, first.sumcheck().initial_size()))
+        Ok(self.prove_final_opening(ps, reduced, first.sumcheck.initial_size()))
     }
 
     /// Verify a pair of independent, single-use commitments under this configuration.
@@ -166,6 +166,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         }
         let [left, right] = commitments;
         let reduced = reduce_verifier(self, vs, left, Some(right), Some(&first), forms, values)?;
-        self.verify_final_opening(vs, reduced, first.sumcheck().initial_size())
+        self.verify_final_opening(vs, reduced, first.sumcheck.initial_size())
     }
 }

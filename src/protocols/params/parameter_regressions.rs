@@ -1,17 +1,10 @@
-//! Parameter-selection baselines captured from PR #283 before the refactor.
-//! The projection excludes config serialization, type names, and proof bytes.
-//! Seeded protocol roundtrips also exercise deserialized configurations.
-
+//! PR #283 parameter baselines and seeded proofs through deserialized configurations.
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, rngs::StdRng, SeedableRng};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zeroize::Zeroize;
 
-use super::{
-    BasecasePlan, DecodingRegime, FoldingFactor, KneeWeight, Mode, PowBudget, ProtocolConfig,
-    RateSchedule, RoundConfig, SecuritySpec, TuningSpec,
-};
+use super::*;
 use crate::{
     algebra::{
         embedding::{Basefield, Embedding, Identity},
@@ -24,26 +17,6 @@ use crate::{
     transcript::{codecs::U64, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
-const BASELINE_REVISION: &str = "b9a4e7823cadce9d2d5727380a1cab3d5304c54f";
-const PRIVATE_SEED: u64 = 0x7061_7261_6d73_2830;
-const WITNESS_SEED: u64 = 0x7768_6972_2830_0001;
-
-#[derive(Debug, Deserialize)]
-struct Fixtures {
-    baseline_revision: String,
-    cases: Vec<Fingerprint>,
-    configurations: Vec<Fingerprint>,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Fingerprint {
-    name: String,
-    rounds: usize,
-    parameters_blake3: String,
-}
-
-// This schema records protocol decisions through primitive values and accessors.
-// It deliberately excludes computed security reports and private storage layout.
 fn code_parameters<M: Embedding>(code: &irs_commit::Config<M>) -> Value {
     let matrix = code.matrix_commit();
     json!({
@@ -80,18 +53,18 @@ fn sumcheck_parameters<F: Field>(config: &sumcheck::Config<F>) -> Value {
 }
 
 fn round_parameters<M: Embedding>(round: &RoundConfig<'_, M>) -> Value {
-    let switch = round.code_switch();
+    let switch = &round.code_switch;
     json!({
-        "index": round.round_index(),
-        "zk": round.masks().is_some(),
+        "index": round.index,
+        "zk": round.masks.is_some(),
         "source": code_parameters(switch.source()),
         "target": code_parameters(switch.target()),
         "out_domain_samples": switch.out_domain_samples(),
         "message_mask_length": switch.message_mask_length(),
         "switch_zk": switch.is_zk(),
         "pow": pow_parameters(switch.pow()),
-        "sumcheck": sumcheck_parameters(round.sumcheck()),
-        "sumcheck_mask_coefficients": round.masks().map(|masks| masks.sumcheck_coefficients),
+        "sumcheck": sumcheck_parameters(&round.sumcheck),
+        "sumcheck_mask_coefficients": round.masks.map(|masks| masks.sumcheck_coefficients),
     })
 }
 
@@ -101,16 +74,7 @@ fn parameters<M: Embedding>(config: &ProtocolConfig<M>) -> Value {
         rounds.push(round_parameters(&first));
     }
     rounds.extend(config.tail_rounds().map(|round| round_parameters(&round)));
-    let (sumcheck, pow) = match config.basecase() {
-        BasecasePlan::Standard { config, .. } => (
-            sumcheck_parameters(config.sumcheck()),
-            pow_parameters(config.pow()),
-        ),
-        BasecasePlan::ZeroKnowledge { sumcheck, .. } => (
-            sumcheck_parameters(&sumcheck),
-            pow_parameters(proof_of_work::Config::none()),
-        ),
-    };
+    let basecase = config.basecase();
     let masks: Vec<_> = (0..=config.num_rounds())
         .map(|index| {
             config
@@ -129,68 +93,122 @@ fn parameters<M: Embedding>(config: &ProtocolConfig<M>) -> Value {
         "padded_vector_size": config.padded_vector_size(),
         "rounds": rounds,
         "basecase": {
-            "zk": config.basecase().is_zk(),
+            "zk": config.security().mode.is_zk(),
             "code": code_parameters(config.basecase().commit()),
-            "sumcheck": sumcheck,
-            "pow": pow,
+            "sumcheck": sumcheck_parameters(basecase.sumcheck()),
+            "pow": pow_parameters(basecase.pow()),
         },
         "witness_masks": masks,
         "joint_masks": joint,
     })
 }
 
-fn fingerprint<M: Embedding>(name: &str, config: &ProtocolConfig<M>) -> Fingerprint {
-    let projection = serde_json::to_vec(&parameters(config)).unwrap();
-    Fingerprint {
-        name: name.to_owned(),
-        rounds: config.num_rounds(),
-        parameters_blake3: blake3::hash(&projection).to_hex().to_string(),
-    }
-}
-
-fn serialization_roundtrip<M: Embedding + Default>(
+fn check<M: Embedding + Default>(
+    expected: &Value,
     config: &ProtocolConfig<M>,
 ) -> ProtocolConfig<M> {
-    let json = serde_json::to_vec(config).unwrap();
-    let mut cbor = Vec::new();
-    ciborium::into_writer(config, &mut cbor).unwrap();
-    let from_json: ProtocolConfig<M> = serde_json::from_slice(&json).unwrap();
-    let from_cbor: ProtocolConfig<M> = ciborium::from_reader(cbor.as_slice()).unwrap();
-    assert_eq!(config, &from_json);
-    assert_eq!(config, &from_cbor);
-    from_json.validate().unwrap();
-    from_cbor.validate().unwrap();
-    from_json
+    if let Some(first) = config.first_round() {
+        let mut previous = first.code_switch.target();
+        for round in config.tail_rounds() {
+            assert!(std::ptr::eq(previous, round.code_switch.source()));
+            previous = round.code_switch.target();
+        }
+        assert!(std::ptr::eq(previous, config.final_commit()));
+    }
+    assert!(std::ptr::eq(
+        config.final_commit(),
+        config.basecase().commit()
+    ));
+    if expected["name"].as_str().unwrap().ends_with("pair") {
+        config.validate_pair().unwrap();
+        let first = config.first_round().unwrap();
+        let node = config.pair_source().unwrap();
+        let paired = config.pair_round(&node).unwrap();
+        assert_eq!(
+            paired.sumcheck.num_rounds(),
+            first.sumcheck.num_rounds() + 1
+        );
+        assert_eq!(
+            paired.sumcheck.initial_size(),
+            2 * first.sumcheck.initial_size()
+        );
+        assert_eq!(paired.sumcheck.final_size(), first.sumcheck.final_size());
+        assert!(std::ptr::eq(
+            paired.code_switch.target(),
+            first.code_switch.target()
+        ));
+    }
+    let name = expected["name"].as_str().unwrap();
+    let projection = serde_json::to_vec(&parameters(config)).unwrap();
+    assert_eq!(
+        *expected,
+        json!({"name": name, "rounds": config.num_rounds(),
+        "parameters_blake3": blake3::hash(&projection).to_hex().to_string()})
+    );
+    let restored = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+    assert_eq!(config, &restored);
+    let mut bytes = Vec::new();
+    ciborium::into_writer(config, &mut bytes).unwrap();
+    assert_eq!(
+        config,
+        &ciborium::from_reader::<ProtocolConfig<M>, _>(bytes.as_slice()).unwrap()
+    );
+    restored
 }
 
-fn capture<M>(name: &str, mode: Mode, basecase: bool, pair: bool) -> Fingerprint
+fn prove_case<M>(expected: &Value)
 where
     M: Embedding + Default,
     M::Target: Default + Zeroize + Codec,
     Standard: Distribution<M::Source> + Distribution<M::Target>,
 {
+    let name = expected["name"].as_str().unwrap();
+    let (prefix, kind) = name.split_once('_').unwrap();
+    let mode = match prefix {
+        "standard" => Mode::Standard,
+        "zk" => Mode::ZeroKnowledge,
+        _ => panic!("unknown mode"),
+    };
+    let regime = match kind {
+        "unique" => DecodingRegime::Unique,
+        "capacity" => DecodingRegime::Capacity,
+        _ => DecodingRegime::Johnson,
+    };
+    let schedule = match kind {
+        "adaptive" => RateSchedule::Adaptive {
+            knee_weight: KneeWeight::DEFAULT,
+        },
+        "capped" => RateSchedule::Capped {
+            max_log_inv_rate: 2,
+        },
+        _ => RateSchedule::Stepping,
+    };
+    let basecase = kind == "basecase";
+    let pair = kind.ends_with("pair");
+    let proof_case = matches!(
+        kind,
+        "basecase" | "rounds" | "mixed" | "pair" | "mixed_pair"
+    );
     let config = ProtocolConfig::<M>::derive(
         SecuritySpec::new(128)
             .with_mode(mode)
-            .with_pow_budget(PowBudget::Forbidden),
+            .with_decoding_regime(regime)
+            .with_pow_budget(if proof_case { 0 } else { 16 }),
         TuningSpec {
             vector_size: if basecase { 8 } else { 4096 },
             starting_log_inv_rate: 1,
-            folding_factor: FoldingFactor::Constant(2),
-            rate_schedule: RateSchedule::Stepping,
+            folding_factor: [2, 2],
+            rate_schedule: schedule,
         },
     )
     .unwrap();
-    assert_eq!(config.has_rounds(), !basecase, "{name}: expected layout");
-    if pair {
-        config.validate_pair().unwrap();
+    let from_json = check(expected, &config);
+    if !proof_case {
+        return;
     }
-
-    let from_json = serialization_roundtrip(&config);
-
     let n = config.tuning().vector_size;
     let count = if pair { 2 } else { 1 };
-    let mut rng = StdRng::seed_from_u64(WITNESS_SEED);
+    let mut rng = StdRng::seed_from_u64(0x7768_6972_2830_0001);
     let witness: Vec<M::Source> = random_vector(&mut rng, n * count);
     // Full-field coefficients exercise the genuine extension-field path.
     let forms: Vec<Covector<M::Target>> = (0..2)
@@ -201,11 +219,11 @@ where
         .map(|form| form.evaluate(&M::default(), &witness))
         .collect();
     let refs: Vec<&dyn LinearForm<M::Target>> = forms.iter().map(|form| form as _).collect();
-    let instance = U64(WITNESS_SEED);
+    let instance = U64(0x7768_6972_2830_0001);
     let ds = DomainSeparator::protocol(&config)
         .session(&name)
         .instance(&instance);
-    let mut prover = ProverState::new_std_seeded(&ds, PRIVATE_SEED);
+    let mut prover = ProverState::new_std_seeded(&ds, 0x7061_7261_6d73_2830);
     // Bind every public claim before any commitment or opening challenge.
     for form in &forms {
         prover.prover_messages(&form.vector);
@@ -248,137 +266,26 @@ where
     let sentinel: M::Target = verifier.prover_message().unwrap();
     assert_eq!(sentinel, M::Target::from(987));
     verifier.check_eof().unwrap();
-
-    fingerprint(name, &config)
-}
-
-fn check(actual: &Fingerprint) {
-    let fixtures: Fixtures = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/parameter_regressions.json"
-    ))
-    .unwrap();
-    assert_eq!(fixtures.baseline_revision, BASELINE_REVISION);
-    let expected = fixtures
-        .cases
-        .iter()
-        .find(|fixture| fixture.name == actual.name)
-        .expect("baseline fixture exists");
-    assert_eq!(actual, expected, "PR #283 parameter selection changed");
-}
-
-macro_rules! fixture {
-    ($name:ident, $embedding:ty, $mode:ident, $basecase:expr, $pair:expr) => {
-        #[test]
-        fn $name() {
-            check(&capture::<$embedding>(
-                stringify!($name),
-                Mode::$mode,
-                $basecase,
-                $pair,
-            ));
-        }
-    };
-}
-
-fixture!(standard_basecase, Identity<Field256>, Standard, true, false);
-fixture!(zk_basecase, Identity<Field256>, ZeroKnowledge, true, false);
-fixture!(standard_rounds, Identity<Field256>, Standard, false, false);
-fixture!(zk_rounds, Identity<Field256>, ZeroKnowledge, false, false);
-fixture!(standard_mixed, Basefield<Field64_3>, Standard, false, false);
-fixture!(zk_mixed, Basefield<Field64_3>, ZeroKnowledge, false, false);
-fixture!(standard_pair, Identity<Field256>, Standard, false, true);
-fixture!(zk_pair, Identity<Field256>, ZeroKnowledge, false, true);
-fixture!(
-    standard_mixed_pair,
-    Basefield<Field64_3>,
-    Standard,
-    false,
-    true
-);
-fixture!(
-    zk_mixed_pair,
-    Basefield<Field64_3>,
-    ZeroKnowledge,
-    false,
-    true
-);
-
-fn parameter_choices() -> Vec<Fingerprint> {
-    let choices = [
-        (
-            "standard_adaptive",
-            Mode::Standard,
-            DecodingRegime::Johnson,
-            RateSchedule::Adaptive {
-                knee_weight: KneeWeight::DEFAULT,
-            },
-        ),
-        (
-            "zk_adaptive",
-            Mode::ZeroKnowledge,
-            DecodingRegime::Johnson,
-            RateSchedule::Adaptive {
-                knee_weight: KneeWeight::DEFAULT,
-            },
-        ),
-        (
-            "standard_capped",
-            Mode::Standard,
-            DecodingRegime::Johnson,
-            RateSchedule::Capped {
-                max_log_inv_rate: 2,
-            },
-        ),
-        (
-            "zk_capped",
-            Mode::ZeroKnowledge,
-            DecodingRegime::Johnson,
-            RateSchedule::Capped {
-                max_log_inv_rate: 2,
-            },
-        ),
-        (
-            "standard_unique",
-            Mode::Standard,
-            DecodingRegime::Unique,
-            RateSchedule::Stepping,
-        ),
-        (
-            "standard_capacity",
-            Mode::Standard,
-            DecodingRegime::Capacity,
-            RateSchedule::Stepping,
-        ),
-    ];
-    choices
-        .into_iter()
-        .map(|(name, mode, regime, rate_schedule)| {
-            let config = ProtocolConfig::<Identity<Field256>>::derive(
-                SecuritySpec::new(128)
-                    .with_mode(mode)
-                    .with_decoding_regime(regime)
-                    .with_pow_budget(PowBudget::per_slot(16)),
-                TuningSpec {
-                    vector_size: 4096,
-                    starting_log_inv_rate: 1,
-                    folding_factor: FoldingFactor::Constant(2),
-                    rate_schedule,
-                },
-            )
-            .unwrap();
-            config.validate().unwrap();
-            serialization_roundtrip(&config);
-            fingerprint(name, &config)
-        })
-        .collect()
 }
 
 #[test]
-fn alternate_schedules_and_decoding_regimes() {
-    let fixtures: Fixtures = serde_json::from_str(include_str!(
+fn all_parameter_baselines_and_seeded_proofs() {
+    let fixtures: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/parameter_regressions.json"
     ))
     .unwrap();
-    assert_eq!(fixtures.baseline_revision, BASELINE_REVISION);
-    assert_eq!(parameter_choices(), fixtures.configurations);
+    assert_eq!(
+        fixtures["baseline_revision"],
+        "b9a4e7823cadce9d2d5727380a1cab3d5304c54f"
+    );
+    let cases = fixtures["cases"].as_array().unwrap();
+    let choices = fixtures["configurations"].as_array().unwrap();
+    assert_eq!((cases.len(), choices.len()), (10, 6));
+    for expected in cases.iter().chain(choices) {
+        if expected["name"].as_str().unwrap().contains("mixed") {
+            prove_case::<Basefield<Field64_3>>(expected);
+        } else {
+            prove_case::<Identity<Field256>>(expected);
+        }
+    }
 }

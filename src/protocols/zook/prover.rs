@@ -15,7 +15,7 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
-        params::{BasecasePlan, ProtocolConfig},
+        params::ProtocolConfig,
         zook::{
             commit::CommittedWitness,
             round::{reduce_prover, ProverRoundState},
@@ -68,35 +68,33 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let suffix = match self.basecase() {
-            BasecasePlan::Standard { config, .. } => {
-                assert!(state.masks.is_empty());
-                config
-                    .prove(
-                        ps,
-                        state.message,
-                        &state.irs_witness,
-                        state.covector,
-                        state.sum,
-                    )
-                    .evaluation_points
-            }
-            BasecasePlan::ZeroKnowledge { sumcheck, .. } => {
-                self.blind_final_claim(ps, &mut state);
-                let (value, opening) = sumcheck.prove(
+        let basecase = self.basecase();
+        let suffix = if self.security().mode.is_zk() {
+            self.blind_final_claim(ps, &mut state);
+            let (value, opening) = basecase.sumcheck().prove(
+                ps,
+                &Identity::new(),
+                state.message,
+                &mut state.covector,
+                &mut state.sum,
+                &[],
+            );
+            assert!(
+                !value.to_slice()[0].is_zero(),
+                "final witness evaluation is zero"
+            );
+            opening.round_challenges
+        } else {
+            assert!(state.masks.is_empty());
+            basecase
+                .prove(
                     ps,
-                    &Identity::new(),
                     state.message,
-                    &mut state.covector,
-                    &mut state.sum,
-                    &[],
-                );
-                assert!(
-                    !value.to_slice()[0].is_zero(),
-                    "final witness evaluation is zero"
-                );
-                opening.round_challenges
-            }
+                    &state.irs_witness,
+                    state.covector,
+                    state.sum,
+                )
+                .evaluation_points
         };
         state.challenges.extend(suffix);
         let dimensions = original_size.trailing_zeros() as usize;
@@ -126,7 +124,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     {
         let layout = self.joint_masks().expect("final opening mask layout");
         assert!(!state.masks.is_empty());
-        let commit = self.basecase().commit();
+        let commit = self.final_commit();
         let mask_commit = layout.commit();
         let mut witness_blinder = Buffer::random(ps.rng(), commit.vector_size());
         let mut mask_blinders: Vec<_> = state
