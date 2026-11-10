@@ -41,10 +41,22 @@ pub use derive::DeriveError;
 type Result<T> = std::result::Result<T, DeriveError>;
 pub use masks::{JointMaskConfig, WitnessMaskConfig};
 
+/// Select standard WHIR or Zook with overlaid masks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mode {
+    Standard,
+    ZeroKnowledge,
+}
+impl Mode {
+    pub const fn is_zk(self) -> bool {
+        matches!(self, Self::ZeroKnowledge)
+    }
+}
+
 /// Security and layout choices. Rates and folds use base-two logarithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {
-    pub zk: bool,
+    pub mode: Mode,
     pub regime: DecodingRegime,
     /// Required security bits for each checked protocol step.
     pub bits: u32,
@@ -201,7 +213,7 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// Mask dimensions come from the commitment that owns the corresponding witness.
     pub fn witness_mask(&self, index: usize) -> Option<WitnessMaskConfig> {
         assert!(index <= self.num_rounds());
-        if !self.params().zk {
+        if !self.params().mode.is_zk() {
             return None;
         }
         let mask = if index == 0 && self.has_rounds() {

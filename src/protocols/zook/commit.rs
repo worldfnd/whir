@@ -303,17 +303,17 @@ mod tests {
         },
         protocols::{
             irs_commit::Evaluations,
-            params::{Params, RateSchedule},
+            params::{Mode, Params, RateSchedule},
         },
         transcript::{codecs::Empty, DomainSeparator, VerifierMessage},
     };
 
     type M = Basefield<Field64_2>;
 
-    fn config<M: Embedding + Default>(mode: bool, vector_size: usize) -> ProtocolConfig<M> {
+    fn config<M: Embedding + Default>(mode: Mode, vector_size: usize) -> ProtocolConfig<M> {
         ProtocolConfig::derive(Params {
             bits: 80,
-            zk: mode,
+            mode,
             regime: crate::protocols::params::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn commits_source_overlays_from_the_joint_mask() {
-        let config = config::<M>(true, 4096);
+        let config = config::<M>(Mode::ZeroKnowledge, 4096);
         let committed = roundtrip(&config);
         let joint = committed.joint_masks.as_ref().unwrap();
         let layout = config.joint_masks().unwrap();
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn small_witness_is_padded_then_masked_in_the_target_field() {
-        let config = config::<M>(true, 8);
+        let config = config::<M>(Mode::ZeroKnowledge, 8);
         assert!(!config.has_rounds());
         let committed = roundtrip(&config);
         let joint = committed.joint_masks.as_ref().unwrap();
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn initial_mask_and_membership_blinder_use_the_source_field() {
-        let config = config::<M>(true, 4096);
+        let config = config::<M>(Mode::ZeroKnowledge, 4096);
         let layout = config.joint_masks().unwrap();
         let mut rng = StdRng::seed_from_u64(17);
         let (mut coefficients, initial) = sample_masks::<M, _>(layout, true, &mut rng);
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn commitment_supports_identity_embedding() {
-        let config = config::<Identity<Field64_2>>(true, 4096);
+        let config = config::<Identity<Field64_2>>(Mode::ZeroKnowledge, 4096);
         let committed = roundtrip(&config);
         assert!(committed.joint_masks.is_some());
         assert!(matches!(committed.state, CommittedState::Round { .. }));
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn standard_commitment_preserves_the_witness() {
         for size in [8, 4096] {
-            let config = config::<M>(false, size);
+            let config = config::<M>(Mode::Standard, size);
             let committed = roundtrip(&config);
             assert!(committed.joint_masks.is_none());
             match &committed.state {
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "zook witness length")]
     fn commit_rejects_wrong_witness_size() {
-        let config = config::<M>(true, 4096);
+        let config = config::<M>(Mode::ZeroKnowledge, 4096);
         let ds = DomainSeparator::protocol(&"zook-commit-test")
             .session(&"wrong witness size")
             .instance(&Empty);

@@ -140,7 +140,7 @@ fn terminal_cost<M: Embedding + Default>(
     let code = solve_irs::<Identity<M::Target>>(spec, context).ok()?;
     let _ = terminal(spec, &code, incoming).ok()?;
     let cost = code_cost(&code);
-    if !spec.zk {
+    if !spec.mode.is_zk() {
         return Some((cost, None));
     }
     let payload = masks.checked_add(

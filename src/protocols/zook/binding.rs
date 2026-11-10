@@ -121,7 +121,7 @@ mod tests {
             fields::{Field64, Field64_2},
             linear_form::{Covector, Evaluate, UnivariateEvaluation},
         },
-        protocols::params::{Params, ProtocolConfig, RateSchedule},
+        protocols::params::{Mode, Params, ProtocolConfig, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator, MockSponge},
     };
 
@@ -160,7 +160,7 @@ mod tests {
     fn config() -> ProtocolConfig<Basefield<Field64_2>> {
         ProtocolConfig::derive(Params {
             bits: 80,
-            zk: true,
+            mode: Mode::ZeroKnowledge,
             regime: crate::protocols::params::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,

@@ -93,7 +93,7 @@ fn parameters<M: Embedding>(config: &ProtocolConfig<M>) -> Value {
         "padded_vector_size": config.padded_vector_size(),
         "rounds": rounds,
         "basecase": {
-            "zk": config.params().zk,
+            "zk": config.params().mode.is_zk(),
             "code": code_parameters(config.basecase().commit()),
             "sumcheck": sumcheck_parameters(basecase.sumcheck()),
             "pow": pow_parameters(basecase.pow()),
@@ -165,8 +165,8 @@ where
     let name = expected["name"].as_str().unwrap();
     let (prefix, kind) = name.split_once('_').unwrap();
     let mode = match prefix {
-        "standard" => false,
-        "zk" => true,
+        "standard" => Mode::Standard,
+        "zk" => Mode::ZeroKnowledge,
         _ => panic!("unknown mode"),
     };
     let regime = match kind {
@@ -187,7 +187,7 @@ where
     );
     let config = ProtocolConfig::<M>::derive(Params {
         bits: 128,
-        zk: mode,
+        mode,
         regime,
         pow: if proof_case { 0 } else { 16 },
         hash: crate::hash::BLAKE3,

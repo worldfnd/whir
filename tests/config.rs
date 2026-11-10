@@ -5,7 +5,7 @@ use whir::{
         embedding::{Basefield, Identity},
         fields::{Field64_2, Field64_3},
     },
-    protocols::params::{Params, ProtocolConfig, RateSchedule},
+    protocols::params::{Mode, Params, ProtocolConfig, RateSchedule},
 };
 type Config = ProtocolConfig<Identity<Field64_2>>;
 
@@ -22,7 +22,7 @@ fn rejects(input: &Value) {
 fn rejects_malformed_requests_and_embedding_changes() {
     let config = Config::derive(Params {
         bits: 40,
-        zk: false,
+        mode: Mode::Standard,
         regime: whir::protocols::params::DecodingRegime::Johnson,
         pow: 0,
         hash: whir::hash::BLAKE3,
@@ -34,6 +34,7 @@ fn rejects_malformed_requests_and_embedding_changes() {
     .unwrap();
     let original = serde_json::to_value(&config).unwrap();
     assert_eq!(original.as_object().unwrap().len(), 2);
+    assert_eq!(original["params"]["mode"], json!("Standard"));
     assert!(
         serde_json::from_value::<ProtocolConfig<Identity<Field64_3>>>(original.clone()).is_err()
     );
@@ -55,6 +56,9 @@ fn rejects_malformed_requests_and_embedding_changes() {
     }
     for (pointer, invalid) in [
         ("/embedding", Value::Null),
+        ("/params/mode", Value::Null),
+        ("/params/mode", json!(true)),
+        ("/params/mode", json!("Unknown")),
         ("/params/size", json!(0)),
         ("/params/size", json!(3)),
         ("/params/size", json!(usize::MAX)),
@@ -72,7 +76,7 @@ fn rejects_malformed_requests_and_embedding_changes() {
     }
     for regime in ["Unique", "Capacity"] {
         let mut input = original.clone();
-        input["params"]["zk"] = json!(true);
+        input["params"]["mode"] = json!(Mode::ZeroKnowledge);
         input["params"]["regime"] = json!(regime);
         rejects(&input);
     }

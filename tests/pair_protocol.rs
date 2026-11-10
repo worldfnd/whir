@@ -14,7 +14,7 @@ use whir::{
     buffer::Buffer,
     hash::{Hash, BLAKE3, SHA2},
     protocols::{
-        params::{DecodingRegime, Params, RateSchedule},
+        params::{DecodingRegime, Mode, Params, RateSchedule},
         zook::{ProtocolConfig, ProverClaim},
     },
     transcript::{
@@ -24,9 +24,9 @@ use whir::{
 };
 use zeroize::Zeroize;
 
-fn source<M: Embedding + Default>(mode: bool) -> ProtocolConfig<M> {
+fn source<M: Embedding + Default>(mode: Mode) -> ProtocolConfig<M> {
     ProtocolConfig::derive(Params {
-        zk: mode,
+        mode,
         regime: DecodingRegime::Johnson,
         bits: 128,
         pow: 10,
@@ -164,7 +164,7 @@ where
 
 #[test]
 fn hand_calculated_claims_use_both_existing_commitments_at_128_bits() {
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let example = prove_example(source::<Identity<Field256>>(mode), Field256::from(19));
         verify_example(&example, Change::None).unwrap();
     }
@@ -174,7 +174,7 @@ fn hand_calculated_claims_use_both_existing_commitments_at_128_bits() {
 fn genuine_extension_coefficients_open_base_field_witnesses_at_128_bits() {
     let e = Field64_3::new(2u64.into(), 3u64.into(), 5u64.into());
     assert_ne!(e, Field64_3::from(2));
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let example = prove_example(source::<Basefield<Field64_3>>(mode), e);
         assert_ne!(example.values[1], Field64_3::from(16));
         verify_example(&example, Change::None).unwrap();
@@ -184,7 +184,7 @@ fn genuine_extension_coefficients_open_base_field_witnesses_at_128_bits() {
 #[test]
 fn selector_fold_preserves_a_short_tail_or_an_immediate_basecase() {
     type F = Field256;
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let source = source::<Identity<F>>(mode);
         for (vector_size, initial) in [(4096, 3), (2048, 2)] {
             let config = ProtocolConfig::<Identity<F>>::derive(Params {
@@ -199,7 +199,7 @@ fn selector_fold_preserves_a_short_tail_or_an_immediate_basecase() {
             })
             .unwrap();
             assert!(config.has_rounds());
-            if mode && vector_size == 2048 {
+            if mode.is_zk() && vector_size == 2048 {
                 assert_eq!(config.num_rounds(), 1);
             }
             let example = prove_example(config, F::from(19));
@@ -210,7 +210,7 @@ fn selector_fold_preserves_a_short_tail_or_an_immediate_basecase() {
 
 #[test]
 fn changed_roots_claim_values_and_final_forms_are_rejected() {
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let example = prove_example(source::<Identity<Field256>>(mode), Field256::from(19));
         for change in [
             Change::SwapRoots,
@@ -232,7 +232,7 @@ fn changed_roots_claim_values_and_final_forms_are_rejected() {
 
 #[test]
 fn truncated_joint_proofs_are_rejected() {
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let mut example = prove_example(source::<Identity<Field256>>(mode), Field256::from(19));
         example
             .proof
@@ -245,7 +245,7 @@ fn truncated_joint_proofs_are_rejected() {
 #[test]
 fn all_claim_values_precede_the_shared_batching_challenge() {
     type F = Field256;
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let example = prove_example(source::<Identity<F>>(mode), F::from(19));
         let ds = DomainSeparator::protocol(&"two-witness-examples").instance(&Empty);
         let mut observer = VerifierState::new_std(&ds, &example.proof);
@@ -270,7 +270,7 @@ fn all_claim_values_precede_the_shared_batching_challenge() {
 fn malformed_claim_dimensions_fail_before_transcript_mutation() {
     type F = Field256;
     type ClaimInput<'a> = (&'a [&'a dyn LinearForm<F>], &'a [F]);
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let config = source::<Identity<F>>(mode);
         let ds = DomainSeparator::protocol(&"pair-shape-checks").instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -313,7 +313,7 @@ fn malformed_claim_dimensions_fail_before_transcript_mutation() {
 fn incompatible_source_handles_fail_before_transcript_mutation() {
     type M = Identity<Field256>;
     type F = Field256;
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let source = source::<M>(mode);
         let config = &source;
         let params = *source.params();
@@ -331,7 +331,10 @@ fn incompatible_source_handles_fail_before_transcript_mutation() {
                 ..params
             },
             Params {
-                zk: !mode,
+                mode: match mode {
+                    Mode::Standard => Mode::ZeroKnowledge,
+                    Mode::ZeroKnowledge => Mode::Standard,
+                },
                 ..params
             },
         ]
@@ -364,7 +367,7 @@ fn incompatible_source_handles_fail_before_transcript_mutation() {
 #[test]
 fn cloned_mask_handles_are_rejected_without_advancing_the_transcript() {
     type F = Field256;
-    let config = source::<Identity<F>>(true);
+    let config = source::<Identity<F>>(Mode::ZeroKnowledge);
     let ds = DomainSeparator::protocol(&config).instance(&Empty);
     let form = Covector::new(vec![F::ONE; 8192]);
     let mut ps = ProverState::new_std(&ds);
@@ -411,7 +414,7 @@ fn cloned_mask_handles_are_rejected_without_advancing_the_transcript() {
 
 #[test]
 fn basecase_sources_do_not_support_pairs() {
-    for mode in [false, true] {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         let vector_size = 8;
         let config = ProtocolConfig::<Identity<Field256>>::derive(Params {
             size: vector_size,

@@ -71,7 +71,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         Hash: ProverMessage<[H::U]>,
     {
         let basecase = self.basecase();
-        let opening = if self.params().zk {
+        let opening = if self.params().mode.is_zk() {
             let (message, mut sum) = self.receive_final_claim(vs, &state)?;
             let point = basecase.sumcheck().verify(vs, &mut sum)?.round_challenges;
             let value = multilinear_extend(&message, &point);
@@ -213,7 +213,7 @@ mod tests {
         },
         buffer::{Buffer, BufferMath, BufferOps},
         protocols::{
-            params::{Params, RateSchedule},
+            params::{Mode, Params, RateSchedule},
             zook::{commit::CommittedWitness, round::reduce_prover},
         },
         transcript::{codecs::Empty, DomainSeparator, ProverState},
@@ -255,7 +255,7 @@ mod tests {
         for size in [8_usize, 4096] {
             let config = ProtocolConfig::<Basefield<Field64_2>>::derive(Params {
                 bits: 80,
-                zk: true,
+                mode: Mode::ZeroKnowledge,
                 regime: crate::protocols::params::DecodingRegime::Johnson,
                 pow: 0,
                 hash: crate::hash::BLAKE3,
@@ -363,7 +363,7 @@ mod tests {
         let size = 4096;
         let config = ProtocolConfig::<Basefield<Field64_2>>::derive(Params {
             bits: 80,
-            zk: true,
+            mode: Mode::ZeroKnowledge,
             regime: crate::protocols::params::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,

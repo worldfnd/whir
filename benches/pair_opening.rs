@@ -13,7 +13,7 @@ use whir::{
         random_vector,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    protocols::params::{Params, ProtocolConfig, RateSchedule},
+    protocols::params::{Mode, Params, ProtocolConfig, RateSchedule},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -26,7 +26,7 @@ where
     let size = 1 << log_size;
     let config = ProtocolConfig::<M>::derive(Params {
         bits: 128,
-        zk: true,
+        mode: Mode::ZeroKnowledge,
         regime: whir::protocols::params::DecodingRegime::Johnson,
         pow: 0,
         hash: whir::hash::BLAKE3,

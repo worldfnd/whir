@@ -69,7 +69,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         Hash: ProverMessage<[H::U]>,
     {
         let basecase = self.basecase();
-        let suffix = if self.params().zk {
+        let suffix = if self.params().mode.is_zk() {
             self.blind_final_claim(ps, &mut state);
             let (value, opening) = basecase.sumcheck().prove(
                 ps,

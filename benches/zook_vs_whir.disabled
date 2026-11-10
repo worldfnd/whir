@@ -33,7 +33,7 @@ use whir::{
     hash,
     parameters::ProtocolParameters,
     protocols::{
-        params::{DecodingRegime, Params, ProtocolConfig, RateSchedule},
+        params::{DecodingRegime, Mode, Params, ProtocolConfig, RateSchedule},
         whir as whir_non_zk,
     },
     transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
@@ -170,7 +170,7 @@ fn bench_whir(log_size: u32) -> Result<PhaseSamples, String> {
 
 fn bench_zook(
     log_size: u32,
-    zk: bool,
+    mode: Mode,
     rate_schedule: RateSchedule,
 ) -> Result<PhaseSamples, String> {
     let size = 1usize << log_size;
@@ -179,10 +179,10 @@ fn bench_zook(
         RateSchedule::Stepping => "stepping",
         RateSchedule::Capped(_) => "capped",
     };
-    let mode_tag = if zk { "zk" } else { "standard" };
+    let mode_tag = if mode.is_zk() { "zk" } else { "standard" };
     let label = format!("zook-{mode_tag}-{schedule_tag}");
     let config = ProtocolConfig::<Embed>::derive(Params {
-        zk,
+        mode,
         regime: DecodingRegime::Johnson,
         bits: SECURITY_LEVEL,
         pow: POW_BITS,
@@ -331,7 +331,7 @@ fn main() {
         // the rate-schedule delta.
         let stepping = RateSchedule::Stepping;
         eprintln!("[2^{log_size}] zook_standard_stepping ...");
-        match bench_zook(log_size, false, stepping) {
+        match bench_zook(log_size, Mode::Standard, stepping) {
             Ok(s) => {
                 let pb = s.proof_bytes;
                 record_cell(
@@ -366,7 +366,7 @@ fn main() {
         }
 
         eprintln!("[2^{log_size}] zook_zk_stepping ...");
-        match bench_zook(log_size, true, RateSchedule::Stepping) {
+        match bench_zook(log_size, Mode::ZeroKnowledge, RateSchedule::Stepping) {
             Ok(s) => {
                 let pb = s.proof_bytes;
                 record_cell(

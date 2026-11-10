@@ -41,7 +41,7 @@ fn unsupported_zook_regime_fails_before_ntt_lookup() {
     type F = ark_ff::Fp64<ark_ff::MontBackend<UnregisteredFieldConfig, 1>>;
     for regime in [Unique, Capacity] {
         let result = ProtocolConfig::<Identity<F>>::derive(Params {
-            zk: true,
+            mode: Mode::ZeroKnowledge,
             regime,
             bits: 40,
             pow: 0,
@@ -120,7 +120,7 @@ fn zook_equations_and_hypotheses() {
     // Agreement: L*((2/3)*L^4*rho+1)*n/Q; DEEP: L²*m/(2*(Q-n)).
     // Binding: L*(L+1)*m/(2*(Q-1)); final queries sum two equal errors.
     let (queries, aggregation) = zook_query_error_bits(&source, &target).unwrap();
-    let (sumcheck, _) = round_bits(&source, Some(&target), 1, true).unwrap();
+    let (sumcheck, _) = round_bits(&source, Some(&target), 1, Mode::ZeroKnowledge).unwrap();
     let (binding, combination, final_queries) = final_bits(&witness, &masks).unwrap();
     for (actual, expected) in [
         (sumcheck, 95.975_318_644_3),
@@ -155,7 +155,7 @@ fn standard_round_equations_and_layout() {
     ] {
         for folds in 1..=3 {
             let config = ProtocolConfig::<Identity<Field64>>::derive(Params {
-                zk: false,
+                mode: Mode::Standard,
                 regime,
                 bits: 80,
                 pow: 60,
@@ -173,7 +173,7 @@ fn standard_round_equations_and_layout() {
                 source,
                 Some(switch.target()),
                 switch.out_domain_samples(),
-                false,
+                Mode::Standard,
             )
             .unwrap();
             assert_close(f64::from(bound), sumcheck + folds as f64 - 2.0);
@@ -201,7 +201,7 @@ fn standard_round_equations_and_layout() {
 #[test]
 fn grinding_respects_fractional_targets_and_mode() {
     let spec = Params {
-        zk: false,
+        mode: Mode::Standard,
         regime: Johnson,
         bits: 80,
         pow: 60,
@@ -218,7 +218,13 @@ fn grinding_respects_fractional_targets_and_mode() {
     }
     for (spec, bound) in [
         (Params { pow: 59, ..spec }, 20.3422),
-        (Params { zk: true, ..spec }, 79.9999),
+        (
+            Params {
+                mode: Mode::ZeroKnowledge,
+                ..spec
+            },
+            79.9999,
+        ),
     ] {
         assert!(grind_to_at(&spec, Bits::new(bound), "test").is_err());
     }

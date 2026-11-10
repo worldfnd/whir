@@ -645,7 +645,9 @@ where
             layout.sumcheck_masks[index].clone(),
             remaining_size,
             &opening,
-            second.is_some(),
+            second
+                .as_ref()
+                .map_or(FoldKind::Regular, |_| FoldKind::PairSelector),
         );
         message = overlay_mask(
             message,
@@ -726,7 +728,9 @@ where
             layout.sumcheck_masks[index].clone(),
             state.kernel.size,
             &opening,
-            second.is_some(),
+            second
+                .as_ref()
+                .map_or(FoldKind::Regular, |_| FoldKind::PairSelector),
         );
     }
     let commitments: Vec<_> = once(&state.irs).chain(second).collect();
@@ -759,25 +763,31 @@ where
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum FoldKind {
+    Regular,
+    PairSelector,
+}
+
 /// Distribute the enlarged sparse mask across its original committed collections.
 fn fold_mask_claims<'a, F: Field>(
     claims: impl Iterator<Item = &'a mut MaskClaims<F>>,
     range: Range<usize>,
     remaining_size: usize,
     opening: &SumcheckOpening<F>,
-    selector: bool,
+    kind: FoldKind,
 ) {
     for (collection, claims) in claims.enumerate() {
-        if !selector && collection == 0 {
+        if matches!(kind, FoldKind::Regular) && collection == 0 {
             claims.fold_sumcheck(range.clone(), remaining_size, opening);
             continue;
         }
         let indices = (0..=2 * opening.round_challenges.len()).map(|coefficient| {
-            match (selector, collection, coefficient) {
-                (false, 0, j) => Some(range.start + j),
-                (true, 0, 0) => Some(range.start),
-                (true, 0, j) if j >= 3 => Some(range.start + j - 2),
-                (true, 1, 1 | 2) => Some(range.start + coefficient),
+            match (kind, collection, coefficient) {
+                (FoldKind::Regular, 0, j) => Some(range.start + j),
+                (FoldKind::PairSelector, 0, 0) => Some(range.start),
+                (FoldKind::PairSelector, 0, j) if j >= 3 => Some(range.start + j - 2),
+                (FoldKind::PairSelector, 1, 1 | 2) => Some(range.start + coefficient),
                 _ => None,
             }
         });
@@ -799,7 +809,7 @@ mod tests {
             linear_form::{Covector, Evaluate},
             random_vector, univariate_evaluate,
         },
-        protocols::params::{Params, RateSchedule},
+        protocols::params::{Mode, Params, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator},
     };
 
@@ -877,7 +887,13 @@ mod tests {
                         claim.covector.vector.fill(F::from(7));
                     }
                     let previous = claims[0].evaluate(&left) + claims[1].evaluate(&right);
-                    fold_mask_claims(claims.iter_mut(), 0..length, 4, &opening, true);
+                    fold_mask_claims(
+                        claims.iter_mut(),
+                        0..length,
+                        4,
+                        &opening,
+                        FoldKind::PairSelector,
+                    );
                     let h = left[0]
                         + right[1] * selector
                         + right[2] * selector.square()
@@ -987,7 +1003,7 @@ mod tests {
     }
 
     fn roundtrip<M: Embedding<Target = Field64_2> + Default>(
-        mode: bool,
+        mode: Mode,
         size: usize,
         univariate_size: usize,
     ) where
@@ -995,7 +1011,7 @@ mod tests {
     {
         let config = ProtocolConfig::<M>::derive(Params {
             bits: 80,
-            zk: mode,
+            mode,
             regime: crate::protocols::params::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
@@ -1139,30 +1155,30 @@ mod tests {
     #[test]
     fn joint_mask_rounds_with_basefield_witness() {
         for size in [8, 128, 4096] {
-            roundtrip::<Basefield<Field64_2>>(true, size, size);
+            roundtrip::<Basefield<Field64_2>>(Mode::ZeroKnowledge, size, size);
         }
     }
 
     #[test]
     fn joint_mask_rounds_with_extension_field_witness() {
         for size in [8, 128, 4096] {
-            roundtrip::<Identity<Field64_2>>(true, size, size);
+            roundtrip::<Identity<Field64_2>>(Mode::ZeroKnowledge, size, size);
         }
     }
 
     #[test]
     fn standard_rounds_preserve_the_unmasked_claim() {
         for size in [8, 128, 4096] {
-            roundtrip::<Basefield<Field64_2>>(false, size, size);
+            roundtrip::<Basefield<Field64_2>>(Mode::Standard, size, size);
         }
     }
 
     #[test]
     fn short_univariate_forms_match_dense_kernels() {
         for size in [8, 4096] {
-            roundtrip::<Basefield<Field64_2>>(true, size, 3);
-            roundtrip::<Identity<Field64_2>>(true, size, 3);
-            roundtrip::<Basefield<Field64_2>>(false, size, 3);
+            roundtrip::<Basefield<Field64_2>>(Mode::ZeroKnowledge, size, 3);
+            roundtrip::<Identity<Field64_2>>(Mode::ZeroKnowledge, size, 3);
+            roundtrip::<Basefield<Field64_2>>(Mode::Standard, size, 3);
         }
     }
 }

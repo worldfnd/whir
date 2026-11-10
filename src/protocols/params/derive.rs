@@ -29,7 +29,7 @@ pub struct DeriveError(pub &'static str);
 impl<M: Embedding + Default> ProtocolConfig<M> {
     pub fn derive(spec: Params) -> Result<Self> {
         require(
-            !spec.zk || spec.regime == DecodingRegime::Johnson,
+            !spec.mode.is_zk() || spec.regime == DecodingRegime::Johnson,
             "Zook requires Johnson decoding",
         )?;
         let layout = round_layout::<M>(&spec)?;
@@ -61,7 +61,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             round(spec, &codes[0], &codes[1], index + 1)?;
         }
         let _ = terminal(spec, config.final_commit(), usize::from(has_rounds))?;
-        if spec.zk {
+        if spec.mode.is_zk() {
             let sumchecks: Vec<_> = layout[..layout.len() - 1]
                 .iter()
                 .map(|ctx| 2 * ctx.folds as usize + 1)
@@ -118,7 +118,7 @@ pub(super) fn round<'a, M: Embedding>(
     target: &'a IrsConfig<Identity<M::Target>>,
     index: usize,
 ) -> Result<RoundConfig<'a, M>> {
-    let zk = spec.zk;
+    let zk = spec.mode.is_zk();
     let masks = zk
         .then(|| WitnessMaskConfig::for_code(source, usize::from(index != 0)))
         .transpose()?;
@@ -130,7 +130,7 @@ pub(super) fn round<'a, M: Embedding>(
     } else {
         solve_t_ood(spec, source, target)?
     };
-    let (sumcheck, switch) = round_bits(source, Some(target), ood, zk)?;
+    let (sumcheck, switch) = round_bits(source, Some(target), ood, spec.mode)?;
     let mode = if zk {
         SumcheckMode::ZeroKnowledge {
             mask_length: SumcheckMaskLen::new(3),
@@ -161,10 +161,10 @@ pub(super) fn terminal<F: Field>(
     code: &IrsConfig<Identity<F>>,
     incoming: usize,
 ) -> Result<SumcheckConfig<F>> {
-    if spec.zk {
+    if spec.mode.is_zk() {
         WitnessMaskConfig::for_code(code, incoming)?;
     }
-    let (bits, _) = round_bits(code, None, 1, spec.zk)?;
+    let (bits, _) = round_bits(code, None, 1, spec.mode)?;
     Ok(SumcheckConfig::new(
         code.vector_size(),
         grind_to_at(spec, bits, "final sumcheck")?,
@@ -188,7 +188,7 @@ fn round_layout<M: Embedding + Default>(spec: &Params) -> Result<Vec<RoundContex
         rate: spec.rate,
         folds: 0,
     };
-    if spec.zk {
+    if spec.mode.is_zk() {
         while !mask_fits::<Identity<M::Target>>(spec, &source, 0)? {
             source.size = source
                 .size
@@ -201,7 +201,7 @@ fn round_layout<M: Embedding + Default>(spec: &Params) -> Result<Vec<RoundContex
     let mut layout = Vec::new();
     while let Some(remaining) = (source.size.ilog2() as usize).checked_sub(source.folds as usize) {
         let next_folding = spec.folds[1];
-        if !spec.zk && remaining < next_folding {
+        if !spec.mode.is_zk() && remaining < next_folding {
             break;
         }
         let mut target = RoundContext {
@@ -209,7 +209,7 @@ fn round_layout<M: Embedding + Default>(spec: &Params) -> Result<Vec<RoundContex
             rate: spec.schedule.step(source.rate, source.folds),
             folds: u32::try_from(next_folding).map_err(|_| DeriveError("dimension overflow"))?,
         };
-        if spec.zk {
+        if spec.mode.is_zk() {
             let fits = if layout.is_empty() {
                 mask_fits::<M>(spec, &source, 0)?
             } else {
@@ -298,7 +298,7 @@ pub(super) fn solve_with_num_vectors<M: Embedding + Default>(
     }
     // Zook query steps sum two error terms; reserve half the error budget
     // for the in-domain term. No grinding credit is used for these IOP bounds.
-    let security_target = if spec.zk {
+    let security_target = if spec.mode.is_zk() {
         f64::from(spec.bits) + 1.0
     } else {
         f64::from(spec.bits.saturating_sub(spec.pow))

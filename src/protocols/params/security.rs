@@ -3,7 +3,7 @@ use std::f64::consts::{LN_2, LOG2_10};
 
 use ark_ff::Field;
 
-use super::{require, DecodingRegime, DeriveError, Params, Result};
+use super::{require, DecodingRegime, DeriveError, Mode, Params, Result};
 use crate::{
     algebra::{
         embedding::{Embedding, Identity},
@@ -153,10 +153,10 @@ pub(super) fn round_bits<M: Embedding>(
     source: &Irs<M>,
     target: Option<&Target<M>>,
     t: usize,
-    zk: bool,
+    mode: Mode,
 ) -> Result<(Bits, Option<Bits>)> {
     let field = M::Target::field_size_bits();
-    let sumcheck = if zk {
+    let sumcheck = if mode.is_zk() {
         validate_zook_code(source, target.is_none().then_some(1))?;
         if target.is_some() {
             agreement(source)
@@ -170,7 +170,7 @@ pub(super) fn round_bits<M: Embedding>(
     let Some(target) = target else {
         return Ok((sumcheck, None));
     };
-    let switch = if zk {
+    let switch = if mode.is_zk() {
         let (queries, aggregation) = zook_query_error_bits(source, target)?;
         queries.min(aggregation)
     } else {
@@ -211,7 +211,7 @@ pub(super) fn final_bits<F: Field>(
 /// Zook gets no grinding credit. Tighten rounded thresholds before checking the budget.
 pub(super) fn grind_to_at(spec: &Params, analytic: Bits, label: &'static str) -> Result<Pow> {
     let target = Bits::new(f64::from(spec.bits));
-    if spec.zk {
+    if spec.mode.is_zk() {
         require(analytic >= target, label)?;
         return Ok(Pow::none());
     }
