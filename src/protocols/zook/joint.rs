@@ -17,7 +17,7 @@ use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
     buffer::BufferOps,
     hash::Hash,
-    protocols::params::RoundConfig,
+    protocols::params::{config::Node, RoundConfig},
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerificationError, VerificationResult, VerifierState,
@@ -30,15 +30,16 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Bounds retain the configured per-step target; the pair adds a selector
     /// step and a second initial mask-binding event to the protocol's union bound.
     pub fn validate_pair(&self) -> VerificationResult<()> {
-        self.pair_round().map(|_| ())
+        self.pair_round(&self.pair_source()?).map(|_| ())
     }
 
-    fn pair_opening_round(
-        &self,
+    fn pair_opening_round<'a>(
+        &'a self,
+        source: &'a Node<M>,
         forms: &[&dyn LinearForm<M::Target>],
         values: &[M::Target],
-    ) -> VerificationResult<RoundConfig<M>> {
-        let first = self.pair_round()?;
+    ) -> VerificationResult<RoundConfig<'a, M>> {
+        let first = self.pair_round(source)?;
         if forms.is_empty()
             || forms.len() != values.len()
             || forms
@@ -71,7 +72,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let first = self.pair_opening_round(forms, values)?;
+        let source = self.pair_source()?;
+        let first = self.pair_opening_round(&source, forms, values)?;
         let source = self
             .first_round()
             .ok_or(VerificationError)?
@@ -133,7 +135,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let first = self.pair_opening_round(forms, values)?;
+        let source = self.pair_source()?;
+        let first = self.pair_opening_round(&source, forms, values)?;
         let expected_binding = self.commitment_config_binding();
         if commitments
             .iter()

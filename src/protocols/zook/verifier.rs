@@ -375,7 +375,8 @@ mod tests {
             },
         )
         .unwrap();
-        let first = config.pair_round().unwrap();
+        let source = config.pair_source().unwrap();
+        let first = config.pair_round(&source).unwrap();
         let mut rng = StdRng::seed_from_u64(225);
         let left = Buffer::random(&mut rng, size);
         let right = Buffer::random(&mut rng, size);

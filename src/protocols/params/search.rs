@@ -1,10 +1,5 @@
-//! Adaptive rate planner.
-//!
-//! Picks per-round `target_log_inv_rate` values by enumerating candidates,
-//! scoring them on a (prover_time_proxy, proof_size_proxy) pareto knee, and
-//! returning the schedule chosen by [`KneeWeight`]. Driven by
-//! [`super::derive::round_layout`] when [`super::spec::RateSchedule::Adaptive`]
-//! is selected.
+//! Enumerate feasible rate schedules and select a weighted Pareto knee.
+//! Candidates use the same round and basecase solvers as protocol construction.
 
 use std::collections::HashMap;
 
@@ -17,7 +12,7 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             config::{embedding_degree, RoundConfig},
-            derive::{build_round_config, solve_basecase, solve_irs, RoundShape},
+            derive::{with_basecase, with_round_config},
             error::DeriveError,
             masks::solve_commit as solve_joint_commit,
             security::{zook_mask_binding_bits, ZookFinalOpeningSoundness},
@@ -26,71 +21,33 @@ use crate::{
     },
 };
 
-/// Hard cap on `log_inv_rate` searched. Beyond this the codeword would blow
-/// past sane NTT-friendly sizes for typical witnesses.
+/// Search-space limits, not security bounds. Each candidate still requires validation.
+/// The step budget multiplies WHIR's canonical increment, `folding - 1`.
 const ADAPTIVE_MAX_LOG_INV_RATE: u32 = 20;
+const ADAPTIVE_STEP_BUDGET: u32 = 2;
 
-/// Real per-IRS dimensions extracted from a built `IrsConfig`. Drives the
-/// cost proxy with NTT-rounded codeword length and the actual decoding-regime
-/// query count — no closed-form approximation.
-#[derive(Clone, Copy, Debug)]
-struct RoundDims {
-    codeword_length: usize,
-    in_domain_samples: usize,
-    num_messages: usize,
-    mask_coefficients: usize,
-}
-
-/// Fixed per-encode-call overhead in the cost-proxy's nominal units.
-///
-/// Each `interleaved_encode` invocation pays a setup cost (allocator,
-/// roots-table extension, rayon thread fan-out) that's amortized poorly for
-/// small NTTs. The production trace showed sub-ms cold-cache outliers on
-/// 4k-element NTTs that the pure `codeword · log codeword · interleaving`
-/// model wouldn't see. This constant biases the planner against schedules
-/// that fragment work into many small encodes — same direction as proof-size
-/// pressure but for a different reason.
-///
-/// Calibration: at ~1.4 ns / field-op (variable cost) on Apple Silicon,
-/// per-call fixed overhead observed at ~10 μs ≈ 7000 "ops" worth. Round to
-/// 4096 — within an order of magnitude is enough for correct pareto ordering;
-/// the absolute number doesn't matter under log-scale knee normalization.
+/// Nominal setup work for each encode call, calibrated from Apple Silicon traces.
+/// This penalizes many small encodes beyond the variable `n * log2(n)` work.
+/// Positive rescaling of either cost axis does not affect Pareto ordering.
 const ENCODE_FIXED_OVERHEAD: f64 = 4096.0;
 
-/// NTT/Merkle cost proxy for one encoded IRS. Uses real solver outputs so
-/// per-round NTT smoothness rounding (`12288 = 4096·3` etc.) and per-regime
-/// query counts (Johnson vs Unique vs Capacity) are accurate.
-///
-/// Constants are nominal — pareto ordering is invariant under positive
-/// rescaling of either axis, and the log-knee picker compounds that.
-fn round_cost_from_dims(dims: RoundDims, field_bytes: f64, hash_bytes: f64) -> (f64, f64) {
-    let codeword = dims.codeword_length as f64;
-    let interleaving = dims.num_messages as f64;
-    let queries = dims.in_domain_samples as f64;
-    let log_codeword = codeword.log2().max(1.0);
-
-    let encode = ENCODE_FIXED_OVERHEAD + codeword * log_codeword * interleaving;
-    let proof = queries * (interleaving * field_bytes + log_codeword * hash_bytes);
-    (encode, proof)
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Cost {
     encode: f64,
     proof: f64,
 }
 
+/// Witness cost, then optional mask cost; separate values preserve addition order.
+type FinalCosts = (Cost, Option<Cost>);
+
 impl Cost {
-    const ZERO: Self = Self {
-        encode: 0.0,
-        proof: 0.0,
-    };
-    fn add(self, other: (f64, f64)) -> Self {
+    fn add(self, other: Self) -> Self {
         Self {
-            encode: self.encode + other.0,
-            proof: self.proof + other.1,
+            encode: self.encode + other.encode,
+            proof: self.proof + other.proof,
         }
     }
+
     fn dominates(self, other: Self) -> bool {
         self.encode <= other.encode
             && self.proof <= other.proof
@@ -98,217 +55,200 @@ impl Cost {
     }
 }
 
-/// Bound on how aggressive Adaptive can be at a single round, expressed as a
-/// multiple of the canonical WHIR per-round step `folding − 1` (the increment
-/// [`super::spec::RateSchedule::Stepping`] applies, inherited from legacy
-/// in-place WHIR's stepping invariant). This lets Adaptive explore schedules
-/// slightly more aggressive than the legacy step, gated by the per-candidate
-/// feasibility check. Pure search-space heuristic, not a correctness bound.
-const ADAPTIVE_STEP_BUDGET: u32 = 2;
+/// Use actual NTT-rounded lengths, interleaving, and decoding-regime query counts.
+fn code_cost<M: Embedding>(code: &IrsConfig<M>) -> Cost {
+    let codeword = code.codeword_length() as f64;
+    let interleaving = code.num_messages() as f64;
+    let queries = code.in_domain_samples() as f64;
+    let log_codeword = codeword.log2().max(1.0);
+    let field_bytes = M::Target::field_size_bits() / 8.0;
+    Cost {
+        encode: ENCODE_FIXED_OVERHEAD + codeword * log_codeword * interleaving,
+        proof: queries * (interleaving * field_bytes + log_codeword * 32.0),
+    }
+}
 
-/// Search per-round target rates that minimize a pareto-knee cost.
-///
-/// Folding factors and message lengths stay fixed. Standard candidates may
-/// use their PoW budget; Zook candidates must meet the full analytic target,
-/// including joint-mask binding and final opening. Returns
-/// `AdaptiveNoFeasibleSchedule` if no candidate satisfies these bounds.
+/// Standard candidates may use PoW; Zook candidates must meet the full analytic target.
+/// The context sequence includes the final commitment.
 pub(super) fn plan_adaptive_rates<M: Embedding + Default>(
     spec: &SecuritySpec,
     tuning: &TuningSpec,
     knee_weight: KneeWeight,
-    skeleton: &[RoundShape],
-    basecase_vector_size: usize,
+    skeleton: &[RoundContext],
 ) -> Result<Vec<u32>, DeriveError> {
-    let mut planner: Planner<'_, M> = Planner::new(spec, skeleton, basecase_vector_size);
-    let candidates = planner.search(tuning.starting_log_inv_rate);
-    // Report infeasibility within this search space before selecting a schedule.
+    let candidates = Planner {
+        spec,
+        skeleton,
+        round_costs: HashMap::new(),
+        final_costs: HashMap::new(),
+    }
+    .search::<M>(tuning.starting_log_inv_rate);
     if candidates.is_empty() {
         return Err(DeriveError::AdaptiveNoFeasibleSchedule);
     }
     Ok(pick_knee(pareto_frontier(candidates), knee_weight.get()))
 }
 
-/// DFS state for the adaptive rate search. Owns the loop-invariants and the
-/// two memoization caches so `recurse` doesn't have to thread a dozen
-/// parameters down each level.
-struct Planner<'a, M> {
+struct Planner<'a> {
     spec: &'a SecuritySpec,
-    skeleton: &'a [RoundShape],
-    basecase_vector_size: usize,
-    field_bytes: f64,
-    hash_bytes: f64,
-    /// Memoize per `(round_idx, source_rate, target_rate)`. `Some(dims)` is
-    /// feasible with real IRS dimensions; `None` violates a size or security bound.
-    round_cache: HashMap<(usize, u32, u32), Option<RoundDims>>,
-    /// Basecase candidates only vary by rate, so cache separately.
-    basecase_cache: HashMap<u32, Option<RoundDims>>,
-    _m: std::marker::PhantomData<M>,
+    skeleton: &'a [RoundContext],
+    round_costs: HashMap<(usize, u32, u32), Option<(Cost, usize)>>,
+    final_costs: HashMap<(u32, usize), Option<FinalCosts>>,
 }
 
-impl<'a, M: Embedding + Default> Planner<'a, M> {
-    fn new(
-        spec: &'a SecuritySpec,
-        skeleton: &'a [RoundShape],
-        basecase_vector_size: usize,
-    ) -> Self {
-        Self {
-            spec,
-            skeleton,
-            basecase_vector_size,
-            field_bytes: <M::Target as FieldWithSize>::field_size_bits() / 8.0,
-            hash_bytes: 32.0,
-            round_cache: HashMap::new(),
-            basecase_cache: HashMap::new(),
-            _m: std::marker::PhantomData,
-        }
-    }
-
-    fn search(&mut self, starting_log_inv_rate: u32) -> Vec<(Vec<u32>, Cost)> {
+impl Planner<'_> {
+    fn search<M: Embedding + Default>(mut self, starting_rate: u32) -> Vec<(Vec<u32>, Cost)> {
         let mut out = Vec::new();
-        let mut chosen = Vec::with_capacity(self.skeleton.len());
-        self.recurse(
-            0,
-            starting_log_inv_rate,
-            &mut chosen,
-            Cost::ZERO,
-            0,
-            &mut out,
-        );
+        self.recurse::<M>(starting_rate, &mut Vec::new(), Cost::default(), 0, &mut out);
         out
     }
 
-    fn recurse(
+    fn recurse<M: Embedding + Default>(
         &mut self,
-        idx: usize,
-        cur_rate: u32,
+        rate: u32,
         chosen: &mut Vec<u32>,
-        acc: Cost,
+        cost: Cost,
         mask_coefficients: usize,
         out: &mut Vec<(Vec<u32>, Cost)>,
     ) {
-        // handle basecase
-        if idx == self.skeleton.len() {
-            let spec = self.spec;
-            let vector_size = self.basecase_vector_size;
-            let dims = *self.basecase_cache.entry(cur_rate).or_insert_with(|| {
-                basecase_dims::<M>(
-                    spec,
-                    vector_size,
-                    cur_rate,
-                    usize::from(!self.skeleton.is_empty()),
-                )
-            });
-            if let Some(dims) = dims {
-                let (e, p) = round_cost_from_dims(dims, self.field_bytes, self.hash_bytes);
-                let mut cost = acc.add((e, p));
-                if self.spec.mode.is_zk() {
-                    let Some(payload) = mask_coefficients.checked_add(dims.mask_coefficients)
-                    else {
-                        return;
-                    };
-                    let degree = if self.skeleton.is_empty() {
-                        1
-                    } else {
-                        let Ok(degree) = embedding_degree::<M>() else {
-                            return;
-                        };
-                        degree
-                    };
-                    let Ok(witness) = solve_irs::<Identity<M::Target>>(
-                        spec,
-                        &RoundContext {
-                            vector_size,
-                            log_inv_rate: cur_rate,
-                            folding_factor: 0,
-                        },
-                    ) else {
-                        return;
-                    };
-                    let Ok(masks) = solve_joint_commit::<M::Target>(spec, payload, degree) else {
-                        return;
-                    };
-                    let Ok(binding) = zook_mask_binding_bits(&masks) else {
-                        return;
-                    };
-                    let Ok(opening) = ZookFinalOpeningSoundness::for_codes(&witness, &masks) else {
-                        return;
-                    };
-                    let target = f64::from(spec.target_security_bits);
-                    if [binding, opening.combination, opening.queries]
-                        .into_iter()
-                        .any(|bits| f64::from(bits) < target)
-                    {
-                        return;
-                    }
-                    let (encode, proof) = round_cost_from_dims(
-                        dimensions(&masks, 0),
-                        self.field_bytes,
-                        self.hash_bytes,
-                    );
-                    let message_bytes = masks.vector_size() as f64 * self.field_bytes;
-                    cost = cost.add((encode, proof + message_bytes));
-                }
-                out.push((chosen.clone(), cost));
+        let index = chosen.len();
+        if index + 1 == self.skeleton.len() {
+            if let Some((basecase, masks)) = self.finish::<M>(rate, mask_coefficients) {
+                let cost = cost.add(basecase);
+                out.push((chosen.clone(), masks.map_or(cost, |mask| cost.add(mask))));
             }
             return;
         }
-        let shape = self.skeleton[idx];
-        // Per-round step capped at `ADAPTIVE_STEP_BUDGET · (folding − 1)` —
-        // the canonical WHIR per-round increment scaled by the search budget.
-        // Hard cap on absolute rate via `ADAPTIVE_MAX_LOG_INV_RATE`. Each
-        // candidate (src, tgt) is feasibility-checked below; exceeding the
-        // canonical increment is allowed when all configured bounds hold.
-        let max_step = shape
-            .source_folding_factor
+        let source = RoundContext {
+            log_inv_rate: rate,
+            ..self.skeleton[index]
+        };
+        let max_step = source
+            .folding_factor
             .saturating_sub(1)
             .saturating_mul(ADAPTIVE_STEP_BUDGET);
         for delta in 0..=max_step {
-            let next_rate = cur_rate.saturating_add(delta);
+            let next_rate = rate.saturating_add(delta);
             if next_rate > ADAPTIVE_MAX_LOG_INV_RATE {
                 break;
             }
-            let spec = self.spec;
-            let dims = *self
-                .round_cache
-                .entry((idx, cur_rate, next_rate))
-                .or_insert_with(|| try_round_dims::<M>(spec, &shape, cur_rate, next_rate));
-            let Some(dims) = dims else { continue };
-            let (e, p) = round_cost_from_dims(dims, self.field_bytes, self.hash_bytes);
-            chosen.push(next_rate);
-            let Some(next_masks) = mask_coefficients.checked_add(dims.mask_coefficients) else {
-                chosen.pop();
+            let target = RoundContext {
+                log_inv_rate: next_rate,
+                ..self.skeleton[index + 1]
+            };
+            let round = *self
+                .round_costs
+                .entry((index, rate, next_rate))
+                .or_insert_with(|| {
+                    if index == 0 {
+                        with_round_config::<M, _>(self.spec, &source, &target, index, |round| {
+                            round_cost(&round)
+                        })
+                        .ok()
+                        .flatten()
+                    } else {
+                        with_round_config::<Identity<M::Target>, _>(
+                            self.spec,
+                            &source,
+                            &target,
+                            index,
+                            |round| round_cost(&round),
+                        )
+                        .ok()
+                        .flatten()
+                    }
+                });
+            let Some((round_cost, masks)) = round else {
                 continue;
             };
-            self.recurse(idx + 1, next_rate, chosen, acc.add((e, p)), next_masks, out);
+            let Some(masks) = mask_coefficients.checked_add(masks) else {
+                continue;
+            };
+            chosen.push(next_rate);
+            self.recurse::<M>(next_rate, chosen, cost.add(round_cost), masks, out);
             chosen.pop();
         }
     }
+
+    /// Account for the final witness, joint masks, and revealed mask message.
+    fn finish<M: Embedding + Default>(
+        &mut self,
+        rate: u32,
+        mask_coefficients: usize,
+    ) -> Option<FinalCosts> {
+        *self
+            .final_costs
+            .entry((rate, mask_coefficients))
+            .or_insert_with(|| {
+                with_basecase::<M::Target, _>(
+                    self.spec,
+                    self.skeleton.last()?.vector_size,
+                    rate,
+                    usize::from(self.skeleton.len() > 1),
+                    |basecase| {
+                        let cost = code_cost(basecase.commit());
+                        let Some(mask) = basecase.witness_mask() else {
+                            return Some((cost, None));
+                        };
+                        let payload =
+                            mask_coefficients.checked_add(mask.num_coefficients().ok()?)?;
+                        let degree = if self.skeleton.len() == 1 {
+                            1
+                        } else {
+                            embedding_degree::<M>().ok()?
+                        };
+                        let masks =
+                            solve_joint_commit::<M::Target>(self.spec, payload, degree).ok()?;
+                        let binding = zook_mask_binding_bits(&masks).ok()?;
+                        let opening =
+                            ZookFinalOpeningSoundness::for_codes(basecase.commit(), &masks).ok()?;
+                        let target = f64::from(self.spec.target_security_bits);
+                        if [binding, opening.combination, opening.queries]
+                            .into_iter()
+                            .any(|bits| f64::from(bits) < target)
+                        {
+                            return None;
+                        }
+                        let mut mask_cost = code_cost(&masks);
+                        mask_cost.proof +=
+                            masks.vector_size() as f64 * (M::Target::field_size_bits() / 8.0);
+                        Some((cost, Some(mask_cost)))
+                    },
+                )
+                .ok()
+                .flatten()
+            })
+    }
 }
 
-/// Drop any (schedule, cost) dominated by another. `O(|candidates|²)` —
-/// fine at planner scale.
+fn round_cost<M: Embedding>(round: &RoundConfig<'_, M>) -> Option<(Cost, usize)> {
+    let masks = match round.masks() {
+        Some(masks) => masks
+            .witness
+            .num_coefficients()
+            .ok()?
+            .checked_add(masks.sumcheck_coefficients)?,
+        None => 0,
+    };
+    Some((code_cost(round.code_switch().target()), masks))
+}
+
+/// Preserve candidate order and equal-cost ties while removing dominated schedules.
 fn pareto_frontier(candidates: Vec<(Vec<u32>, Cost)>) -> Vec<(Vec<u32>, Cost)> {
     let mut frontier: Vec<(Vec<u32>, Cost)> = Vec::new();
-    'outer: for cand in candidates {
-        for f in &frontier {
-            if f.1.dominates(cand.1) {
-                continue 'outer;
-            }
+    for candidate in candidates {
+        if frontier.iter().any(|(_, cost)| cost.dominates(candidate.1)) {
+            continue;
         }
-        frontier.retain(|f| !cand.1.dominates(f.1));
-        frontier.push(cand);
+        frontier.retain(|(_, cost)| !candidate.1.dominates(*cost));
+        frontier.push(candidate);
     }
     frontier
 }
 
-/// Weighted log-scale pareto knee. Picks the schedule whose deficit from
-/// per-axis minima — measured in log-space, weighted by `knee_weight` — is
-/// smallest. Log-space normalizes the units mismatch between the
-/// encode/proof proxies (ops vs bytes) and makes the picker invariant to any
-/// constant rescaling of either axis.
-///
-/// `knee_weight ∈ [0, 1]` is the encode-axis bias (see
-/// [`super::spec::KneeWeight`]).
+/// Minimize weighted squared distance from the per-axis minima in log space.
+/// Log normalization removes cost-unit differences and preserves constant rescaling.
+/// `knee_weight` gives the encode-axis bias; equal scores retain enumeration order.
 fn pick_knee(frontier: Vec<(Vec<u32>, Cost)>, knee_weight: f64) -> Vec<u32> {
     let logs: Vec<(Vec<u32>, f64, f64)> = frontier
         .into_iter()
@@ -329,64 +269,6 @@ fn pick_knee(frontier: Vec<(Vec<u32>, Cost)>, knee_weight: f64) -> Vec<u32> {
         .0
 }
 
-/// Return the final commitment dimensions and its mask budget.
-fn basecase_dims<M: Embedding + Default>(
-    spec: &SecuritySpec,
-    vector_size: usize,
-    log_inv_rate: u32,
-    incoming_deep: usize,
-) -> Option<RoundDims> {
-    let config =
-        solve_basecase::<M::Target>(spec, vector_size, log_inv_rate, incoming_deep).ok()?;
-    let masks = config
-        .witness_mask()
-        .map(|mask| mask.num_coefficients())
-        .transpose()
-        .ok()?
-        .unwrap_or(0);
-    Some(dimensions(config.commit(), masks))
-}
-
-/// Use the same round solver as ProtocolConfig::derive for candidate feasibility.
-fn try_round_dims<M: Embedding + Default>(
-    spec: &SecuritySpec,
-    shape: &RoundShape,
-    source_log_inv_rate: u32,
-    target_log_inv_rate: u32,
-) -> Option<RoundDims> {
-    let shape = RoundShape {
-        source_log_inv_rate,
-        target_log_inv_rate,
-        ..*shape
-    };
-    if shape.round_index == 0 {
-        round_dimensions(&build_round_config::<M>(spec, &shape).ok()?)
-    } else {
-        round_dimensions(&build_round_config::<Identity<M::Target>>(spec, &shape).ok()?)
-    }
-}
-
-fn round_dimensions<M: Embedding>(round: &RoundConfig<M>) -> Option<RoundDims> {
-    let masks = match round.masks() {
-        Some(masks) => masks
-            .witness
-            .num_coefficients()
-            .ok()?
-            .checked_add(masks.sumcheck_coefficients)?,
-        None => 0,
-    };
-    Some(dimensions(round.code_switch().target(), masks))
-}
-
-const fn dimensions<M: Embedding>(code: &IrsConfig<M>, mask_coefficients: usize) -> RoundDims {
-    RoundDims {
-        codeword_length: code.codeword_length(),
-        in_domain_samples: code.in_domain_samples(),
-        num_messages: code.num_messages(),
-        mask_coefficients,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,15 +281,17 @@ mod tests {
     fn shared_mask_tree_counts_both_columns_and_one_query_path() {
         let single = johnson_code_with_vectors::<Identity<Field64_2>>(128, 1, 0.25, 1);
         let shared = johnson_code_with_vectors::<Identity<Field64_2>>(128, 1, 0.25, 2);
-        let (single_encode, single_proof) =
-            round_cost_from_dims(dimensions(&single, 0), 16.0, 32.0);
-        let (shared_encode, shared_proof) =
-            round_cost_from_dims(dimensions(&shared, 0), 16.0, 32.0);
-        assert_close(shared_encode, 2.0 * single_encode - ENCODE_FIXED_OVERHEAD);
+        let single_cost = code_cost(&single);
+        let shared_cost = code_cost(&shared);
         assert_close(
-            shared_proof,
-            single_proof + shared.in_domain_samples() as f64 * 16.0,
+            shared_cost.encode,
+            2.0 * single_cost.encode - ENCODE_FIXED_OVERHEAD,
         );
-        assert!(shared_proof < 2.0 * single_proof);
+        assert_close(
+            shared_cost.proof,
+            single_cost.proof
+                + shared.in_domain_samples() as f64 * (Field64_2::field_size_bits() / 8.0),
+        );
+        assert!(shared_cost.proof < 2.0 * single_cost.proof);
     }
 }

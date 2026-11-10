@@ -1,91 +1,56 @@
-//! First-round parameters for two separately committed, equal-sized witnesses.
+//! Pair openings add one selector fold to the shared canonical first transition.
 
 use crate::{
     algebra::embedding::Embedding,
     bits::Bits,
     protocols::params::{
-        config::{ProtocolConfig, RoundConfig},
-        derive::{solve_code_switch, solve_sumcheck},
-        masks::{mask_coefficients, RoundMasks},
-        spec::{RateSchedule, RoundContext},
-        SecurityEvent, WitnessMaskConfig,
+        config::{Node, ProtocolConfig, RoundConfig},
+        derive::solve_node,
     },
     transcript::{VerificationError, VerificationResult},
 };
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    pub(crate) fn pair_round(&self) -> VerificationResult<RoundConfig<M>> {
-        let tuning = self.tuning();
-        if tuning.vector_size != self.padded_vector_size()
-            || tuning.vector_size.checked_mul(2).is_none()
-            || tuning.starting_log_inv_rate >= usize::BITS
-            || matches!(
-                tuning.rate_schedule,
-                RateSchedule::Capped {
-                    max_log_inv_rate: 0
-                }
-            )
+    pub(crate) fn pair_source(&self) -> VerificationResult<Node<M>> {
+        if self.tuning().vector_size != self.padded_vector_size()
+            || self.tuning().vector_size.checked_mul(2).is_none()
         {
             return Err(VerificationError);
         }
         let first = self.first_round().ok_or(VerificationError)?;
-        if first.sumcheck().num_rounds() == 0 {
-            return Err(VerificationError);
+        if let Some(joint) = self.joint_masks() {
+            // Two initial mask-binding events share this error budget.
+            if joint.analytic_bits().map_err(|_| VerificationError)? - Bits::new(1.0)
+                < Bits::new(f64::from(self.security().target_security_bits))
+            {
+                return Err(VerificationError);
+            }
         }
+        // The tuple code retains degree, rate, distance, and list size.
         let source = first
             .code_switch()
             .source()
             .joint_pair_source()
             .ok_or(VerificationError)?;
-        // Shared source queries give a tuple Reed–Solomon code with the same
-        // polynomial degree, rate, distance, and Johnson list bound. Only the
-        // number of columns and quadratic sumcheck steps increases.
-        let context = RoundContext {
-            vector_size: source.vector_size(),
-            folding_factor: source.interleaving_depth().ilog2(),
-            log_inv_rate: tuning.starting_log_inv_rate,
-        };
-        let masks = match first.masks() {
-            Some(masks) => {
-                let joint = self.joint_masks().ok_or(VerificationError)?;
-                // Two initial binding events share this error budget. Both mask
-                // roots are opened at common indices in the final tuple check.
-                if joint.analytic_bits().map_err(|_| VerificationError)? - Bits::new(1.0)
-                    < Bits::new(f64::from(self.security().target_security_bits))
-                {
-                    return Err(VerificationError);
-                }
-                Some(RoundMasks {
-                    witness: WitnessMaskConfig {
-                        num_polynomials: masks
-                            .witness
-                            .num_polynomials
-                            .checked_mul(2)
-                            .ok_or(VerificationError)?,
-                        coefficients_per_polynomial: masks.witness.coefficients_per_polynomial,
-                    },
-                    sumcheck_coefficients: mask_coefficients(context.folding_factor as usize)
-                        .map_err(|_| VerificationError)?,
-                })
-            }
-            None => None,
-        };
-        let sumcheck = solve_sumcheck(
-            self.security(),
-            &context,
-            &source,
-            SecurityEvent::RoundSumcheck { index: 0 },
-        )
-        .map_err(|_| VerificationError)?;
-        let code_switch = solve_code_switch(
+        solve_node(
             self.security(),
             source,
-            first.code_switch().target().clone(),
-            first.code_switch().out_domain_samples(),
+            Some(first.code_switch().target()),
             0,
         )
-        .map_err(|_| VerificationError)?;
-        Ok(RoundConfig::new(0, sumcheck, code_switch, masks))
+        .map_err(|_| VerificationError)
+    }
+
+    pub(crate) fn pair_round<'a>(
+        &'a self,
+        node: &'a Node<M>,
+    ) -> VerificationResult<RoundConfig<'a, M>> {
+        let first = self.first_round().ok_or(VerificationError)?;
+        Ok(node.round(
+            first.code_switch().target(),
+            0,
+            self.security().mode.is_zk(),
+        ))
     }
 }
 
@@ -96,7 +61,9 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{embedding::Identity, fields::Field256},
-        protocols::params::{FoldingFactor, Mode, PowBudget, SecuritySpec, TuningSpec},
+        protocols::params::{
+            FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
+        },
     };
 
     fn source(mode: Mode) -> ProtocolConfig<Identity<Field256>> {
@@ -119,7 +86,8 @@ mod tests {
         for mode in [Mode::Standard, Mode::ZeroKnowledge] {
             let config = source(mode);
             let original = config.first_round().unwrap();
-            let pair = config.pair_round().unwrap();
+            let source = config.pair_source().unwrap();
+            let pair = config.pair_round(&source).unwrap();
             assert_eq!(
                 pair.sumcheck().num_rounds(),
                 original.sumcheck().num_rounds() + 1

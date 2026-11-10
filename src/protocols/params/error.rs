@@ -71,40 +71,6 @@ impl Display for SecurityEvent {
     }
 }
 
-/// Origin side of a [`DeriveError::RoundChainBroken`]: either a numbered round
-/// or the pre-round `tuning` shape (for plans with no rounds at all).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChainSource {
-    Tuning,
-    Round(usize),
-}
-
-impl Display for ChainSource {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Tuning => f.write_str("tuning"),
-            Self::Round(i) => write!(f, "round {i}"),
-        }
-    }
-}
-
-/// Destination side of a [`DeriveError::RoundChainBroken`]: the next round in
-/// sequence, or the basecase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChainTarget {
-    NextRound(usize),
-    Basecase,
-}
-
-impl Display for ChainTarget {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NextRound(i) => write!(f, "round {i}"),
-            Self::Basecase => f.write_str("basecase"),
-        }
-    }
-}
-
 /// Failure modes for [`super::ProtocolConfig::derive`] and the
 /// sub-protocol solvers it calls.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -166,18 +132,6 @@ pub enum DeriveError {
     /// The tuning spec cannot produce a valid round layout.
     #[error(transparent)]
     Layout(#[from] LayoutError),
-
-    /// Cross-round (or round → basecase) shape chain broken: the next
-    /// component's source `vector_size` does not match the previous
-    /// component's target `vector_size`. Surfaced by
-    /// [`super::ProtocolConfig::validate`].
-    #[error("chain broken: {from} → {to} expected vector_size {expected}, found {found}")]
-    RoundChainBroken {
-        from: ChainSource,
-        to: ChainTarget,
-        expected: usize,
-        found: usize,
-    },
 
     /// A step's analytic bound and permitted grinding do not meet the target.
     #[error("{pow} soundness gap: analytic {analytic} + pow {pow_bits} < target {target}")]

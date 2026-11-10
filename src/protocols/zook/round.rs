@@ -398,7 +398,7 @@ where
                 None => message,
             };
             prove_round(
-                first.unwrap_or(original),
+                first.unwrap_or(&original),
                 original.code_switch().source(),
                 second_witness,
                 ProverRoundState::<M> {
@@ -418,7 +418,7 @@ where
     };
     for round in config.tail_rounds() {
         state = prove_round(
-            round,
+            &round,
             round.code_switch().source(),
             None,
             state,
@@ -554,7 +554,7 @@ where
     };
     if let Some(original) = config.first_round() {
         verify_round(
-            first.unwrap_or(original),
+            first.unwrap_or(&original),
             original.code_switch().source(),
             second.as_ref(),
             &mut state,
@@ -564,7 +564,7 @@ where
     }
     for round in config.tail_rounds() {
         verify_round(
-            round,
+            &round,
             round.code_switch().source(),
             None,
             &mut state,
@@ -1087,12 +1087,7 @@ mod tests {
             .first_round()
             .into_iter()
             .map(|r| r.sumcheck().num_rounds())
-            .chain(
-                config
-                    .tail_rounds()
-                    .iter()
-                    .map(|r| r.sumcheck().num_rounds()),
-            );
+            .chain(config.tail_rounds().map(|r| r.sumcheck().num_rounds()));
         let mut offset = 0;
         for (index, count) in folds.enumerate() {
             for &challenge in &state.challenges[offset..offset + count] {

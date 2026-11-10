@@ -1,292 +1,206 @@
-//! Derived commitments, mask layouts, and per-step security accounting.
-
-use std::ops::Range;
+//! A canonical commitment sequence and borrowed protocol views.
 
 use ark_ff::Field;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::{
+    error::DeriveError,
+    masks::{mask_coefficients, JointMaskConfig, RoundMasks, WitnessMaskConfig},
+    spec::{SecuritySpec, TuningSpec},
+};
 use crate::{
     algebra::embedding::{Embedding, Identity},
     protocols::{
-        basecase::Config as BasecaseConfig,
-        code_switch::Config as CodeSwitchConfig,
+        basecase::{BasecaseMode, Config as BasecaseConfig},
+        code_switch::{CodeSwitchMode, Config as CodeSwitchConfig},
         irs_commit::Config as IrsConfig,
-        params::{
-            error::{ChainSource, ChainTarget, DeriveError, ZookSecurityError},
-            masks::{mask_coefficients, JointMaskConfig, RoundMasks, WitnessMaskConfig},
-            spec::{Mode, SecuritySpec, TuningSpec},
-        },
-        sumcheck::Config as SumcheckConfig,
+        proof_of_work::Config as PowConfig,
+        sumcheck::{Config as SumcheckConfig, SumcheckMaskLen, SumcheckMode},
     },
+    type_info::Typed,
 };
 
-/// Commitments and mask lengths selected before the prover samples randomness.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(bound = "")]
+/// The serialized request is the only external configuration input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, bound = "")]
+pub struct ProtocolSpec<M: Embedding> {
+    pub embedding: Typed<M>,
+    pub security: SecuritySpec,
+    pub tuning: TuningSpec,
+}
+
+/// Each IRS configuration occurs once. The last target is the final commitment.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtocolConfig<M: Embedding> {
-    security: SecuritySpec,
-    tuning: TuningSpec,
-    padded_vector_size: usize,
-    first_round: Option<RoundConfig<M>>,
-    tail_rounds: Vec<RoundConfig<Identity<M::Target>>>,
-    basecase: BasecasePlan<M::Target>,
-    joint_masks: Option<JointMaskConfig<M::Target>>,
+    pub(super) request: ProtocolSpec<M>,
+    pub(super) first: Option<Node<M>>,
+    pub(super) targets: Vec<Node<Identity<M::Target>>>,
+    pub(super) joint_masks: Option<JointMaskConfig<M::Target>>,
 }
 
-/// Unchecked input exists only while deserializing.
-#[derive(Deserialize)]
-#[serde(bound = "")]
-struct RawProtocolConfig<M: Embedding> {
-    security: SecuritySpec,
-    tuning: TuningSpec,
-    padded_vector_size: usize,
-    first_round: Option<RoundConfig<M>>,
-    tail_rounds: Vec<RoundConfig<Identity<M::Target>>>,
-    basecase: BasecasePlan<M::Target>,
-    joint_masks: Option<JointMaskConfig<M::Target>>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Node<M: Embedding> {
+    pub code: IrsConfig<M>,
+    pub sumcheck_pow: PowConfig,
+    pub switch: Option<(usize, PowConfig)>,
 }
 
+impl<M: Embedding> Serialize for ProtocolConfig<M> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.request.serialize(serializer)
+    }
+}
 impl<'de, M: Embedding + Default> Deserialize<'de> for ProtocolConfig<M> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = RawProtocolConfig::<M>::deserialize(deserializer)?;
-        let config = Self::new(
-            raw.security,
-            raw.tuning,
-            raw.padded_vector_size,
-            raw.first_round,
-            raw.tail_rounds,
-            raw.basecase,
-            raw.joint_masks,
-        );
-        // Reconstruction is the only validation path for external configurations.
-        // Compare before inspecting any untrusted nested dimensions or bounds.
-        let canonical = Self::derive(config.security.clone(), config.tuning.clone())
-            .map_err(serde::de::Error::custom)?;
-        if config != canonical {
+        let request = ProtocolSpec::<M>::deserialize(deserializer)?;
+        if request.embedding.0 != M::default() {
             return Err(serde::de::Error::custom(
-                "configuration differs from its derived parameters",
+                "configuration requires the default embedding",
             ));
         }
-        Ok(canonical)
+        Self::derive(request.security, request.tuning).map_err(serde::de::Error::custom)
     }
 }
 
 impl<M: Embedding> ProtocolConfig<M> {
-    pub(crate) const fn new(
-        security: SecuritySpec,
-        tuning: TuningSpec,
-        padded_vector_size: usize,
-        first_round: Option<RoundConfig<M>>,
-        tail_rounds: Vec<RoundConfig<Identity<M::Target>>>,
-        basecase: BasecasePlan<M::Target>,
-        joint_masks: Option<JointMaskConfig<M::Target>>,
-    ) -> Self {
-        Self {
-            security,
-            tuning,
-            padded_vector_size,
-            first_round,
-            tail_rounds,
-            basecase,
-            joint_masks,
-        }
-    }
-
     pub const fn security(&self) -> &SecuritySpec {
-        &self.security
+        &self.request.security
     }
     pub const fn tuning(&self) -> &TuningSpec {
-        &self.tuning
+        &self.request.tuning
     }
-
-    /// Witness length after deterministic zero padding, before masking.
-    pub const fn padded_vector_size(&self) -> usize {
-        self.padded_vector_size
+    pub fn padded_vector_size(&self) -> usize {
+        self.first.as_ref().map_or_else(
+            || self.final_commit().vector_size(),
+            |node| node.code.vector_size(),
+        )
     }
-
-    pub const fn first_round(&self) -> Option<&RoundConfig<M>> {
-        self.first_round.as_ref()
+    pub fn first_round(&self) -> Option<RoundConfig<'_, M>> {
+        self.first
+            .as_ref()
+            .map(|node| node.round(&self.targets[0].code, 0, self.security().mode.is_zk()))
     }
-    pub fn tail_rounds(&self) -> &[RoundConfig<Identity<M::Target>>] {
-        &self.tail_rounds
+    pub fn tail_rounds(
+        &self,
+    ) -> impl ExactSizeIterator<Item = RoundConfig<'_, Identity<M::Target>>> {
+        self.targets
+            .windows(2)
+            .enumerate()
+            .map(|(i, pair)| pair[0].round(&pair[1].code, i + 1, self.security().mode.is_zk()))
     }
     pub const fn has_rounds(&self) -> bool {
-        self.first_round.is_some()
+        self.first.is_some()
     }
-    pub const fn basecase(&self) -> &BasecasePlan<M::Target> {
-        &self.basecase
+    pub fn num_rounds(&self) -> usize {
+        self.targets.len() - 1 + usize::from(self.has_rounds())
     }
-
-    /// One commitment containing every sparse sumcheck mask and witness mask.
+    pub fn final_commit(&self) -> &IrsConfig<Identity<M::Target>> {
+        &self.targets.last().expect("final commitment").code
+    }
+    pub fn basecase(&self) -> BasecasePlan<'_, M::Target> {
+        self.targets
+            .last()
+            .expect("final commitment")
+            .basecase(self.security().mode.is_zk(), usize::from(self.has_rounds()))
+    }
     pub const fn joint_masks(&self) -> Option<&JointMaskConfig<M::Target>> {
         self.joint_masks.as_ref()
     }
-
-    pub fn num_rounds(&self) -> usize {
-        usize::from(self.first_round.is_some()) + self.tail_rounds.len()
-    }
-
-    /// Mask layout at a witness commitment, including the final commitment.
-    ///
-    /// Index zero selects the initial witness; `num_rounds()` selects the final one.
+    /// Mask dimensions come from the commitment that owns the corresponding witness.
     pub fn witness_mask(&self, index: usize) -> Option<WitnessMaskConfig> {
         assert!(index <= self.num_rounds());
-        if index == self.num_rounds() {
-            self.basecase.witness_mask().copied()
-        } else if index == 0 {
-            self.first_round
-                .as_ref()
-                .and_then(|round| round.masks())
-                .map(|masks| masks.witness)
-        } else {
-            self.tail_rounds[index - 1]
-                .masks()
-                .map(|masks| masks.witness)
+        if !self.security().mode.is_zk() {
+            return None;
         }
+        let mask = if index == 0 && self.has_rounds() {
+            WitnessMaskConfig::for_code(&self.first.as_ref().unwrap().code, 0)
+        } else {
+            let node = &self.targets[index - usize::from(self.has_rounds())];
+            WitnessMaskConfig::for_code(&node.code, usize::from(index != 0))
+        };
+        Some(mask.expect("construction checked witness mask dimensions"))
     }
-
-    fn round_masks(&self) -> impl Iterator<Item = Option<&RoundMasks>> {
-        self.first_round
-            .iter()
-            .map(RoundConfig::masks)
-            .chain(self.tail_rounds.iter().map(RoundConfig::masks))
-    }
-
-    /// Validate dimensions, mask coverage, and every configured security bound.
+    /// Structural consistency follows from shared ownership and checked construction.
     pub fn validate(&self) -> Result<(), DeriveError> {
-        self.validate_round_chaining()?;
-        self.validate_masks()?;
         self.validate_security()
     }
+}
 
-    fn validate_round_chaining(&self) -> Result<(), DeriveError> {
-        let mut expected = self.padded_vector_size;
-        let mut from = ChainSource::Tuning;
-        let dimensions = self
-            .first_round
-            .iter()
-            .map(RoundConfig::dimensions)
-            .chain(self.tail_rounds.iter().map(RoundConfig::dimensions));
-        for (index, (round_index, source_size, target_size)) in dimensions.enumerate() {
-            if round_index != index {
-                return Err(ZookSecurityError::InvalidRoundShape.into());
-            }
-            if source_size != expected {
-                return Err(DeriveError::RoundChainBroken {
-                    from,
-                    to: ChainTarget::NextRound(round_index),
-                    expected,
-                    found: source_size,
-                });
-            }
-            expected = target_size;
-            from = ChainSource::Round(round_index);
-        }
-        if self.basecase.commit().vector_size() != expected {
-            return Err(DeriveError::RoundChainBroken {
-                from,
-                to: ChainTarget::Basecase,
-                expected,
-                found: self.basecase.commit().vector_size(),
-            });
-        }
-        let mut previous = self
-            .first_round
-            .as_ref()
-            .map(|round| round.code_switch.target());
-        for round in &self.tail_rounds {
-            if previous != Some(round.code_switch.source()) {
-                return Err(ZookSecurityError::InvalidRoundShape.into());
-            }
-            previous = Some(round.code_switch.target());
-        }
-        if previous.is_some_and(|commit| commit != self.basecase.commit()) {
-            return Err(ZookSecurityError::InvalidRoundShape.into());
-        }
-        Ok(())
-    }
-
-    fn validate_masks(&self) -> Result<(), DeriveError> {
-        if self.padded_vector_size < self.tuning.vector_size
-            || !self.padded_vector_size.is_power_of_two()
-        {
-            return Err(DeriveError::InvalidMaskLayout);
-        }
-        let is_zk = matches!(self.security.mode, Mode::ZeroKnowledge);
-        if is_zk != self.joint_masks.is_some() || is_zk != self.basecase.is_zk() {
-            return Err(DeriveError::InvalidMaskLayout);
-        }
-        for result in self
-            .first_round
-            .iter()
-            .map(|round| round.validate_mask(is_zk))
-            .chain(
-                self.tail_rounds
-                    .iter()
-                    .map(|round| round.validate_mask(is_zk)),
-            )
-        {
-            result?;
-        }
-        if let Some(joint) = &self.joint_masks {
-            if joint.sumcheck_masks.len() != self.num_rounds()
-                || joint.witness_masks.len() != self.num_rounds() + 1
-            {
-                return Err(DeriveError::InvalidMaskLayout);
-            }
-            let mut end = 0;
-            for (masks, range) in self.round_masks().zip(&joint.sumcheck_masks) {
-                let masks = masks.ok_or(DeriveError::InvalidMaskLayout)?;
-                check_range(range, &mut end, masks.sumcheck_coefficients)?;
-            }
-            for (masks, range) in self.round_masks().zip(&joint.witness_masks) {
-                let masks = masks.ok_or(DeriveError::InvalidMaskLayout)?;
-                check_range(range, &mut end, masks.witness.num_coefficients()?)?;
-            }
-            let final_mask = self
-                .basecase
-                .witness_mask()
-                .ok_or(DeriveError::InvalidMaskLayout)?;
-            final_mask.validate(self.basecase.commit(), usize::from(self.has_rounds()))?;
-            let final_range = joint
-                .witness_masks
-                .last()
-                .ok_or(DeriveError::InvalidMaskLayout)?;
-            check_range(final_range, &mut end, final_mask.num_coefficients()?)?;
-            let blinder_len = joint
-                .commit
-                .in_domain_samples()
-                .checked_add(1)
-                .ok_or(DeriveError::SizeOverflow)?;
-            check_range(&joint.blinder, &mut end, blinder_len)?;
-            let degree = if self.has_rounds() {
-                embedding_degree::<M>()?
-            } else {
-                1
-            };
-            check_range(&joint.basefield_blinder, &mut end, degree)?;
-            if end > joint.commit.vector_size() {
-                return Err(DeriveError::InvalidMaskLayout);
-            }
-        }
-        Ok(())
+impl<M: Embedding> Node<M> {
+    pub(super) fn round<'a>(
+        &'a self,
+        target: &'a IrsConfig<Identity<M::Target>>,
+        index: usize,
+        is_zk: bool,
+    ) -> RoundConfig<'a, M> {
+        let folds = self.code.interleaving_depth().ilog2() as usize;
+        let (ood, pow) = self.switch.expect("nonterminal commitment");
+        let masks = is_zk.then(|| RoundMasks {
+            witness: WitnessMaskConfig::for_code(&self.code, usize::from(index != 0))
+                .expect("construction checked witness mask dimensions"),
+            sumcheck_coefficients: mask_coefficients(folds).expect("bounded folding factor"),
+        });
+        RoundConfig::new(
+            index,
+            SumcheckConfig::new(
+                self.code.vector_size(),
+                self.sumcheck_pow,
+                folds,
+                if is_zk {
+                    SumcheckMode::ZeroKnowledge {
+                        mask_length: SumcheckMaskLen::new(3),
+                    }
+                } else {
+                    SumcheckMode::Standard
+                },
+            ),
+            CodeSwitchConfig::new(&self.code, target, ood, CodeSwitchMode::Standard, pow),
+            masks,
+        )
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct RoundConfig<M: Embedding> {
+impl<F: Field> Node<Identity<F>> {
+    pub(super) fn basecase(&self, is_zk: bool, incoming: usize) -> BasecasePlan<'_, F> {
+        let sumcheck = SumcheckConfig::new(
+            self.code.vector_size(),
+            self.sumcheck_pow,
+            self.code.vector_size().ilog2() as usize,
+            SumcheckMode::Standard,
+        );
+        if is_zk {
+            BasecasePlan::ZeroKnowledge {
+                commit: &self.code,
+                witness_mask: WitnessMaskConfig::for_code(&self.code, incoming)
+                    .expect("construction checked final mask dimensions"),
+                sumcheck,
+            }
+        } else {
+            BasecasePlan::Standard {
+                config: BasecaseConfig::new(
+                    &self.code,
+                    sumcheck,
+                    BasecaseMode::Standard,
+                    PowConfig::none(),
+                ),
+            }
+        }
+    }
+}
+
+/// A temporary view joins adjacent commitments; it owns no IRS configurations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoundConfig<'a, M: Embedding> {
     round_index: usize,
     sumcheck: SumcheckConfig<M::Target>,
-    code_switch: CodeSwitchConfig<M>,
+    code_switch: CodeSwitchConfig<'a, M>,
     masks: Option<RoundMasks>,
 }
-
-impl<M: Embedding> RoundConfig<M> {
+impl<'a, M: Embedding> RoundConfig<'a, M> {
     pub(crate) const fn new(
         round_index: usize,
         sumcheck: SumcheckConfig<M::Target>,
-        code_switch: CodeSwitchConfig<M>,
+        code_switch: CodeSwitchConfig<'a, M>,
         masks: Option<RoundMasks>,
     ) -> Self {
         Self {
@@ -302,70 +216,29 @@ impl<M: Embedding> RoundConfig<M> {
     pub const fn sumcheck(&self) -> &SumcheckConfig<M::Target> {
         &self.sumcheck
     }
-    pub const fn code_switch(&self) -> &CodeSwitchConfig<M> {
+    pub const fn code_switch(&self) -> &CodeSwitchConfig<'a, M> {
         &self.code_switch
     }
     pub const fn masks(&self) -> Option<&RoundMasks> {
         self.masks.as_ref()
     }
-
-    const fn dimensions(&self) -> (usize, usize, usize) {
-        (
-            self.round_index,
-            self.code_switch.source().vector_size(),
-            self.code_switch.target().vector_size(),
-        )
-    }
-
-    fn validate_mask(&self, is_zk: bool) -> Result<(), DeriveError> {
-        if is_zk != self.masks().is_some() {
-            return Err(DeriveError::InvalidMaskLayout);
-        }
-        let source = self.code_switch.source();
-        let folds =
-            u32::try_from(self.sumcheck.num_rounds()).map_err(|_| DeriveError::SizeOverflow)?;
-        if self.sumcheck.initial_size() != source.vector_size()
-            || 1_usize.checked_shl(folds) != Some(source.interleaving_depth())
-            || source.message_length() != self.code_switch.target().vector_size()
-        {
-            return Err(ZookSecurityError::InvalidRoundShape.into());
-        }
-        if let Some(masks) = self.masks() {
-            if self.code_switch.out_domain_samples() != 1 {
-                return Err(ZookSecurityError::InvalidRoundShape.into());
-            }
-            masks.witness.validate(
-                self.code_switch.source(),
-                usize::from(self.round_index != 0),
-            )?;
-            let expected = mask_coefficients(self.sumcheck.num_rounds())?;
-            if masks.sumcheck_coefficients != expected {
-                return Err(DeriveError::InvalidMaskLayout);
-            }
-        }
-        Ok(())
-    }
 }
 
-/// Final witness commitment and the protocol used to open it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub enum BasecasePlan<F: Field> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BasecasePlan<'a, F: Field> {
     Standard {
-        config: BasecaseConfig<F>,
+        config: BasecaseConfig<'a, F>,
     },
     ZeroKnowledge {
-        commit: IrsConfig<Identity<F>>,
+        commit: &'a IrsConfig<Identity<F>>,
         witness_mask: WitnessMaskConfig,
-        /// Reduce the revealed combined witness against the implicit kernel.
         sumcheck: SumcheckConfig<F>,
     },
 }
-
-impl<F: Field> BasecasePlan<F> {
-    pub const fn commit(&self) -> &IrsConfig<Identity<F>> {
+impl<'a, F: Field> BasecasePlan<'a, F> {
+    pub const fn commit(&self) -> &'a IrsConfig<Identity<F>> {
         match self {
-            Self::Standard { config, .. } => config.commit(),
+            Self::Standard { config } => config.commit(),
             Self::ZeroKnowledge { commit, .. } => commit,
         }
     }
@@ -378,15 +251,6 @@ impl<F: Field> BasecasePlan<F> {
             Self::ZeroKnowledge { witness_mask, .. } => Some(witness_mask),
         }
     }
-}
-
-fn check_range(range: &Range<usize>, end: &mut usize, length: usize) -> Result<(), DeriveError> {
-    let expected_end = end.checked_add(length).ok_or(DeriveError::SizeOverflow)?;
-    if range.start != *end || range.end != expected_end {
-        return Err(DeriveError::InvalidMaskLayout);
-    }
-    *end = expected_end;
-    Ok(())
 }
 
 pub(super) fn embedding_degree<M: Embedding>() -> Result<usize, DeriveError> {

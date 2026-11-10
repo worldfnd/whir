@@ -4,7 +4,7 @@ use crate::protocols::{
     irs_commit::IrsParams,
     params::{
         config::BasecasePlan,
-        derive::{solve_code_switch, solve_irs, solve_sumcheck, solve_t_ood, solve_with_commit},
+        derive::{solve_irs, solve_node, solve_t_ood},
         masks::solve_commit,
         spec::{Mode, RoundContext, SecuritySpec},
         DeriveError, SecurityEvent,
@@ -86,11 +86,12 @@ mod regime {
         assert_close(DecodingRegimeParams::Unique.list_size_log2(4.0, 2.0), 0.0);
     }
 
-    /// `η = √ρ/20` ⇒ `|Λ| = 10/ρ` ⇒ `list_size_estimate(_, b) = 10 · 2^b`.
+    /// `η = √ρ/20` ⇒ `|Λ| = 10/ρ` ⇒ `list_size(_, b) = 10 · 2^b`.
     #[test]
     fn johnson_list_size_closed_form() {
         for b in [1.0, 2.0, 3.0, 5.0] {
-            let got = DecodingRegime::Johnson.list_size_estimate(/* log_degree */ 4.0, b);
+            let got = DecodingRegimeParams::from_policy(DecodingRegime::Johnson, rate(b))
+                .list_size(4.0, b);
             let expected = 10.0 * 2_f64.powf(b);
             assert!(
                 (got - expected).abs() / expected < TIGHT_EPS,
@@ -103,7 +104,8 @@ mod regime {
     #[test]
     fn capacity_list_size_closed_form() {
         for (log_d, b) in [(4.0, 1.0), (6.0, 2.0), (8.0, 3.0)] {
-            let got = DecodingRegime::Capacity.list_size_estimate(log_d, b);
+            let got = DecodingRegimeParams::from_policy(DecodingRegime::Capacity, rate(b))
+                .list_size(log_d, b);
             let expected = 20.0 * 2_f64.powf(log_d) * 2_f64.powf(2.0 * b);
             assert!(
                 (got - expected).abs() / expected < TIGHT_EPS,
@@ -136,7 +138,8 @@ mod regime {
             mode: IrsMode::Standard,
         });
         let log_degree = (config.masked_message_length() as f64).log2();
-        let got = DecodingRegime::Johnson.list_size_estimate(log_degree, f64::from(LOG_INV_RATE));
+        let got = DecodingRegimeParams::from_policy(DecodingRegime::Johnson, config.rate())
+            .list_size(log_degree, f64::from(LOG_INV_RATE));
         let expected = config.list_size();
         assert!(
             (got - expected).abs() / expected < TIGHT_EPS,
@@ -205,92 +208,38 @@ mod regime {
     const MCA_LOG_INV_RATE: f64 = 2.0;
     const MCA_FIELD_BITS: f64 = 64.0;
 
-    /// MCA error, unique-decoding branch: `log k + log_inv_rate − field_bits`.
+    /// Compare the MCA formulas with independent theorem anchors.
     #[test]
-    fn eps_mca_log2_unique_decoding_formula() {
-        let got = DecodingRegimeParams::Unique.eps_mca_log2(
-            MCA_LOG_INV_RATE,
-            MCA_MESSAGE_LENGTH,
-            MCA_FIELD_BITS,
-        );
-        let expected = (MCA_MESSAGE_LENGTH as f64).log2() + MCA_LOG_INV_RATE - MCA_FIELD_BITS;
-        assert_close(got, expected);
+    fn eps_mca_log2_formulas_and_theorem_anchors() {
+        let log_k = (MCA_MESSAGE_LENGTH as f64).log2();
+        let rho = 2_f64.powf(-MCA_LOG_INV_RATE);
+        // Unique: ε ≈ k/|F| · ρ⁻¹ gives log₂ε = 4 + 2 − 64 = −58.
+        let unique = log_k + MCA_LOG_INV_RATE - MCA_FIELD_BITS;
+        // Johnson, BCSS25 Theorem 1.5, canonical η = √ρ/20 and m = 10:
+        // ε = (2·10.5⁵/3) · n · ρ^{−3/2} / |F|, with n = k/ρ = 64.
+        // log₂ε = 16.376624613… + 6 + 3 − 64 = −38.623375386…
+        let johnson_bound =
+            (2.0 * 10.5_f64.powi(5) / 3.0).log2() + log_k + 2.5 * MCA_LOG_INV_RATE - MCA_FIELD_BITS;
+        // Capacity, STIR Conjecture 5.6, canonical η = ρ/20:
+        // ε = d / (η · ρ²) / |F|, where d = k = 16, η = 1/80, and ρ² = 1/16.
+        // log₂ε = log₂20480 − 64 = 14.321928094… − 64 = −49.678071905…
+        let capacity_bound = log_k + 3.0 * MCA_LOG_INV_RATE + LOG2_10 + 1.0 - MCA_FIELD_BITS;
+        for (regime, formula, anchor) in [
+            (DecodingRegimeParams::Unique, unique, -58.0),
+            (
+                johnson(rho.sqrt() / 20.0),
+                johnson_bound,
+                -38.623_375_386_827_36,
+            ),
+            (capacity(rho / 20.0), capacity_bound, -49.678_071_905_112_64),
+        ] {
+            let actual = regime.eps_mca_log2(MCA_LOG_INV_RATE, MCA_MESSAGE_LENGTH, MCA_FIELD_BITS);
+            assert_close(actual, formula);
+            assert_close(actual, anchor);
+        }
     }
 
-    /// MCA error, Johnson (BCSS25): `log₂(2·10.5⁵/3) + log k + 2.5·log_inv_rate − field_bits`.
-    #[test]
-    fn eps_mca_log2_johnson_formula() {
-        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE).sqrt() / 20.0;
-
-        let got = johnson(canonical_slack).eps_mca_log2(
-            MCA_LOG_INV_RATE,
-            MCA_MESSAGE_LENGTH,
-            MCA_FIELD_BITS,
-        );
-        let bcss25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
-        let expected = bcss25_const + (MCA_MESSAGE_LENGTH as f64).log2() + 2.5 * MCA_LOG_INV_RATE
-            - MCA_FIELD_BITS;
-        assert_close(got, expected);
-    }
-
-    /// MCA error, Capacity (STIR Conj 5.6 at canonical η):
-    /// `log k + 3·log_inv_rate + log₂10 + 1 − field_bits`.
-    #[test]
-    fn eps_mca_log2_capacity_formula() {
-        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE) / 20.0;
-
-        let got = capacity(canonical_slack).eps_mca_log2(
-            MCA_LOG_INV_RATE,
-            MCA_MESSAGE_LENGTH,
-            MCA_FIELD_BITS,
-        );
-        let expected = (MCA_MESSAGE_LENGTH as f64).log2() + 3.0 * MCA_LOG_INV_RATE + LOG2_10 + 1.0
-            - MCA_FIELD_BITS;
-        assert_close(got, expected);
-    }
-
-    /// Unique: ε ≈ k/|F| · ρ⁻¹ ⇒ log₂ε = log₂16 + 2 − 64 = 4 + 2 − 64 = −58.
-    #[test]
-    fn eps_mca_log2_unique_theorem_anchor() {
-        let got = DecodingRegimeParams::Unique.eps_mca_log2(
-            MCA_LOG_INV_RATE,
-            MCA_MESSAGE_LENGTH,
-            MCA_FIELD_BITS,
-        );
-        assert_close(got, -58.0);
-    }
-
-    /// Johnson (BCSS25 Theorem 1.5, η = √ρ/20, m = 10):
-    /// `ε = (2·10.5⁵/3) · n · ρ^{−3/2} / |F|` with codeword length n = k/ρ = 64.
-    /// log₂ε = log₂(2·10.5⁵/3) + log₂64 + log₂(ρ^{−3/2}) − 64
-    ///       = 16.376624613… + 6 + 3 − 64 = −38.623375386…
-    #[test]
-    fn eps_mca_log2_johnson_theorem_anchor() {
-        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE).sqrt() / 20.0;
-        let got = johnson(canonical_slack).eps_mca_log2(
-            MCA_LOG_INV_RATE,
-            MCA_MESSAGE_LENGTH,
-            MCA_FIELD_BITS,
-        );
-        assert_close(got, -38.623_375_386_827_36);
-    }
-
-    /// Capacity (STIR Conj 5.6, η = ρ/20): `ε = d / (η · ρ²) / |F|` with d = k = 16,
-    /// η = ρ/20 = 1/80, ρ² = 1/16.
-    /// log₂ε = log₂(16 / ((1/80)·(1/16))) − 64 = log₂(16·1280) − 64
-    ///       = log₂20480 − 64 = 14.321928094… − 64 = −49.678071905…
-    #[test]
-    fn eps_mca_log2_capacity_theorem_anchor() {
-        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE) / 20.0;
-        let got = capacity(canonical_slack).eps_mca_log2(
-            MCA_LOG_INV_RATE,
-            MCA_MESSAGE_LENGTH,
-            MCA_FIELD_BITS,
-        );
-        assert_close(got, -49.678_071_905_112_64);
-    }
-
-    /// `from_policy` dispatches to the canonical constructor for each regime.
+    /// `from_policy` uses the canonical slack for each regime.
     #[test]
     fn from_policy_matches_canonical() {
         assert_eq!(
@@ -299,11 +248,11 @@ mod regime {
         );
         assert_eq!(
             DecodingRegimeParams::from_policy(DecodingRegime::Johnson, 0.25),
-            DecodingRegimeParams::johnson_canonical(0.25),
+            johnson(0.25_f64.sqrt() / 20.0),
         );
         assert_eq!(
             DecodingRegimeParams::from_policy(DecodingRegime::Capacity, 0.25),
-            DecodingRegimeParams::capacity_canonical(0.25),
+            capacity(0.25 / 20.0),
         );
     }
 }
@@ -413,11 +362,13 @@ mod sumcheck {
                     folding_factor: folds,
                 };
                 let source = solve_irs::<TestEmbedding>(&spec, &ctx).unwrap();
-                let solved = solve_sumcheck(
+                let target = solve_irs::<Identity<TestField>>(
                     &spec,
-                    &ctx,
-                    &source,
-                    SecurityEvent::RoundSumcheck { index: 0 },
+                    &RoundContext {
+                        vector_size: source.message_length(),
+                        log_inv_rate: ctx.log_inv_rate + folds - 1,
+                        folding_factor: 0,
+                    },
                 )
                 .unwrap();
                 let expected = source
@@ -428,6 +379,9 @@ mod sumcheck {
                     f64::from(sumcheck_error_bits(&source, false).unwrap()),
                     expected,
                 );
+                let node = solve_node(&spec, source, Some(&target), 0).unwrap();
+                let round = node.round(&target, 0, false);
+                let solved = round.sumcheck();
                 assert_eq!(solved.initial_size(), ctx.vector_size);
                 assert_eq!(solved.num_rounds(), folds as usize);
                 assert!(matches!(solved.mode(), SumcheckMode::Standard));
@@ -480,7 +434,10 @@ mod code_switch {
             let count = t_ood + source.in_domain_samples() * source.interleaving_depth();
             let combination = field_bits - (count as f64).log2() - list.log2();
             let expected = ood.min(source.rbr_queries()).min(combination).max(0.0);
-            let solved = solve_code_switch(&spec, source, target, t_ood, 0).unwrap();
+            let node = solve_node(&spec, source, Some(&target), 0).unwrap();
+            let round = node.round(&target, 0, false);
+            let solved = round.code_switch();
+            assert_eq!(solved.out_domain_samples(), t_ood);
             assert_close(
                 f64::from(
                     code_switch_error_bits(solved.source(), solved.target(), t_ood, false).unwrap(),
@@ -507,9 +464,8 @@ mod basecase {
     fn final_sumcheck_is_standard_and_receives_no_grinding_credit() {
         let code = johnson_code::<Identity<Field64_2>>(128, 1, 0.25);
         let spec = SecuritySpec::new(80).with_mode(Mode::ZeroKnowledge);
-        let BasecasePlan::ZeroKnowledge { sumcheck, .. } =
-            solve_with_commit(&spec, code, 0).unwrap()
-        else {
+        let node = solve_node(&spec, code, None, 0).unwrap();
+        let BasecasePlan::ZeroKnowledge { sumcheck, .. } = node.basecase(true, 0) else {
             panic!("expected Zook final sumcheck");
         };
         assert!(matches!(sumcheck.mode(), SumcheckMode::Standard));
@@ -526,7 +482,7 @@ mod basecase {
             .with_mode(Mode::ZeroKnowledge)
             .with_pow_budget(PowBudget::per_slot(20));
         assert!(matches!(
-            solve_with_commit(&spec, code, 0),
+            solve_node(&spec, code, None, 0),
             Err(DeriveError::SecurityTargetNotMet {
                 pow: SecurityEvent::BasecaseSumcheck,
                 ..
@@ -605,21 +561,21 @@ mod rounds {
         let source = johnson_code::<Basefield<Field64_2>>(256, 4, 0.25);
         let target = johnson_code::<Identity<Field64_2>>(64, 2, 0.125);
         let field = 2.0_f64.powf(Field64_2::field_size_bits());
-        let soundness = ZookRoundSoundness::for_codes(&source, &target).unwrap();
+        let agreement = sumcheck_error_bits(&source, true).unwrap();
+        let (queries, aggregation) = zook_query_error_bits(&source, &target).unwrap();
         let l = source.list_size();
         assert_probability_bits(
-            soundness.sumcheck_step,
+            agreement,
             l * ((2.0 / 3.0) * l.powi(4) * source.rate() + 1.0) * source.codeword_length() as f64
                 / field,
         );
-        assert_eq!(soundness.mask_combination, soundness.sumcheck_step);
         let deep_error = target.list_size().powi(2) / 2.0 * target.vector_size() as f64
             / (field - target.codeword_length() as f64);
         let rho = source.rate();
         let query_error = (rho.sqrt() * 1.05).powf(source.in_domain_samples() as f64);
-        assert_probability_bits(soundness.queries, deep_error + query_error);
+        assert_probability_bits(queries, deep_error + query_error);
         assert_probability_bits(
-            soundness.aggregation,
+            aggregation,
             target.list_size() * source.in_domain_samples() as f64 / field,
         );
     }
@@ -633,7 +589,7 @@ mod rounds {
         );
         let wrong_target = johnson_code::<Identity<Field64_2>>(32, 1, 0.25);
         assert_eq!(
-            ZookRoundSoundness::for_codes(&interleaved, &wrong_target),
+            zook_query_error_bits(&interleaved, &wrong_target),
             Err(ZookSecurityError::InvalidRoundShape)
         );
     }

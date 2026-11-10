@@ -141,38 +141,11 @@ impl WitnessMaskConfig {
         code: &IrsConfig<M>,
         incoming_deep: usize,
     ) -> Result<Self, DeriveError> {
-        let config = Self {
-            num_polynomials: code.interleaving_depth(),
-            coefficients_per_polynomial: code
-                .in_domain_samples()
-                .checked_add(incoming_deep)
-                .ok_or(DeriveError::SizeOverflow)?,
-        };
-        config.validate(code, incoming_deep)?;
-        Ok(config)
-    }
-
-    /// Number of random coefficients to sample for this witness commitment.
-    pub fn num_coefficients(self) -> Result<usize, DeriveError> {
-        self.num_polynomials
-            .checked_mul(self.coefficients_per_polynomial)
-            .ok_or(DeriveError::SizeOverflow)
-    }
-
-    pub(super) fn validate<M: Embedding>(
-        &self,
-        code: &IrsConfig<M>,
-        incoming_deep: usize,
-    ) -> Result<(), DeriveError> {
         let required = code
             .in_domain_samples()
             .checked_add(incoming_deep)
             .ok_or(DeriveError::SizeOverflow)?;
-        if code.num_vectors() != 1
-            || self.num_polynomials != code.interleaving_depth()
-            || self.coefficients_per_polynomial != required
-            || code.mask_length() != 0
-        {
+        if code.num_vectors() != 1 || code.mask_length() != 0 {
             return Err(DeriveError::InvalidMaskLayout);
         }
         if required > code.message_length() {
@@ -181,7 +154,17 @@ impl WitnessMaskConfig {
                 available: code.message_length(),
             });
         }
-        Ok(())
+        Ok(Self {
+            num_polynomials: code.interleaving_depth(),
+            coefficients_per_polynomial: required,
+        })
+    }
+
+    /// Number of random coefficients to sample for this witness commitment.
+    pub fn num_coefficients(self) -> Result<usize, DeriveError> {
+        self.num_polynomials
+            .checked_mul(self.coefficients_per_polynomial)
+            .ok_or(DeriveError::SizeOverflow)
     }
 }
 

@@ -46,8 +46,12 @@ mod derive_tests {
         let masks = config
             .first_round()
             .into_iter()
-            .filter_map(RoundConfig::masks)
-            .chain(config.tail_rounds().iter().filter_map(RoundConfig::masks));
+            .filter_map(|round| round.masks().copied())
+            .chain(
+                config
+                    .tail_rounds()
+                    .filter_map(|round| round.masks().copied()),
+            );
         for (mask, range) in masks.zip(joint.sumcheck_masks()) {
             assert_eq!(range.len(), 5);
             assert_eq!(range.len(), mask.sumcheck_coefficients);
@@ -78,7 +82,7 @@ mod derive_tests {
             assert_eq!(source.mask_length(), 0);
         }
         let final_code = config.basecase().commit();
-        let final_mask = config.basecase().witness_mask().unwrap();
+        let final_mask = config.basecase().witness_mask().copied().unwrap();
         assert_eq!(
             final_mask.coefficients_per_polynomial,
             final_code.in_domain_samples() + 1
@@ -100,18 +104,6 @@ mod derive_tests {
     }
 
     #[test]
-    fn validates_final_sumcheck_after_deserialization() {
-        let config = ProtocolConfig::<M>::derive(spec(), tuning(4096)).unwrap();
-        for field in ["num_rounds", "initial_size"] {
-            let mut encoded = serde_json::to_value(&config).unwrap();
-            let value = &mut encoded["basecase"]["ZeroKnowledge"]["sumcheck"][field];
-            assert!(value.as_u64().unwrap() > 0);
-            *value = serde_json::json!(0);
-            assert!(serde_json::from_value::<ProtocolConfig<M>>(encoded).is_err());
-        }
-    }
-
-    #[test]
     fn grinding_budget_does_not_reduce_zook_queries() {
         let config = ProtocolConfig::<M>::derive(spec(), tuning(4096)).unwrap();
         let with_pow = ProtocolConfig::<M>::derive(
@@ -121,7 +113,7 @@ mod derive_tests {
         .unwrap();
         assert_eq!(config.joint_masks(), with_pow.joint_masks());
         assert_eq!(config.first_round(), with_pow.first_round());
-        assert_eq!(config.tail_rounds(), with_pow.tail_rounds());
+        assert!(config.tail_rounds().eq(with_pow.tail_rounds()));
         assert!(config
             .security_report()
             .unwrap()
@@ -152,38 +144,6 @@ mod derive_tests {
                     ZookSecurityError::UnsupportedRegime
                 )),
             ));
-        }
-    }
-
-    #[test]
-    fn validates_mask_ranges_after_deserialization() {
-        let config = ProtocolConfig::<M>::derive(spec(), tuning(4096)).unwrap();
-        let json = serde_json::to_string(&config).unwrap();
-        let restored: ProtocolConfig<M> = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, restored);
-        let mut value = serde_json::to_value(&restored).unwrap();
-        let end = value["joint_masks"]["witness_masks"][0]["end"]
-            .as_u64()
-            .unwrap();
-        value["joint_masks"]["witness_masks"][0]["end"] = (end + 1).into();
-        assert!(serde_json::from_value::<ProtocolConfig<M>>(value).is_err());
-    }
-
-    #[test]
-    fn rejects_inconsistent_rounds_after_deserialization() {
-        let config = ProtocolConfig::<M>::derive(spec(), tuning(4096)).unwrap();
-        for path in [
-            "/first_round/round_index",
-            "/first_round/sumcheck/initial_size",
-            "/first_round/code_switch/out_domain_samples",
-        ] {
-            let mut value = serde_json::to_value(&config).unwrap();
-            let field = value.pointer_mut(path).unwrap();
-            *field = (field.as_u64().unwrap() + 1).into();
-            assert!(
-                serde_json::from_value::<ProtocolConfig<M>>(value).is_err(),
-                "accepted mutation at {path}"
-            );
         }
     }
 
@@ -246,7 +206,7 @@ mod layout_tests {
 
     /// Exercise layout construction in Standard mode.
     /// Derivation tests cover adaptive schedules and complete configurations.
-    fn layout(tuning: &TuningSpec) -> Result<RoundLayout, DeriveError> {
+    fn layout(tuning: &TuningSpec) -> Result<Vec<RoundContext>, DeriveError> {
         round_layout::<TestEmbedding>(&layout_spec(), tuning)
     }
 
@@ -282,15 +242,15 @@ mod layout_tests {
         let layout = layout(&tuning).unwrap();
 
         let mut expected_log_inv_rate = RATE_STEPPING_STARTING_LOG_INV_RATE;
-        for shape in &layout.shapes {
-            assert_eq!(shape.source_log_inv_rate, expected_log_inv_rate);
-            expected_log_inv_rate += shape.source_folding_factor.saturating_sub(1);
+        for source in &layout[..layout.len() - 1] {
+            assert_eq!(source.log_inv_rate, expected_log_inv_rate);
+            expected_log_inv_rate += source.folding_factor.saturating_sub(1);
         }
-        assert_eq!(layout.basecase_log_inv_rate, expected_log_inv_rate);
+        assert_eq!(layout.last().unwrap().log_inv_rate, expected_log_inv_rate);
     }
 
     #[test]
-    fn round_layout_chains_target_to_next_source_folding() {
+    fn round_layout_chains_adjacent_commitment_dimensions() {
         let tuning = TuningSpec {
             vector_size: 1 << LOG_VECTOR_SIZE_MULTI_ROUND,
             starting_log_inv_rate: FIXTURE_LOG_INV_RATE,
@@ -302,25 +262,33 @@ mod layout_tests {
         };
         let layout = layout(&tuning).unwrap();
         assert!(
-            layout.shapes.len() >= MIN_ROUNDS_FOR_CHAINING_TEST,
+            layout.len() > MIN_ROUNDS_FOR_CHAINING_TEST,
             "need ≥ {MIN_ROUNDS_FOR_CHAINING_TEST} rounds to test chaining",
         );
-        for window in layout.shapes.windows(2) {
+        for (index, window) in layout.windows(2).enumerate() {
             assert_eq!(
-                window[0].target_folding_factor,
-                window[1].source_folding_factor
+                window[1].vector_size,
+                window[0].vector_size >> window[0].folding_factor
+            );
+            assert_eq!(
+                window[0].folding_factor as usize,
+                tuning.folding_factor.at_round(index)
             );
         }
+        assert_eq!(layout.last().unwrap().folding_factor, 0);
     }
 
     #[test]
     fn round_layout_basecase_size_consumes_remaining_num_vars() {
         let tuning = tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND);
         let layout = layout(&tuning).unwrap();
-        let consumed: u32 = layout.shapes.iter().map(|s| s.source_folding_factor).sum();
+        let consumed: u32 = layout[..layout.len() - 1]
+            .iter()
+            .map(|s| s.folding_factor)
+            .sum();
         let initial_num_vars = tuning.vector_size.trailing_zeros();
         let remaining = initial_num_vars - consumed;
-        assert_eq!(layout.basecase_vector_size, 1usize << remaining);
+        assert_eq!(layout.last().unwrap().vector_size, 1usize << remaining);
     }
 
     #[test]
@@ -328,9 +296,10 @@ mod layout_tests {
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
         let tuning = tuning_with(vector_size);
         let layout = layout(&tuning).unwrap();
-        assert_eq!(layout.shapes.len(), 0);
-        assert_eq!(layout.basecase_vector_size, vector_size);
-        assert_eq!(layout.basecase_log_inv_rate, FIXTURE_LOG_INV_RATE);
+        assert_eq!(layout.len(), 1);
+        assert_eq!(layout[0].vector_size, vector_size);
+        assert_eq!(layout[0].log_inv_rate, FIXTURE_LOG_INV_RATE);
+        assert_eq!(layout[0].folding_factor, 0);
     }
 
     #[test]

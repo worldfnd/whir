@@ -26,12 +26,15 @@ fn config(mode: Mode, vector_size: usize) -> Config {
     .unwrap()
 }
 
-fn rejects(config: &Config, pointer: &str, value: Value) {
-    let mut input = serde_json::to_value(config).unwrap();
-    *input.pointer_mut(pointer).expect("existing config field") = value;
-    let result = std::panic::catch_unwind(|| serde_json::from_value::<Config>(input));
-    assert!(result.is_ok(), "deserialization panicked for {pointer}");
-    assert!(result.unwrap().is_err(), "accepted invalid {pointer}");
+fn rejects(input: &Value) {
+    let json = std::panic::catch_unwind(|| serde_json::from_value::<Config>(input.clone()));
+    assert!(json.is_ok(), "JSON deserialization panicked");
+    assert!(json.unwrap().is_err(), "JSON accepted invalid request");
+    let mut bytes = Vec::new();
+    ciborium::into_writer(input, &mut bytes).unwrap();
+    let cbor = std::panic::catch_unwind(|| ciborium::from_reader::<Config, _>(bytes.as_slice()));
+    assert!(cbor.is_ok(), "CBOR deserialization panicked");
+    assert!(cbor.unwrap().is_err(), "CBOR accepted invalid request");
 }
 
 #[test]
@@ -39,8 +42,13 @@ fn valid_json_and_cbor_configs_keep_their_parameters() {
     for mode in [Mode::Standard, Mode::ZeroKnowledge] {
         for size in [8, 4096] {
             let original = config(mode, size);
-            let decoded: Config =
-                serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+            let encoded = serde_json::to_value(&original).unwrap();
+            assert_eq!(
+                encoded,
+                json!({"embedding": whir::type_info::Typed::new(Identity::<Field64_2>::new()),
+                    "security": original.security(), "tuning": original.tuning()})
+            );
+            let decoded: Config = serde_json::from_value(encoded).unwrap();
             assert_eq!(decoded, original);
             let mut bytes = Vec::new();
             ciborium::into_writer(&original, &mut bytes).unwrap();
@@ -52,85 +60,77 @@ fn valid_json_and_cbor_configs_keep_their_parameters() {
 }
 
 #[test]
-fn rejects_standard_basecase_sumcheck_dimension_mismatches() {
-    let config = config(Mode::Standard, 8);
-    rejects(
-        &config,
-        "/basecase/Standard/config/sumcheck/initial_size",
-        json!(4),
-    );
-    rejects(
-        &config,
-        "/basecase/Standard/config/sumcheck/num_rounds",
-        json!(1),
-    );
-    rejects(
-        &config,
-        "/basecase/Standard/config/sumcheck/mode",
-        json!({"ZeroKnowledge": {"mask_length": 3}}),
-    );
-}
-
-#[test]
-fn rejects_round_sumcheck_mode_mismatches() {
-    let zk = config(Mode::ZeroKnowledge, 4096);
-    rejects(&zk, "/first_round/sumcheck/mode", json!("Standard"));
-    rejects(
-        &zk,
-        "/first_round/sumcheck/mode/ZeroKnowledge/mask_length",
-        json!(0),
-    );
-    let standard = config(Mode::Standard, 256);
-    rejects(
-        &standard,
-        "/first_round/sumcheck/mode",
-        json!({"ZeroKnowledge": {"mask_length": 3}}),
-    );
-}
-
-#[test]
-fn rejects_nested_irs_and_matrix_dimension_mismatches() {
-    let config = config(Mode::Standard, 8);
-    for (suffix, value) in [
-        ("matrix_commit/num_cols", json!(2)),
-        ("matrix_commit/merkle_tree/num_leaves", json!(3)),
-        ("matrix_commit/merkle_tree/layers", json!([])),
-        ("interleaving_depth", json!(0)),
-        ("codeword_length", json!(0)),
-        ("in_domain_samples", json!(0)),
-        ("vector_size", json!(usize::MAX)),
-    ] {
-        rejects(
-            &config,
-            &format!("/basecase/Standard/config/commit/{suffix}"),
-            value,
-        );
+fn round_views_share_adjacent_commitments() {
+    for mode in [Mode::Standard, Mode::ZeroKnowledge] {
+        let config = config(mode, 4096);
+        let first = config.first_round().unwrap();
+        let mut previous = first.code_switch().target();
+        for round in config.tail_rounds() {
+            assert!(std::ptr::eq(previous, round.code_switch().source()));
+            previous = round.code_switch().target();
+        }
+        assert!(std::ptr::eq(previous, config.final_commit()));
+        assert!(std::ptr::eq(
+            config.final_commit(),
+            config.basecase().commit()
+        ));
     }
 }
 
 #[test]
-fn rejects_invalid_decoding_and_grinding_inputs_without_panics() {
-    let config = config(Mode::Standard, 256);
-    rejects(
-        &config,
-        "/first_round/code_switch/source/regime/Johnson/slack",
-        json!(0.0),
-    );
-    rejects(
-        &config,
-        "/first_round/sumcheck/round_pow/threshold",
-        json!(0),
-    );
-    rejects(
-        &config,
-        "/first_round/code_switch/out_domain_samples",
-        json!(usize::MAX),
-    );
-    rejects(
-        &config,
-        "/first_round/code_switch/source/matrix_commit/leaf_hash_id",
-        json!(vec![0u8; 32]),
-    );
+fn rejects_derived_fields_in_serialized_requests() {
+    let config = config(Mode::Standard, 8);
+    for field in [
+        "padded_vector_size",
+        "first_round",
+        "tail_rounds",
+        "basecase",
+        "joint_masks",
+        "first",
+        "targets",
+    ] {
+        let mut input = serde_json::to_value(&config).unwrap();
+        input[field] = Value::Null;
+        rejects(&input);
+    }
+}
+
+#[test]
+fn rejects_invalid_request_fields_without_panicking() {
+    let config = config(Mode::Standard, 8);
+    for (pointer, value) in [
+        ("/tuning/vector_size", json!(0)),
+        ("/tuning/vector_size", json!(3)),
+        ("/tuning/vector_size", json!(usize::MAX)),
+        ("/tuning/starting_log_inv_rate", json!(0)),
+        ("/tuning/starting_log_inv_rate", json!(u32::MAX)),
+        ("/tuning/folding_factor", json!({"Constant": 0})),
+        (
+            "/tuning/folding_factor",
+            json!({"ConstantFromSecondRound": {"initial": 0, "rest": 2}}),
+        ),
+        (
+            "/tuning/folding_factor",
+            json!({"ConstantFromSecondRound": {"initial": 2, "rest": 0}}),
+        ),
+        (
+            "/tuning/rate_schedule",
+            json!({"Capped": {"max_log_inv_rate": 0}}),
+        ),
+        ("/security/target_security_bits", json!(u32::MAX)),
+        ("/security/pow_budget", json!({"PerSlot": {"bits": 0}})),
+        ("/security/hash_id", json!([])),
+    ] {
+        let mut input = serde_json::to_value(&config).unwrap();
+        *input.pointer_mut(pointer).unwrap() = value;
+        rejects(&input);
+    }
+    for regime in ["Unique", "Capacity"] {
+        let mut input = serde_json::to_value(&config).unwrap();
+        input["security"]["mode"] = json!("ZeroKnowledge");
+        input["security"]["decoding_regime"] = json!(regime);
+        rejects(&input);
+    }
 }
 
 #[test]
@@ -151,5 +151,27 @@ fn rejects_request_dimension_overflow_without_panicking() {
         Config::derive(config.security().clone(), tuning.clone()),
         Err(DeriveError::SizeOverflow)
     ));
-    rejects(&config, "/tuning", serde_json::to_value(tuning).unwrap());
+    let mut input = serde_json::to_value(&config).unwrap();
+    input["tuning"] = serde_json::to_value(tuning).unwrap();
+    rejects(&input);
+}
+
+#[test]
+fn serialized_requests_bind_the_field_and_embedding() {
+    use whir::algebra::{
+        embedding::{Basefield, Frobenius},
+        fields::Field64_3,
+    };
+    let input = serde_json::to_value(config(Mode::Standard, 256)).unwrap();
+    assert!(serde_json::from_value::<ProtocolConfig<Identity<Field64_3>>>(input.clone()).is_err());
+    assert!(serde_json::from_value::<ProtocolConfig<Basefield<Field64_2>>>(input).is_err());
+    let config = config(Mode::Standard, 256);
+    let frobenius = ProtocolConfig::<Frobenius<Field64_2>>::derive(
+        config.security().clone(),
+        config.tuning().clone(),
+    )
+    .unwrap();
+    let mut input = serde_json::to_value(frobenius).unwrap();
+    input["embedding"]["value"]["power"] = json!(1);
+    assert!(serde_json::from_value::<ProtocolConfig<Frobenius<Field64_2>>>(input).is_err());
 }

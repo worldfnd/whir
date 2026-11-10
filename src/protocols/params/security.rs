@@ -93,22 +93,12 @@ impl DecodingRegimeParams {
     pub fn from_policy(policy: DecodingRegime, rate: f64) -> Self {
         match policy {
             DecodingRegime::Unique => Self::Unique,
-            DecodingRegime::Johnson => Self::johnson_canonical(rate),
-            DecodingRegime::Capacity => Self::capacity_canonical(rate),
-        }
-    }
-
-    /// Johnson regime with the canonical `η = √ρ / 20` slack.
-    pub fn johnson_canonical(rate: f64) -> Self {
-        Self::Johnson {
-            slack: OrderedFloat(rate.sqrt() / 20.0),
-        }
-    }
-
-    /// Capacity regime with the canonical `η = ρ / 20` slack.
-    pub fn capacity_canonical(rate: f64) -> Self {
-        Self::Capacity {
-            slack: OrderedFloat(rate / 20.0),
+            DecodingRegime::Johnson => Self::Johnson {
+                slack: OrderedFloat(rate.sqrt() / 20.0),
+            },
+            DecodingRegime::Capacity => Self::Capacity {
+                slack: OrderedFloat(rate / 20.0),
+            },
         }
     }
 
@@ -195,14 +185,6 @@ impl DecodingRegimeParams {
     }
 }
 
-impl DecodingRegime {
-    /// `|Λ|` at canonical slack, before an IRS config exists.
-    pub fn list_size_estimate(self, log_degree: f64, log_inv_rate: f64) -> f64 {
-        DecodingRegimeParams::from_policy(self, rate(log_inv_rate))
-            .list_size(log_degree, log_inv_rate)
-    }
-}
-
 /// Constrained correlated-agreement error for constraints of degree at most two:
 /// `epsilon <= L * ((2/3) * L^4 * rho + 1) * n / Q`.
 /// Here `L = code.list_size()`, `rho = code.rate()`, `n = code.codeword_length()`,
@@ -274,12 +256,18 @@ pub(super) fn validate_joint_mask_code<M: Embedding>(
 }
 
 /// Per-step security of the configured sumcheck protocol.
+///
+/// Zook uses the constrained correlated-agreement bound after joint-mask binding.
+/// ProveKit Prover Whitepaper §6.4, “Soundness”, theorem “ZO0K soundness under
+/// mask binding”, sumcheck phase; Appendix A gives the agreement bound.
+/// The degree-two bound also covers degree-one mask batching.
+/// This is a bound for one step, not a union over all steps.
 pub fn sumcheck_error_bits<M: Embedding>(
     source: &IrsConfig<M>,
     is_zk: bool,
 ) -> Result<Bits, ZookSecurityError> {
     if is_zk {
-        return zook_sumcheck_error_bits(source);
+        return constrained_agreement_bits(source);
     }
     let polynomial_identity = M::Target::field_size_bits() - source.list_size().log2() - 1.0;
     Ok(Bits::new(
@@ -296,21 +284,6 @@ pub fn sumcheck_error_bits<M: Embedding>(
 /// This is the additional reduction after §5.4, “The final opening protocol”.
 pub(super) fn revealed_sumcheck_error_bits<F: Field>() -> Bits {
     Bits::new((F::field_size_bits() - 1.0).max(0.0))
-}
-
-/// Security of each quadratic sumcheck step after joint-mask binding:
-/// `epsilon <= L * ((2/3) * L^4 * rho + 1) * n / Q`.
-/// Here `L`, `rho`, and `n` are the source code's list bound, rate, and
-/// codeword length; `Q` is the target-field size.
-///
-/// ProveKit Prover Whitepaper §6.4, “Soundness”, theorem “ZO0K soundness under
-/// mask binding”, sumcheck phase; the agreement bound is in Appendix A,
-/// “Correlated agreement”. Conditioning on mask binding removes the mask-list
-/// multiplicity; this is a bound for one step, not a union over all steps.
-pub(super) fn zook_sumcheck_error_bits<M: Embedding>(
-    source: &IrsConfig<M>,
-) -> Result<Bits, ZookSecurityError> {
-    constrained_agreement_bits(source)
 }
 
 /// Per-step query and aggregation security.
@@ -453,8 +426,8 @@ impl<M: Embedding> ProtocolConfig<M> {
         for report in self
             .first_round()
             .into_iter()
-            .map(RoundConfig::security_report)
-            .chain(self.tail_rounds().iter().map(RoundConfig::security_report))
+            .map(|round| round.security_report())
+            .chain(self.tail_rounds().map(|round| round.security_report()))
         {
             slots.extend(report?);
         }
@@ -537,7 +510,7 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 }
 
-impl<M: Embedding> RoundConfig<M> {
+impl<M: Embedding> RoundConfig<'_, M> {
     pub fn analytic_bits(&self) -> Bits {
         self.security_report()
             .expect("valid round security bounds")
@@ -582,52 +555,6 @@ impl<M: Embedding> RoundConfig<M> {
             });
         }
         Ok(slots)
-    }
-}
-
-/// Per-step IOP security conditional on joint-mask binding; excludes hashing and grinding.
-/// Each field is `max(0, -log2(epsilon))` for that step's error bound.
-///
-/// ProveKit Prover Whitepaper §6.4, “Soundness”, theorem “ZO0K soundness under
-/// mask binding”.
-/// Mask binding is accounted separately by `zook_mask_binding_bits`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ZookRoundSoundness {
-    /// Sparse-mask batching: degree-one constrained agreement for the source code.
-    /// Uses the conservative degree-two bound; §6.4, sumcheck phase, mask combination.
-    pub mask_combination: Bits,
-    /// Each quadratic sumcheck step: §6.4, sumcheck phase.
-    pub sumcheck_step: Bits,
-    /// Sum of DEEP and in-domain query errors: §6.4, query phase.
-    pub queries: Bits,
-    /// Random aggregation of queried constraints: §6.4, aggregation step.
-    pub aggregation: Bits,
-}
-
-impl ZookRoundSoundness {
-    /// Evaluate a round with one DEEP challenge in the target field.
-    pub fn for_codes<M: Embedding>(
-        source: &IrsConfig<M>,
-        target: &IrsConfig<Identity<M::Target>>,
-    ) -> Result<Self, ZookSecurityError> {
-        let (queries, aggregation) = zook_query_error_bits(source, target)?;
-        let agreement = zook_sumcheck_error_bits(source)?;
-        Ok(Self {
-            // The degree-two constraint bound also covers degree-one batching.
-            mask_combination: agreement,
-            sumcheck_step: agreement,
-            queries,
-            aggregation,
-        })
-    }
-
-    /// Minimum per-step security: `min(b_mask, b_sumcheck, b_queries, b_aggregation)`.
-    /// This excludes mask binding, the final opening, and any union across steps.
-    pub fn minimum_bits(self) -> Bits {
-        self.mask_combination
-            .min(self.sumcheck_step)
-            .min(self.queries)
-            .min(self.aggregation)
     }
 }
 

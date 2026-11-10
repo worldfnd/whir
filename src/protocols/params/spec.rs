@@ -236,8 +236,8 @@ impl RateSchedule {
     }
 }
 
-/// Per-round context handed to a sub-protocol builder.
-#[derive(Debug, Clone)]
+/// Dimensions and rate of one commitment.
+#[derive(Debug, Clone, Copy)]
 pub struct RoundContext {
     pub vector_size: usize,
     pub log_inv_rate: u32,

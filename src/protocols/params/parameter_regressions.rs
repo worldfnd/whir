@@ -79,7 +79,7 @@ fn sumcheck_parameters<F: Field>(config: &sumcheck::Config<F>) -> Value {
     })
 }
 
-fn round_parameters<M: Embedding>(round: &RoundConfig<M>) -> Value {
+fn round_parameters<M: Embedding>(round: &RoundConfig<'_, M>) -> Value {
     let switch = round.code_switch();
     json!({
         "index": round.round_index(),
@@ -98,16 +98,16 @@ fn round_parameters<M: Embedding>(round: &RoundConfig<M>) -> Value {
 fn parameters<M: Embedding>(config: &ProtocolConfig<M>) -> Value {
     let mut rounds = Vec::new();
     if let Some(first) = config.first_round() {
-        rounds.push(round_parameters(first));
+        rounds.push(round_parameters(&first));
     }
-    rounds.extend(config.tail_rounds().iter().map(round_parameters));
+    rounds.extend(config.tail_rounds().map(|round| round_parameters(&round)));
     let (sumcheck, pow) = match config.basecase() {
         BasecasePlan::Standard { config, .. } => (
             sumcheck_parameters(config.sumcheck()),
             pow_parameters(config.pow()),
         ),
         BasecasePlan::ZeroKnowledge { sumcheck, .. } => (
-            sumcheck_parameters(sumcheck),
+            sumcheck_parameters(&sumcheck),
             pow_parameters(proof_of_work::Config::none()),
         ),
     };

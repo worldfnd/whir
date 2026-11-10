@@ -20,13 +20,11 @@ mod parameter_regressions;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
-pub use config::{BasecasePlan, ProtocolConfig, RoundConfig};
+pub use config::{BasecasePlan, ProtocolConfig, ProtocolSpec, RoundConfig};
 pub use derive::LayoutError;
-pub use error::{ChainSource, ChainTarget, DeriveError, SecurityEvent, ZookSecurityError};
+pub use error::{DeriveError, SecurityEvent, ZookSecurityError};
 pub use masks::{JointMaskConfig, RoundMasks, WitnessMaskConfig};
-pub use security::{
-    zook_mask_binding_bits, SecurityCheck, ZookFinalOpeningSoundness, ZookRoundSoundness,
-};
+pub use security::{zook_mask_binding_bits, SecurityCheck, ZookFinalOpeningSoundness};
 pub use spec::{
     DecodingRegime, FoldingFactor, KneeWeight, Mode, ParseDecodingRegimeError, PowBudget,
     RateSchedule, SecuritySpec, TuningSpec, DEFAULT_POW_BUDGET_BITS,
