@@ -122,6 +122,10 @@ pub enum DeriveError {
     #[error("protocol dimensions overflow usize")]
     SizeOverflow,
 
+    /// Two witness commitments require an unpadded first-round source split into equal halves.
+    #[error("joint opening requires an unpadded first-round source that splits into equal halves")]
+    UnsupportedJointOpeningLayout,
+
     /// A mask cannot fit without increasing its polynomial's degree.
     #[error("mask requires {required} coefficients, polynomial has {available}")]
     MaskDoesNotFit { required: usize, available: usize },

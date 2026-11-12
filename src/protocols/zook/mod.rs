@@ -3,7 +3,6 @@
 mod binding;
 mod claims;
 pub mod commit;
-mod joint;
 pub mod prover;
 mod round;
 pub mod verifier;
@@ -11,7 +10,7 @@ pub mod verifier;
 use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};
 
-pub use crate::protocols::params::protocol_config::ProtocolConfig;
+pub use crate::protocols::params::{JointOpeningConfig, ProtocolConfig};
 use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, verify};
 
 /// Output of [`ProtocolConfig::verify`].
