@@ -48,11 +48,11 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let reduced = reduce_prover(self, ps, committed, linear_forms, evaluations);
+        let reduced = reduce_prover(self, ps, committed, linear_forms, evaluations, None);
         self.prove_final_opening(ps, reduced)
     }
 
-    fn prove_final_opening<H, R>(
+    pub(super) fn prove_final_opening<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
         mut state: ProverRoundState<Identity<M::Target>>,

@@ -51,11 +51,11 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let reduced = reduce_verifier(self, vs, commitment, linear_forms, evaluations)?;
+        let reduced = reduce_verifier(self, vs, commitment, linear_forms, evaluations, None)?;
         self.verify_final_opening(vs, reduced)
     }
 
-    fn verify_final_opening<H>(
+    pub(super) fn verify_final_opening<H>(
         &self,
         vs: &mut VerifierState<H>,
         state: VerifierRoundState<'_, M::Target>,
@@ -266,7 +266,8 @@ mod tests {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut vs = VerifierState::new_std(&ds, &proof);
                 let commitment = config.receive_commitment(&mut vs)?;
-                let mut state = reduce_verifier(&config, &mut vs, commitment, &forms, &values)?;
+                let mut state =
+                    reduce_verifier(&config, &mut vs, commitment, &forms, &values, None)?;
                 mutate(&mut state);
                 let claim = config.verify_final_opening(&mut vs, state)?;
                 claim.verify(&forms)?;

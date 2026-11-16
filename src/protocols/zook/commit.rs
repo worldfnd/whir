@@ -208,7 +208,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
 /// Section 5.4, “ZO0K”, “The required masks”: the initial mask and Frobenius-check
 /// blinder are sampled in the source field. All other masks use the target field.
 /// A basecase-only witness is lifted first, so all its masks use the target field.
-fn sample_masks<M, R>(
+pub(super) fn sample_masks<M, R>(
     config: &JointMaskConfig<M::Target>,
     has_rounds: bool,
     rng: &mut R,
