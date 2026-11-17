@@ -240,22 +240,23 @@ impl<M: Embedding> Config<M> {
         self.num_vectors
     }
 
-    /// Describe two separately authenticated vectors as one interleaved source.
-    pub(crate) fn joint_pair_source(&self) -> Option<Self> {
+    /// The source shape for each half of a jointly folded witness.
+    pub(crate) fn pair_half(&self) -> Option<Self> {
         if self.num_vectors != 1
             || !self.vector_size.is_power_of_two()
             || !self.interleaving_depth.is_power_of_two()
+            || self.interleaving_depth < 2
             || self.interleaving_depth > self.vector_size
             || self.matrix_commit.num_rows() != self.codeword_length
             || self.matrix_commit.num_cols != self.interleaving_depth
         {
             return None;
         }
-        let mut joint = self.clone();
-        joint.vector_size = self.vector_size.checked_mul(2)?;
-        joint.interleaving_depth = self.interleaving_depth.checked_mul(2)?;
-        joint.matrix_commit.num_cols = self.matrix_commit.num_cols.checked_mul(2)?;
-        Some(joint)
+        let mut half = self.clone();
+        half.vector_size /= 2;
+        half.interleaving_depth /= 2;
+        half.matrix_commit.num_cols /= 2;
+        Some(half)
     }
 
     pub const fn vector_size(&self) -> usize {

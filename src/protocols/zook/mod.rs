@@ -10,8 +10,9 @@ pub mod verifier;
 
 use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};
+pub use joint::{FirstCommitment, FirstWitness, JointCommitment, JointWitness};
 
-pub use crate::protocols::params::ProtocolConfig;
+pub use crate::protocols::params::{JointOpeningConfig, ProtocolConfig};
 use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, verify};
 
 /// Output of [`ProtocolConfig::verify`].

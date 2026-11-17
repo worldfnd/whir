@@ -13,7 +13,6 @@ use crate::{
         linear_form::LinearForm,
         multilinear_extend, univariate_evaluate,
     },
-    buffer::BufferOps,
     hash::Hash,
     protocols::{
         basecase::Opening,
@@ -52,15 +51,14 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let reduced = reduce_verifier(self, vs, commitment, None, None, linear_forms, evaluations)?;
-        self.verify_final_opening(vs, reduced, self.params().size)
+        let reduced = reduce_verifier(self, vs, commitment, linear_forms, evaluations, None)?;
+        self.verify_final_opening(vs, reduced)
     }
 
     pub(super) fn verify_final_opening<H>(
         &self,
         vs: &mut VerifierState<H>,
         state: VerifierRoundState<'_, M::Target>,
-        original_size: usize,
     ) -> VerificationResult<FinalClaim<M::Target>>
     where
         M::Target: Codec<[H::U]>,
@@ -81,15 +79,16 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                 linear_form_evaluation: sum / value,
             }
         } else {
-            assert!(state.masks.is_empty());
+            assert!(state.masks.is_none());
             basecase.verify(vs, &state.irs, state.sum)?
         };
-        Ok(state.kernel.finish(&opening, original_size))
+        Ok(state.kernel.finish(&opening, self.params().size))
     }
 
-    /// Authenticate the witness and each mask collection, then check every retained binding.
-    /// For each collection and binding form, check `L(m_i') = lambda*L(m_i) + L(U_i)`.
-    /// The resulting witness claim is `sum = lambda*c + d - sum_i B_i(m_i')`.
+    /// Check both encoding relations and all three deferred Phase 0 equations.
+    ///
+    /// §5.4, “The final opening protocol”: `L(M') = lambda*L(m) + L(M)`
+    /// for each binding form, then `sum = lambda*c + d - B(M')`.
     fn receive_final_claim<H>(
         &self,
         vs: &mut VerifierState<H>,
@@ -101,18 +100,16 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let layout = self.joint_masks().expect("final opening mask layout");
-        assert!(!state.masks.is_empty());
+        let (Some(layout), Some(masks)) = (self.joint_masks(), state.masks.as_ref()) else {
+            panic!("final opening requires the joint mask commitment");
+        };
         let commit = self.final_commit();
         let witness_blind_commit = commit.receive_commitment(vs)?;
         let blind_sum: M::Target = vs.prover_message()?;
-        let blind_binding: Vec<M::Target> = vs.prover_messages_vec(3 * state.masks.len())?;
+        let blind_binding: Vec<M::Target> = vs.prover_messages_vec(3)?;
         let lambda = vs.verifier_message::<M::Target>();
         let message = vs.prover_messages_vec(commit.vector_size())?;
-        let mut mask_messages = Vec::with_capacity(state.masks.len());
-        for _ in &state.masks {
-            mask_messages.push(vs.prover_messages_vec(layout.commit.vector_size())?);
-        }
+        let mask_message = vs.prover_messages_vec(layout.commit.vector_size())?;
         verify_combination(
             commit,
             vs,
@@ -120,42 +117,23 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             &message,
             &[M::Target::ONE, lambda],
         )?;
-        // Keep the two columns of every mask root in the same query event.
-        let roots: Vec<_> = state.masks.iter().map(|masks| &masks.joint).collect();
-        let evaluations = layout.commit.verify(vs, &roots)?;
-        for (collection, ((masks, mask_message), blind)) in state
-            .masks
-            .iter()
-            .zip(&mask_messages)
-            .zip(blind_binding.chunks_exact(3))
-            .enumerate()
+        verify_combination(
+            &layout.commit,
+            vs,
+            &[&masks.joint],
+            &mask_message,
+            &[lambda, M::Target::ONE],
+        )?;
+        for ((actual, &value), blind) in masks
+            .binding
+            .evaluate(layout, &mask_message)
+            .into_iter()
+            .zip(&masks.binding.values)
+            .zip(blind_binding)
         {
-            let values = evaluate_points(mask_message, &evaluations.points);
-            for (&actual, row) in values.iter().zip(
-                evaluations
-                    .matrix
-                    .to_slice()
-                    .chunks_exact(2 * state.masks.len()),
-            ) {
-                verify!(actual == lambda * row[2 * collection] + row[2 * collection + 1]);
-            }
-            for ((actual, &value), &blind) in masks
-                .binding
-                .evaluate(layout, mask_message)
-                .into_iter()
-                .zip(&masks.binding.values)
-                .zip(blind)
-            {
-                verify!(actual == blind + lambda * value);
-            }
+            verify!(actual == blind + lambda * value);
         }
-        let sum = blind_sum + lambda * state.sum
-            - state
-                .masks
-                .iter()
-                .zip(&mask_messages)
-                .map(|(masks, message)| masks.claims.evaluate(message))
-                .sum::<M::Target>();
+        let sum = blind_sum + lambda * state.sum - masks.claims.evaluate(&mask_message);
         Ok((message, sum))
     }
 }
@@ -213,8 +191,8 @@ mod tests {
         },
         buffer::{Buffer, BufferMath, BufferOps},
         protocols::{
-            params::{Mode, Params, RateSchedule},
-            zook::{commit::CommittedWitness, round::reduce_prover},
+            params::{DecodingRegime, Mode, Params, RateSchedule},
+            zook::commit::CommittedWitness,
         },
         transcript::{codecs::Empty, DomainSeparator, ProverState},
     };
@@ -256,7 +234,7 @@ mod tests {
             let config = ProtocolConfig::<Basefield<Field64_2>>::derive(Params {
                 bits: 80,
                 mode: Mode::ZeroKnowledge,
-                regime: crate::protocols::params::DecodingRegime::Johnson,
+                regime: DecodingRegime::Johnson,
                 pow: 0,
                 hash: crate::hash::BLAKE3,
                 size,
@@ -287,9 +265,9 @@ mod tests {
                 let mut vs = VerifierState::new_std(&ds, &proof);
                 let commitment = config.receive_commitment(&mut vs)?;
                 let mut state =
-                    reduce_verifier(&config, &mut vs, commitment, None, None, &forms, &values)?;
+                    reduce_verifier(&config, &mut vs, commitment, &forms, &values, None)?;
                 mutate(&mut state);
-                let claim = config.verify_final_opening(&mut vs, state, size)?;
+                let claim = config.verify_final_opening(&mut vs, state)?;
                 claim.verify(&forms)?;
                 assert_eq!(claim.evaluation_point, prover_claim.evaluation_point);
                 assert_eq!(claim.evaluation_point.len(), size.trailing_zeros() as usize);
@@ -325,7 +303,7 @@ mod tests {
         for index in 0..3 {
             check_final_opening(
                 |state| {
-                    state.masks.first_mut().unwrap().binding.values[index] += Field64_2::ONE;
+                    state.masks.as_mut().unwrap().binding.values[index] += Field64_2::ONE;
                 },
                 false,
             );
@@ -336,7 +314,7 @@ mod tests {
     fn final_opening_checks_accumulated_mask_claim_and_sum() {
         check_final_opening(
             |state| {
-                state.masks.first_mut().unwrap().claims.covector.vector[0] += Field64_2::ONE;
+                state.masks.as_mut().unwrap().claims.covector.vector[0] += Field64_2::ONE;
             },
             false,
         );
@@ -346,113 +324,12 @@ mod tests {
     #[test]
     fn final_opening_authenticates_both_original_commitments() {
         check_final_opening(
-            |state| state.irs = state.masks.first().unwrap().joint.clone(),
+            |state| state.irs = state.masks.as_ref().unwrap().joint.clone(),
             false,
         );
         check_final_opening(
-            |state| state.masks.first_mut().unwrap().joint = state.irs.clone(),
+            |state| state.masks.as_mut().unwrap().joint = state.irs.clone(),
             false,
         );
-    }
-
-    fn check_pair_final_opening(
-        mutate_witness: impl Fn(&mut [CommittedWitness<Basefield<Field64_2>>; 2]),
-        mutate: impl Fn(&mut VerifierRoundState<'_, Field64_2>),
-        accept: bool,
-    ) {
-        let size = 4096;
-        let config = ProtocolConfig::<Basefield<Field64_2>>::derive(Params {
-            bits: 80,
-            mode: Mode::ZeroKnowledge,
-            regime: crate::protocols::params::DecodingRegime::Johnson,
-            pow: 0,
-            hash: crate::hash::BLAKE3,
-            size,
-            rate: 2,
-            folds: [2, 2],
-            schedule: RateSchedule::Stepping,
-        })
-        .unwrap();
-        let source = config.pair_source().unwrap();
-        let first = config.pair_round(&source).unwrap();
-        let mut rng = StdRng::seed_from_u64(225);
-        let left = Buffer::random(&mut rng, size);
-        let right = Buffer::random(&mut rng, size);
-        let form = MultilinearExtension::new(random_vector(&mut rng, 13));
-        let forms: [&dyn LinearForm<Field64_2>; 1] = [&form];
-        let values = [form.evaluate(&Basefield::new(), left.concat(&right).to_slice())];
-        let ds = DomainSeparator::protocol(&config)
-            .session(&"pair-final-opening")
-            .instance(&Empty);
-        let mut ps = ProverState::new_std(&ds);
-        let mut handles = [config.commit(&mut ps, left), config.commit(&mut ps, right)];
-        mutate_witness(&mut handles);
-        let [left, right] = handles;
-        let state = reduce_prover(
-            &config,
-            &mut ps,
-            left,
-            Some(right),
-            Some(&first),
-            &forms,
-            &values,
-        );
-        let prover_claim = config.prove_final_opening(&mut ps, state, 2 * size);
-        let proof = ps.proof();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let mut vs = VerifierState::new_std(&ds, &proof);
-            let left = config.receive_commitment(&mut vs)?;
-            let right = config.receive_commitment(&mut vs)?;
-            let mut state = reduce_verifier(
-                &config,
-                &mut vs,
-                left,
-                Some(right),
-                Some(&first),
-                &forms,
-                &values,
-            )?;
-            mutate(&mut state);
-            let claim = config.verify_final_opening(&mut vs, state, 2 * size)?;
-            claim.verify(&forms)?;
-            assert_eq!(claim.evaluation_point, prover_claim.evaluation_point);
-            vs.check_eof()
-        }));
-        assert_eq!(matches!(result, Ok(Ok(()))), accept);
-    }
-
-    #[test]
-    fn pair_final_opening_checks_both_mask_roots_claims_and_all_six_bindings() {
-        check_pair_final_opening(|_| {}, |_| {}, true);
-        for collection in 0..2 {
-            for binding in 0..3 {
-                check_pair_final_opening(
-                    |_| {},
-                    |state| state.masks[collection].binding.values[binding] += Field64_2::ONE,
-                    false,
-                );
-            }
-            check_pair_final_opening(
-                |_| {},
-                |state| state.masks[collection].claims.covector.vector[0] += Field64_2::ONE,
-                false,
-            );
-            check_pair_final_opening(
-                |_| {},
-                |state| state.masks[collection].joint = state.masks[1 - collection].joint.clone(),
-                false,
-            );
-            check_pair_final_opening(
-                |handles| {
-                    let masks = handles[collection].joint_masks.as_mut().unwrap();
-                    let mut changed = masks.opening_blinder.to_slice().to_vec();
-                    changed[0] += Field64_2::ONE;
-                    masks.opening_blinder.wipe();
-                    masks.opening_blinder = Buffer::from(changed);
-                },
-                |_| {},
-                false,
-            );
-        }
     }
 }

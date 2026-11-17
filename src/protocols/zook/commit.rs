@@ -4,8 +4,6 @@ use std::iter::once;
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
-use blake3::Hasher;
-use serde_json::to_writer;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 use zeroize::Zeroizing;
@@ -28,7 +26,6 @@ use crate::{
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct CommittedWitness<M: Embedding> {
-    pub(super) config_binding: Hash,
     pub(crate) state: CommittedState<M>,
     pub(crate) joint_masks: Option<JointMaskWitness<M::Target>>,
     pub(super) mask_binding: Option<MaskBinding<M::Target>>,
@@ -72,20 +69,12 @@ pub(crate) enum CommittedState<M: Embedding> {
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct Commitment<F: Field> {
-    pub(super) config_binding: Hash,
     pub(crate) irs: IrsCommitment,
     pub(crate) joint_masks: Option<IrsCommitment>,
     pub(super) mask_binding: Option<MaskBinding<F>>,
 }
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    pub(super) fn commitment_config_binding(&self) -> Hash {
-        let mut digest = Hasher::new();
-        digest.update(b"zook-precommitted-config-v1");
-        to_writer(&mut digest, self).expect("protocol configuration serializes");
-        Hash(*digest.finalize().as_bytes())
-    }
-
     /// Commit all Zook masks, then the padded witness with overlaid prefixes.
     ///
     /// Section 5.3, “Overlaid masks instead of zk-encoding”: each source polynomial
@@ -163,7 +152,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                 )
             });
         CommittedWitness {
-            config_binding: self.commitment_config_binding(),
             state,
             joint_masks,
             mask_binding,
@@ -194,7 +182,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             .map(|_| receive_binding(self.mask_source_degree(), vs))
             .transpose()?;
         Ok(Commitment {
-            config_binding: self.commitment_config_binding(),
             irs,
             joint_masks,
             mask_binding,
@@ -215,7 +202,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
 /// Section 5.4, “ZO0K”, “The required masks”: the initial mask and Frobenius-check
 /// blinder are sampled in the source field. All other masks use the target field.
 /// A basecase-only witness is lifted first, so all its masks use the target field.
-fn sample_masks<M, R>(
+pub(super) fn sample_masks<M, R>(
     config: &JointMaskConfig<M::Target>,
     has_rounds: bool,
     rng: &mut R,

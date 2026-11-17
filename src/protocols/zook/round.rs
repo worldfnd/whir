@@ -1,6 +1,6 @@
 //! Joint-mask claim reduction through Zook folding rounds.
 
-use std::{any::Any, iter::once, ops::Range};
+use std::any::Any;
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
@@ -12,14 +12,13 @@ use crate::{
         eq_weights, geometric_accumulate_prefixes, geometric_sequence,
         linear_form::{LinearForm, MultilinearExtension, UnivariateEvaluation},
         scalar_mul_add,
-        sumcheck::fold,
     },
     buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{
         basecase::Opening,
         code_switch::{Claim, CovectorUpdateParams},
-        irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
+        irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
         params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
         sumcheck::SumcheckOpening,
         zook::{
@@ -55,7 +54,7 @@ pub(super) struct ProverRoundState<M: Embedding> {
     pub(super) irs_witness: IrsWitness<M::Source>,
     pub(super) covector: Buffer<M::Target>,
     pub(super) sum: M::Target,
-    pub(super) masks: Vec<ProverMasks<M::Target>>,
+    pub(super) masks: Option<ProverMasks<M::Target>>,
     pub(super) challenges: Vec<M::Target>,
     pub(super) claim_weights: Vec<M::Target>,
 }
@@ -64,7 +63,7 @@ pub(super) struct VerifierRoundState<'a, F: Field> {
     pub(super) irs: IrsCommitment,
     pub(super) kernel: Kernel<'a, F>,
     pub(super) sum: F,
-    pub(super) masks: Vec<VerifierMasks<F>>,
+    pub(super) masks: Option<VerifierMasks<F>>,
 }
 
 /// Keep the input forms and geometric query terms implicit on the verifier.
@@ -152,8 +151,6 @@ impl<F: Field> Kernel<'_, F> {
         }
     }
 
-    /// Keep multilinear and univariate forms implicit; batch custom forms in one
-    /// temporary full-size vector, fold it, then gather the required prefixes.
     fn initial_mask_coefficients(&self, mask: WitnessMaskConfig) -> Vec<F> {
         let message_length = self.size / mask.num_polynomials;
         let dimensions = self.size.trailing_zeros() as usize;
@@ -161,21 +158,10 @@ impl<F: Field> Kernel<'_, F> {
         point.resize(point.len() + dimensions, F::ZERO);
         let mut coefficients =
             vec![F::ZERO; mask.num_polynomials * mask.coefficients_per_polynomial];
-        let mut generic: Option<Vec<F>> = None;
         for (&form, &weight) in self.forms.iter().zip(&self.claim_weights) {
             let scalar = self.initial_scale * weight;
             if let Some(form) = (form as &dyn Any).downcast_ref::<MultilinearExtension<F>>() {
                 self.accumulate_multilinear_mask(form, mask, scalar, &mut coefficients);
-                continue;
-            }
-            if !(form as &dyn Any).is::<UnivariateEvaluation<F>>() {
-                if form.size() != 0 {
-                    // Custom forms can evaluate one point by scanning their whole
-                    // vector. Accumulate them once instead of once per prefix entry.
-                    let dense = generic
-                        .get_or_insert_with(|| vec![F::ZERO; self.size << self.challenges.len()]);
-                    form.accumulate(&mut dense[..form.size()], scalar);
-                }
                 continue;
             }
             for (polynomial, chunk) in coefficients
@@ -190,19 +176,6 @@ impl<F: Field> Kernel<'_, F> {
                         *coordinate = F::from(((index >> bit) & 1) as u64);
                     }
                     *value += scalar * evaluate_padded(form, &point);
-                }
-            }
-        }
-        if let Some(mut dense) = generic {
-            for &challenge in &self.challenges {
-                fold(&mut dense, challenge);
-            }
-            for (polynomial, chunk) in coefficients
-                .chunks_exact_mut(mask.coefficients_per_polynomial)
-                .enumerate()
-            {
-                for (coefficient, value) in chunk.iter_mut().enumerate() {
-                    *value += dense[polynomial * message_length + coefficient];
                 }
             }
         }
@@ -309,15 +282,14 @@ impl<F: Field> Kernel<'_, F> {
     }
 }
 
-/// Reduce one witness or a pair using the same sumcheck and code-switch rounds.
+/// Reduce the initial evaluation claims to a final masked witness and mask functional.
 pub(super) fn reduce_prover<M, H, R>(
     config: &ProtocolConfig<M>,
     ps: &mut ProverState<H, R>,
     committed: CommittedWitness<M>,
-    second: Option<CommittedWitness<M>>,
-    first: Option<&RoundConfig<M>>,
     forms: &[&dyn LinearForm<M::Target>],
     evaluations: &[M::Target],
+    second: Option<(&Config<M>, IrsWitness<M::Source>)>,
 ) -> ProverRoundState<Identity<M::Target>>
 where
     M: Embedding + Default,
@@ -336,106 +308,17 @@ where
         "linear_forms.len() != evaluations.len()"
     );
     assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
-    let count = 1 + usize::from(second.is_some());
-    let size = config.padded_vector_size() * count;
     let claim_weights = geometric_sequence(M::Target::ONE, ps.verifier_message(), forms.len());
-    let mut covector = vec![M::Target::ZERO; size];
+    let mut covector = vec![M::Target::ZERO; config.padded_vector_size()];
     for (form, &weight) in forms.iter().zip(&claim_weights) {
-        assert!(form.size() <= config.params().size * count);
+        assert!(form.size() <= config.params().size);
         form.accumulate(&mut covector[..form.size()], weight);
     }
     let sum = evaluations
         .iter()
         .zip(&claim_weights)
-        .map(|(&v, &w)| v * w)
+        .map(|(&value, &weight)| value * weight)
         .sum();
-    let mut masks = Vec::new();
-    let mut states = Vec::with_capacity(count);
-    for (i, committed) in once(committed).chain(second).enumerate() {
-        let (state, mask) = initial_prover_state(
-            config,
-            committed,
-            &covector[i * config.padded_vector_size()..(i + 1) * config.padded_vector_size()],
-        );
-        states.push(state);
-        masks.extend(mask);
-    }
-    let second = (count == 2).then(|| states.pop().expect("second source"));
-    let second = second.map(|state| match state {
-        CommittedState::Round {
-            message,
-            irs_witness,
-        } => (message, irs_witness),
-        CommittedState::Basecase { .. } => panic!("pair requires a first round"),
-    });
-    let (second_message, second_witness) = second.unzip();
-    let covector = Buffer::from(covector);
-    let mut state = match (states.pop().expect("first source"), config.first_round()) {
-        (
-            CommittedState::Basecase {
-                message,
-                irs_witness,
-            },
-            None,
-        ) => ProverRoundState {
-            message,
-            irs_witness,
-            covector,
-            sum,
-            masks,
-            challenges: Vec::new(),
-            claim_weights,
-        },
-        (
-            CommittedState::Round {
-                message,
-                irs_witness,
-            },
-            Some(original),
-        ) => {
-            let message = match second_message {
-                Some(right) => message.concat(&right),
-                None => message,
-            };
-            prove_round(
-                first.unwrap_or(&original),
-                original.code_switch.source(),
-                second_witness,
-                ProverRoundState::<M> {
-                    message,
-                    irs_witness,
-                    covector,
-                    sum,
-                    masks,
-                    challenges: Vec::new(),
-                    claim_weights,
-                },
-                config.joint_masks().zip(config.witness_mask(1)),
-                ps,
-            )
-        }
-        _ => panic!("committed witness does not match the round configuration"),
-    };
-    for round in config.tail_rounds() {
-        state = prove_round(
-            &round,
-            round.code_switch.source(),
-            None,
-            state,
-            config
-                .joint_masks()
-                .zip(config.witness_mask(round.index + 1)),
-            ps,
-        );
-    }
-    state
-}
-
-fn initial_prover_state<M: Embedding>(
-    config: &ProtocolConfig<M>,
-    committed: CommittedWitness<M>,
-    covector: &[M::Target],
-) -> (CommittedState<M>, Option<ProverMasks<M::Target>>) {
     let masks = match (
         config.joint_masks(),
         config.witness_mask(0),
@@ -459,7 +342,58 @@ fn initial_prover_state<M: Embedding>(
         (None, None, None, None) => None,
         _ => panic!("joint mask commitment does not match the configuration"),
     };
-    (committed.state, masks)
+    let covector = Buffer::from(covector);
+    let mut state = match (committed.state, config.first_round()) {
+        (
+            CommittedState::Basecase {
+                message,
+                irs_witness,
+            },
+            None,
+        ) => ProverRoundState {
+            message,
+            irs_witness,
+            covector,
+            sum,
+            masks,
+            challenges: Vec::new(),
+            claim_weights,
+        },
+        (
+            CommittedState::Round {
+                message,
+                irs_witness,
+            },
+            Some(first),
+        ) => prove_round(
+            &first,
+            second,
+            ProverRoundState::<M> {
+                message,
+                irs_witness,
+                covector,
+                sum,
+                masks,
+                challenges: Vec::new(),
+                claim_weights,
+            },
+            config.joint_masks().zip(config.witness_mask(1)),
+            ps,
+        ),
+        _ => panic!("committed witness does not match the round configuration"),
+    };
+    for round in config.tail_rounds() {
+        state = prove_round(
+            &round,
+            None,
+            state,
+            config
+                .joint_masks()
+                .zip(config.witness_mask(round.index + 1)),
+            ps,
+        );
+    }
+    state
 }
 
 /// Replay the rounds without materializing a witness-sized verifier kernel.
@@ -467,10 +401,9 @@ pub(super) fn reduce_verifier<'a, M, H>(
     config: &ProtocolConfig<M>,
     vs: &mut VerifierState<H>,
     commitment: Commitment<M::Target>,
-    second: Option<Commitment<M::Target>>,
-    first: Option<&RoundConfig<M>>,
     forms: &'a [&'a dyn LinearForm<M::Target>],
     evaluations: &[M::Target],
+    second: Option<(&Config<M>, &IrsCommitment)>,
 ) -> VerificationResult<VerifierRoundState<'a, M::Target>>
 where
     M: Embedding + Default,
@@ -488,75 +421,59 @@ where
         "linear_forms.len() != evaluations.len()"
     );
     assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
-    let count = 1 + usize::from(second.is_some());
-    assert!(forms
-        .iter()
-        .all(|f| f.size() <= config.params().size * count));
+    assert!(forms.iter().all(|form| form.size() <= config.params().size));
     let claim_weights = geometric_sequence(M::Target::ONE, vs.verifier_message(), forms.len());
     let sum = evaluations
         .iter()
         .zip(&claim_weights)
-        .map(|(&v, &w)| v * w)
+        .map(|(&value, &weight)| value * weight)
         .sum();
     let mut kernel = Kernel {
         forms,
         claim_weights,
         challenges: Vec::new(),
         initial_scale: M::Target::ONE,
-        size: config.padded_vector_size() * count,
+        size: config.padded_vector_size(),
         terms: Vec::new(),
     };
-    let coefficients = config.witness_mask(0).map(|mut mask| {
-        mask.num_polynomials *= count;
-        kernel.mask_coefficients(mask)
-    });
-    let mut masks = Vec::new();
-    let mut roots = Vec::with_capacity(count);
-    for (i, commitment) in once(commitment).chain(second).enumerate() {
-        match (
-            config.joint_masks(),
-            config.witness_mask(0),
-            commitment.joint_masks,
-            commitment.mask_binding,
-        ) {
-            (Some(layout), Some(mask), Some(joint), Some(binding)) => {
-                let mut claims = MaskClaims::new(layout.commit.vector_size());
-                let coefficients = coefficients.as_ref().expect("masked kernel coefficients");
-                let message_length = config.padded_vector_size() / mask.num_polynomials;
-                let offset = i * mask.num_polynomials * mask.coefficients_per_polynomial;
-                claims.subtract_witness_mask(
-                    layout.witness_masks[0].clone(),
-                    mask,
-                    message_length,
-                    |index| {
-                        coefficients[offset
-                            + index / message_length * mask.coefficients_per_polynomial
-                            + index % message_length]
-                    },
-                );
-                masks.push(VerifierMasks {
-                    joint,
-                    binding,
-                    claims,
-                });
-            }
-            (None, None, None, None) => {}
-            _ => panic!("joint mask commitment does not match the configuration"),
+    let masks = match (
+        config.joint_masks(),
+        config.witness_mask(0),
+        commitment.joint_masks,
+        commitment.mask_binding,
+    ) {
+        (Some(layout), Some(mask), Some(joint), Some(binding)) => {
+            let mut claims = MaskClaims::new(layout.commit.vector_size());
+            let coefficients = kernel.mask_coefficients(mask);
+            let message_length = config.padded_vector_size() / mask.num_polynomials;
+            claims.subtract_witness_mask(
+                layout.witness_masks[0].clone(),
+                mask,
+                message_length,
+                |index| {
+                    coefficients[index / message_length * mask.coefficients_per_polynomial
+                        + index % message_length]
+                },
+            );
+            Some(VerifierMasks {
+                joint,
+                binding,
+                claims,
+            })
         }
-        roots.push(commitment.irs);
-    }
-    let second = if count == 2 { roots.pop() } else { None };
+        (None, None, None, None) => None,
+        _ => panic!("joint mask commitment does not match the configuration"),
+    };
     let mut state = VerifierRoundState {
-        irs: roots.pop().expect("first source"),
+        irs: commitment.irs,
         kernel,
         sum,
         masks,
     };
-    if let Some(original) = config.first_round() {
+    if let Some(first) = config.first_round() {
         verify_round(
-            first.unwrap_or(&original),
-            original.code_switch.source(),
-            second.as_ref(),
+            &first,
+            second,
             &mut state,
             config.joint_masks().zip(config.witness_mask(1)),
             vs,
@@ -565,7 +482,6 @@ where
     for round in config.tail_rounds() {
         verify_round(
             &round,
-            round.code_switch.source(),
             None,
             &mut state,
             config
@@ -577,11 +493,10 @@ where
     Ok(state)
 }
 
-/// Carry every mask correction, fold the witness, then authenticate the next commitment.
+/// Section 5.4, “ZO0K”, Steps 1–4: carry masks, fold, overlay, then aggregate.
 fn prove_round<M, H, R>(
     round: &RoundConfig<M>,
-    committed_source: &IrsConfig<M>,
-    second: Option<IrsWitness<M::Source>>,
+    second: Option<(&Config<M>, IrsWitness<M::Source>)>,
     mut state: ProverRoundState<M>,
     mask_plan: Option<(&JointMaskConfig<M::Target>, WitnessMaskConfig)>,
     ps: &mut ProverState<H, R>,
@@ -597,31 +512,18 @@ where
     U64: Codec<[H::U]>,
     Hash: ProverMessage<[H::U]>,
 {
-    assert_eq!(!state.masks.is_empty(), mask_plan.is_some());
+    assert_eq!(state.masks.is_some(), mask_plan.is_some());
     let index = round.index;
     let remaining_size = round.sumcheck.final_size();
-    let carried = state
-        .masks
-        .iter()
-        .map(|masks| masks.claims.evaluate(masks.joint.coefficients.to_slice()))
-        .sum();
-    let blinding = if let Some((layout, _)) = mask_plan {
-        let range = layout.sumcheck_masks[index].clone();
-        let left = &state.masks[0].joint.coefficients.to_slice()[range.clone()];
-        if second.is_some() {
-            let right = &state.masks[1].joint.coefficients.to_slice()[range];
-            let coefficients = Zeroizing::new(
-                once(left[0])
-                    .chain(right[1..3].iter().copied())
-                    .chain(left[1..].iter().copied())
-                    .collect::<Vec<_>>(),
-            );
-            sumcheck_blinding(&coefficients, remaining_size)
-        } else {
-            sumcheck_blinding(left, remaining_size)
-        }
-    } else {
-        Zeroizing::new(Vec::new())
+    let carried = state.masks.as_ref().map_or(M::Target::ZERO, |masks| {
+        masks.claims.evaluate(masks.joint.coefficients.to_slice())
+    });
+    let blinding = match state.masks.as_ref().zip(mask_plan) {
+        Some((masks, (layout, _))) => sumcheck_blinding(
+            &masks.joint.coefficients.to_slice()[layout.sumcheck_masks[index].clone()],
+            remaining_size,
+        ),
+        None => Zeroizing::new(Vec::new()),
     };
     // The generic prover accepts the dot and carried terms separately.
     state.sum -= carried;
@@ -639,27 +541,26 @@ where
     state
         .challenges
         .extend_from_slice(&opening.round_challenges);
-    if let Some((layout, next_mask)) = mask_plan {
-        fold_mask_claims(
-            state.masks.iter_mut().map(|m| &mut m.claims),
+    if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {
+        masks.claims.fold_sumcheck(
             layout.sumcheck_masks[index].clone(),
             remaining_size,
             &opening,
-            second
-                .as_ref()
-                .map_or(FoldKind::Regular, |_| FoldKind::PairSelector),
         );
         message = overlay_mask(
             message,
-            &state.masks[0].joint.coefficients.to_slice()[layout.witness_masks[index + 1].clone()],
+            &masks.joint.coefficients.to_slice()[layout.witness_masks[index + 1].clone()],
             next_mask,
         );
     }
-    let witnesses = once(state.irs_witness).chain(second).collect();
+    let (source, witnesses) = match second {
+        Some((source, right)) => (source, vec![state.irs_witness, right]),
+        None => (round.code_switch.source(), vec![state.irs_witness]),
+    };
     let switched = round.code_switch.prove(
         ps,
         message,
-        committed_source,
+        source,
         witnesses,
         Claim {
             covector: &mut state.covector,
@@ -668,11 +569,8 @@ where
         &opening.round_challenges,
         &[],
     );
-    if let Some((layout, next_mask)) = mask_plan {
-        for masks in &mut state.masks[1..] {
-            masks.claims.scale(switched.update.original_sl_coeff);
-        }
-        state.masks[0].claims.subtract_target_mask(
+    if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {
+        masks.claims.subtract_target_mask(
             layout.witness_masks[index + 1].clone(),
             next_mask,
             round.code_switch.target().message_length(),
@@ -683,11 +581,9 @@ where
     debug_assert_eq!(
         state.sum,
         switched.message.dot(&state.covector)
-            + state
-                .masks
-                .iter()
-                .map(|masks| masks.claims.evaluate(masks.joint.coefficients.to_slice()))
-                .sum::<M::Target>()
+            + state.masks.as_ref().map_or(M::Target::ZERO, |masks| masks
+                .claims
+                .evaluate(masks.joint.coefficients.to_slice()))
     );
     ProverRoundState {
         message: switched.message,
@@ -702,8 +598,7 @@ where
 
 fn verify_round<M, H>(
     round: &RoundConfig<M>,
-    committed_source: &IrsConfig<M>,
-    second: Option<&IrsCommitment>,
+    second: Option<(&Config<M>, &IrsCommitment)>,
     state: &mut VerifierRoundState<M::Target>,
     mask_plan: Option<(&JointMaskConfig<M::Target>, WitnessMaskConfig)>,
     vs: &mut VerifierState<H>,
@@ -718,37 +613,33 @@ where
     U64: Codec<[H::U]>,
     Hash: ProverMessage<[H::U]>,
 {
-    assert_eq!(!state.masks.is_empty(), mask_plan.is_some());
+    assert_eq!(state.masks.is_some(), mask_plan.is_some());
     let index = round.index;
     let opening = round.sumcheck.verify(vs, &mut state.sum)?;
     state.kernel.fold(&opening);
-    if let Some((layout, _)) = mask_plan {
-        fold_mask_claims(
-            state.masks.iter_mut().map(|m| &mut m.claims),
+    if let Some((masks, (layout, _))) = state.masks.as_mut().zip(mask_plan) {
+        masks.claims.fold_sumcheck(
             layout.sumcheck_masks[index].clone(),
             state.kernel.size,
             &opening,
-            second
-                .as_ref()
-                .map_or(FoldKind::Regular, |_| FoldKind::PairSelector),
         );
     }
-    let commitments: Vec<_> = once(&state.irs).chain(second).collect();
+    let (source, roots) = match second {
+        Some((source, right)) => (source, vec![&state.irs, right]),
+        None => (round.code_switch.source(), vec![&state.irs]),
+    };
     let (irs, update) = round.code_switch.verify_for_implicit(
         vs,
         &mut state.sum,
         &opening.round_challenges,
-        committed_source,
-        &commitments,
+        source,
+        &roots,
     )?;
     state.kernel.aggregate(&update);
-    if let Some((layout, next_mask)) = mask_plan {
-        for masks in &mut state.masks[1..] {
-            masks.claims.scale(update.original_sl_coeff);
-        }
+    if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {
         let coefficients = state.kernel.mask_coefficients(next_mask);
         let message_length = round.code_switch.target().message_length();
-        state.masks[0].claims.subtract_target_mask(
+        masks.claims.subtract_target_mask(
             layout.witness_masks[index + 1].clone(),
             next_mask,
             message_length,
@@ -763,42 +654,8 @@ where
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum FoldKind {
-    Regular,
-    PairSelector,
-}
-
-/// Distribute the enlarged sparse mask across its original committed collections.
-fn fold_mask_claims<'a, F: Field>(
-    claims: impl Iterator<Item = &'a mut MaskClaims<F>>,
-    range: Range<usize>,
-    remaining_size: usize,
-    opening: &SumcheckOpening<F>,
-    kind: FoldKind,
-) {
-    for (collection, claims) in claims.enumerate() {
-        if matches!(kind, FoldKind::Regular) && collection == 0 {
-            claims.fold_sumcheck(range.clone(), remaining_size, opening);
-            continue;
-        }
-        let indices = (0..=2 * opening.round_challenges.len()).map(|coefficient| {
-            match (kind, collection, coefficient) {
-                (FoldKind::Regular, 0, j) => Some(range.start + j),
-                (FoldKind::PairSelector, 0, 0) => Some(range.start),
-                (FoldKind::PairSelector, 0, j) if j >= 3 => Some(range.start + j - 2),
-                (FoldKind::PairSelector, 1, 1 | 2) => Some(range.start + coefficient),
-                _ => None,
-            }
-        });
-        claims.fold_sumcheck_indices(indices, remaining_size, opening);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use ark_std::rand::{rngs::StdRng, SeedableRng};
 
     use super::*;
@@ -809,107 +666,9 @@ mod tests {
             linear_form::{Covector, Evaluate},
             random_vector, univariate_evaluate,
         },
-        protocols::params::{Mode, Params, RateSchedule},
+        protocols::params::{DecodingRegime, Mode, Params, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator},
     };
-
-    #[test]
-    fn custom_forms_are_accumulated_once_for_all_mask_prefixes() {
-        struct CustomForm {
-            form: Covector<Field64_2>,
-            accumulations: AtomicUsize,
-            evaluations: AtomicUsize,
-        }
-        impl LinearForm<Field64_2> for CustomForm {
-            fn size(&self) -> usize {
-                self.form.size()
-            }
-            fn mle_evaluate(&self, point: &[Field64_2]) -> Field64_2 {
-                self.evaluations.fetch_add(1, Ordering::Relaxed);
-                self.form.mle_evaluate(point)
-            }
-            fn accumulate(&self, accumulator: &mut [Field64_2], scalar: Field64_2) {
-                self.accumulations.fetch_add(1, Ordering::Relaxed);
-                self.form.accumulate(accumulator, scalar);
-            }
-        }
-        let mut rng = StdRng::seed_from_u64(315);
-        let form = CustomForm {
-            form: Covector::new(random_vector(&mut rng, 1024)),
-            accumulations: AtomicUsize::new(0),
-            evaluations: AtomicUsize::new(0),
-        };
-        let forms: [&dyn LinearForm<Field64_2>; 1] = [&form];
-        let challenges = vec![Field64_2::from(3), Field64_2::from(5)];
-        let mut kernel = Kernel {
-            forms: &forms,
-            claim_weights: vec![Field64_2::from(7)],
-            challenges: challenges.clone(),
-            initial_scale: Field64_2::from(11),
-            size: 256,
-            terms: Vec::new(),
-        };
-        let actual = kernel.mask_coefficients(WitnessMaskConfig {
-            num_polynomials: 4,
-            coefficients_per_polynomial: 8,
-        });
-        let mut expected = form.form.vector.clone();
-        for challenge in challenges {
-            fold(&mut expected, challenge);
-        }
-        let expected: Vec<_> = expected
-            .chunks_exact(64)
-            .flat_map(|chunk| chunk[..8].iter().map(|&v| v * Field64_2::from(77)))
-            .collect();
-        assert_eq!(actual, expected);
-        assert_eq!(form.accumulations.load(Ordering::Relaxed), 1);
-        assert_eq!(form.evaluations.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn split_sparse_mask_claim_matches_the_enlarged_polynomial() {
-        type F = Field64_2;
-        let mut rng = StdRng::seed_from_u64(317);
-        for rounds in 2..=4 {
-            let length = 2 * rounds - 1;
-            let left = random_vector::<F>(&mut rng, length);
-            let right = random_vector::<F>(&mut rng, length);
-            for selector in [F::ZERO, F::ONE, F::from(9)] {
-                for lambda in [F::ZERO, F::ONE, F::from(13)] {
-                    let mut challenges = random_vector::<F>(&mut rng, rounds);
-                    challenges[0] = selector;
-                    let opening = SumcheckOpening {
-                        round_challenges: challenges.clone(),
-                        mask_rlc: lambda,
-                    };
-                    let mut claims = [MaskClaims::new(length), MaskClaims::new(length)];
-                    for claim in &mut claims {
-                        claim.covector.vector.fill(F::from(7));
-                    }
-                    let previous = claims[0].evaluate(&left) + claims[1].evaluate(&right);
-                    fold_mask_claims(
-                        claims.iter_mut(),
-                        0..length,
-                        4,
-                        &opening,
-                        FoldKind::PairSelector,
-                    );
-                    let h = left[0]
-                        + right[1] * selector
-                        + right[2] * selector.square()
-                        + left[1..]
-                            .chunks_exact(2)
-                            .zip(&challenges[1..])
-                            .map(|(pair, &x)| pair[0] * x + pair[1] * x.square())
-                            .sum::<F>();
-                    assert_eq!(
-                        claims[0].evaluate(&left) + claims[1].evaluate(&right),
-                        lambda * previous / F::from(1_u64 << rounds) + F::from(4) * h,
-                    );
-                }
-            }
-        }
-    }
 
     #[test]
     fn mask_prefixes_match_individual_kernel_coefficients() {
@@ -1012,7 +771,7 @@ mod tests {
         let config = ProtocolConfig::<M>::derive(Params {
             bits: 80,
             mode,
-            regime: crate::protocols::params::DecodingRegime::Johnson,
+            regime: DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
             size,
@@ -1045,10 +804,13 @@ mod tests {
             CommittedState::Round { message, .. } => message.mixed_lift(&M::default()),
             CommittedState::Basecase { message, .. } => message.clone(),
         };
-        let state = reduce_prover(&config, &mut ps, committed, None, None, &forms, &values);
+        let state = reduce_prover(&config, &mut ps, committed, &forms, &values, None);
         assert_overlays(&config, initial, &state);
-        let _ = config.final_commit().open(&mut ps, &[&state.irs_witness]);
-        if let Some((layout, masks)) = config.joint_masks().zip(state.masks.first()) {
+        let _ = config
+            .basecase()
+            .commit()
+            .open(&mut ps, &[&state.irs_witness]);
+        if let Some((layout, masks)) = config.joint_masks().zip(state.masks.as_ref()) {
             let _ = layout.commit.open(&mut ps, &[&masks.joint.irs_witness]);
         }
         let challenge: Field64_2 = ps.verifier_message();
@@ -1056,7 +818,7 @@ mod tests {
         let mut vs = VerifierState::new_std(&ds, &proof);
         let commitment = config.receive_commitment(&mut vs).unwrap();
         let received =
-            reduce_verifier(&config, &mut vs, commitment, None, None, &forms, &values).unwrap();
+            reduce_verifier(&config, &mut vs, commitment, &forms, &values, None).unwrap();
         assert_eq!(state.sum, received.sum);
         assert_eq!(state.challenges, received.kernel.challenges);
         assert_eq!(state.claim_weights, received.kernel.claim_weights);
@@ -1065,10 +827,11 @@ mod tests {
             .collect();
         assert_eq!(state.covector.to_slice(), kernel);
         let final_values = config
-            .final_commit()
+            .basecase()
+            .commit()
             .verify(&mut vs, &[&received.irs])
             .unwrap();
-        let block_size = config.final_commit().message_length();
+        let block_size = config.basecase().commit().message_length();
         for (row, &point) in final_values
             .matrix
             .to_slice()
@@ -1103,7 +866,7 @@ mod tests {
                 expected.fold(challenge);
             }
             offset += count;
-            if let Some((layout, masks)) = config.joint_masks().zip(state.masks.first()) {
+            if let Some((layout, masks)) = config.joint_masks().zip(state.masks.as_ref()) {
                 expected = overlay_mask(
                     expected,
                     &masks.joint.coefficients.to_slice()[layout.witness_masks[index + 1].clone()],
@@ -1120,11 +883,7 @@ mod tests {
         received: &VerifierRoundState<Field64_2>,
         vs: &mut VerifierState,
     ) {
-        match (
-            state.masks.first(),
-            received.masks.first(),
-            config.joint_masks(),
-        ) {
+        match (&state.masks, &received.masks, config.joint_masks()) {
             (Some(masks), Some(checked), Some(layout)) => {
                 assert_eq!(masks.claims, checked.claims);
                 assert_eq!(masks.binding, checked.binding);

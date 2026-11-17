@@ -13,7 +13,7 @@ use whir::{
         random_vector,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    protocols::params::{Mode, Params, ProtocolConfig, RateSchedule},
+    protocols::params::{JointOpeningConfig, Mode, Params, ProtocolConfig, RateSchedule},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -24,7 +24,7 @@ where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
 {
     let size = 1 << log_size;
-    let config = ProtocolConfig::<M>::derive(Params {
+    let params = Params {
         bits: 128,
         mode: Mode::ZeroKnowledge,
         regime: whir::protocols::params::DecodingRegime::Johnson,
@@ -34,9 +34,9 @@ where
         rate: 2,
         folds: [4, 4],
         schedule: RateSchedule::Capped(4),
-    })
-    .unwrap();
-    config.validate_pair().unwrap();
+    };
+    let separate = ProtocolConfig::<M>::derive(params).unwrap();
+    let joint = JointOpeningConfig::<M>::derive(params).unwrap();
     let mut rng = StdRng::seed_from_u64(731);
     let witnesses = [
         Buffer::random(&mut rng, size),
@@ -54,46 +54,58 @@ where
         .each_ref()
         .map(|w| single_form.evaluate(&M::default(), w.to_slice()));
     let mut timings = [Vec::new(), Vec::new()];
-    let ds = DomainSeparator::protocol(&config).instance(&Empty);
+    let domains = [
+        DomainSeparator::protocol(&joint).instance(&Empty),
+        DomainSeparator::protocol(&separate).instance(&Empty),
+    ];
     for run in 0..=runs {
         // Alternate order and exclude one warmup for each path.
         for method in if run % 2 == 0 { [0, 1] } else { [1, 0] } {
-            let mut ps = ProverState::new_std(&ds);
+            let ds = &domains[method];
+            let mut ps = ProverState::new_std(ds);
             ps.prover_messages(&point);
             let started = Instant::now();
-            let handles = witnesses
-                .each_ref()
-                .map(|w| config.commit(&mut ps, w.clone()));
             if method == 0 {
-                config
-                    .prove_pair(&mut ps, handles, &pair_refs, &values)
+                joint
+                    .commit_first(&mut ps, witnesses[0].clone())
+                    .unwrap()
+                    .commit_second(&mut ps, witnesses[1].clone())
+                    .unwrap()
+                    .prove(&mut ps, &pair_refs, &values)
                     .unwrap();
             } else {
+                let handles = witnesses
+                    .each_ref()
+                    .map(|w| separate.commit(&mut ps, w.clone()));
                 for (handle, &value) in handles.into_iter().zip(&values) {
-                    config.prove(&mut ps, handle, &[&single_form], &[value]);
+                    separate.prove(&mut ps, handle, &[&single_form], &[value]);
                 }
             }
             let prove_ms = started.elapsed().as_secs_f64() * 1000.0;
             let proof = ps.proof();
-            let mut vs = VerifierState::new_std(&ds, &proof);
+            let mut vs = VerifierState::new_std(ds, &proof);
             assert_eq!(
                 vs.prover_messages_vec::<M::Target>(point.len()).unwrap(),
                 point
             );
             let started = Instant::now();
-            let handles = [
-                config.receive_commitment(&mut vs).unwrap(),
-                config.receive_commitment(&mut vs).unwrap(),
-            ];
             if method == 0 {
-                config
-                    .verify_pair(&mut vs, handles, &pair_refs, &values)
+                joint
+                    .receive_first(&mut vs)
+                    .unwrap()
+                    .receive_second(&mut vs)
+                    .unwrap()
+                    .verify(&mut vs, &pair_refs, &values)
                     .unwrap()
                     .verify(&pair_refs)
                     .unwrap();
             } else {
+                let handles = [
+                    separate.receive_commitment(&mut vs).unwrap(),
+                    separate.receive_commitment(&mut vs).unwrap(),
+                ];
                 for (handle, &value) in handles.into_iter().zip(&values) {
-                    config
+                    separate
                         .verify(&mut vs, handle, &[&single_form], &[value])
                         .unwrap()
                         .verify(&[&single_form])
@@ -111,10 +123,13 @@ where
             }
         }
     }
-    for (method, samples) in timings.into_iter().enumerate() {
+    print_timings(name, log_size, &timings);
+}
+
+fn print_timings(name: &str, log_size: u32, timings: &[Vec<(f64, f64, usize)>; 2]) {
+    for (method, samples) in ["pair", "separate"].into_iter().zip(timings) {
         println!(
-            "{name},2^{log_size},{},{:.3},{:.3},{:.1}",
-            if method == 0 { "pair" } else { "separate" },
+            "{name},2^{log_size},{method},{:.3},{:.3},{:.1}",
             median(samples.iter().map(|x| x.0).collect()),
             median(samples.iter().map(|x| x.1).collect()),
             median(samples.iter().map(|x| x.2 as f64).collect()) / 1024.0,

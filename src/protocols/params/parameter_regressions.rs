@@ -119,25 +119,6 @@ fn check<M: Embedding + Default>(
         config.final_commit(),
         config.basecase().commit()
     ));
-    if expected["name"].as_str().unwrap().ends_with("pair") {
-        config.validate_pair().unwrap();
-        let first = config.first_round().unwrap();
-        let node = config.pair_source().unwrap();
-        let paired = config.pair_round(&node).unwrap();
-        assert_eq!(
-            paired.sumcheck.num_rounds(),
-            first.sumcheck.num_rounds() + 1
-        );
-        assert_eq!(
-            paired.sumcheck.initial_size(),
-            2 * first.sumcheck.initial_size()
-        );
-        assert_eq!(paired.sumcheck.final_size(), first.sumcheck.final_size());
-        assert!(std::ptr::eq(
-            paired.code_switch.target(),
-            first.code_switch.target()
-        ));
-    }
     let name = expected["name"].as_str().unwrap();
     let projection = serde_json::to_vec(&parameters(config)).unwrap();
     assert_eq!(
@@ -201,8 +182,40 @@ where
     if !proof_case {
         return;
     }
+    let joint = pair.then(|| {
+        let joint = JointOpeningConfig::<M>::derive(*config.params()).unwrap();
+        let first = config.first_round().unwrap();
+        let combined = joint.combined().first_round().unwrap();
+        assert_eq!(
+            joint.witness_commitment().vector_size(),
+            config.params().size
+        );
+        assert_eq!(
+            combined.sumcheck.num_rounds(),
+            first.sumcheck.num_rounds() + 1
+        );
+        assert_eq!(
+            combined.sumcheck.initial_size(),
+            2 * first.sumcheck.initial_size()
+        );
+        assert_eq!(combined.sumcheck.final_size(), first.sumcheck.final_size());
+        joint
+    });
+    prove_and_verify(name, &config, &from_json, joint.as_ref());
+}
+
+fn prove_and_verify<M>(
+    name: &str,
+    config: &ProtocolConfig<M>,
+    from_json: &ProtocolConfig<M>,
+    joint: Option<&JointOpeningConfig<M>>,
+) where
+    M: Embedding + Default,
+    M::Target: Default + Zeroize + Codec,
+    Standard: Distribution<M::Source> + Distribution<M::Target>,
+{
     let n = config.params().size;
-    let count = if pair { 2 } else { 1 };
+    let count = if joint.is_some() { 2 } else { 1 };
     let mut rng = StdRng::seed_from_u64(0x7768_6972_2830_0001);
     let witness: Vec<M::Source> = random_vector(&mut rng, n * count);
     // Full-field coefficients exercise the genuine extension-field path.
@@ -215,7 +228,11 @@ where
         .collect();
     let refs: Vec<&dyn LinearForm<M::Target>> = forms.iter().map(|form| form as _).collect();
     let instance = U64(0x7768_6972_2830_0001);
-    let ds = DomainSeparator::protocol(&config)
+    let ds = joint
+        .map_or_else(
+            || DomainSeparator::protocol(config),
+            DomainSeparator::protocol,
+        )
         .session(&name)
         .instance(&instance);
     let mut prover = ProverState::new_std_seeded(&ds, 0x7061_7261_6d73_2830);
@@ -224,13 +241,17 @@ where
         prover.prover_messages(&form.vector);
     }
     prover.prover_messages(&values);
-    let left = config.commit(&mut prover, Buffer::from(&witness[..n]));
-    let claim = if pair {
-        let right = config.commit(&mut prover, Buffer::from(&witness[n..]));
-        config
-            .prove_pair(&mut prover, [left, right], &refs, &values)
+    let left = Buffer::from(&witness[..n]);
+    let claim = if let Some(joint) = joint {
+        joint
+            .commit_first(&mut prover, left)
+            .unwrap()
+            .commit_second(&mut prover, Buffer::from(&witness[n..]))
+            .unwrap()
+            .prove(&mut prover, &refs, &values)
             .unwrap()
     } else {
+        let left = config.commit(&mut prover, left);
         config.prove(&mut prover, left, &refs, &values)
     };
     prover.prover_message(&M::Target::from(987));
@@ -244,13 +265,17 @@ where
     }
     let received: Vec<M::Target> = verifier.prover_messages_vec(values.len()).unwrap();
     assert_eq!(received, values);
-    let left = from_json.receive_commitment(&mut verifier).unwrap();
-    let final_claim = if pair {
-        let right = from_json.receive_commitment(&mut verifier).unwrap();
-        from_json
-            .verify_pair(&mut verifier, [left, right], &refs, &values)
+    let final_claim = if joint.is_some() {
+        JointOpeningConfig::<M>::derive(*from_json.params())
+            .unwrap()
+            .receive_first(&mut verifier)
+            .unwrap()
+            .receive_second(&mut verifier)
+            .unwrap()
+            .verify(&mut verifier, &refs, &values)
             .unwrap()
     } else {
+        let left = from_json.receive_commitment(&mut verifier).unwrap();
         from_json
             .verify(&mut verifier, left, &refs, &values)
             .unwrap()

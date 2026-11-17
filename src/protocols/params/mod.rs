@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod derive;
+mod joint;
 mod masks;
 #[cfg(test)]
 mod parameter_regressions;
@@ -38,6 +39,7 @@ pub(crate) mod security;
 mod tests;
 
 pub use derive::DeriveError;
+pub use joint::JointOpeningConfig;
 type Result<T> = std::result::Result<T, DeriveError>;
 pub use masks::{JointMaskConfig, WitnessMaskConfig};
 

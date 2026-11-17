@@ -12,13 +12,11 @@ use crate::{
         embedding::{Embedding, Identity},
         fields::FieldWithSize,
     },
-    bits::Bits,
     protocols::{
         code_switch::{CodeSwitchMode, Config as CodeSwitchConfig},
         irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
         sumcheck::{Config as SumcheckConfig, SumcheckMaskLen, SumcheckMode},
     },
-    transcript::{VerificationError, VerificationResult},
     type_info::Typed,
 };
 
@@ -83,32 +81,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             )?);
         }
         Ok(config)
-    }
-    pub(crate) fn pair_source(&self) -> VerificationResult<IrsConfig<M>> {
-        if self.params().size != self.padded_vector_size()
-            || self.params().size.checked_mul(2).is_none()
-        {
-            return Err(VerificationError);
-        }
-        let first = self.first.as_ref().ok_or(VerificationError)?;
-        if let Some(joint) = self.joint_masks() {
-            if security::final_bits(self.final_commit(), &joint.commit)
-                .map(|bits| bits.0)
-                .map_err(|_| VerificationError)?
-                - Bits::new(1.0)
-                < Bits::new(f64::from(self.params().bits))
-            {
-                return Err(VerificationError);
-            }
-        }
-        first.joint_pair_source().ok_or(VerificationError)
-    }
-    pub(crate) fn pair_round<'a>(
-        &'a self,
-        source: &'a IrsConfig<M>,
-    ) -> VerificationResult<RoundConfig<'a, M>> {
-        self.first.as_ref().ok_or(VerificationError)?;
-        round(self.params(), source, &self.targets[0], 0).map_err(|_| VerificationError)
     }
 }
 
