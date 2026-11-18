@@ -147,7 +147,6 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
         let (masks, initial) = commit_masks(self, ps).unzip();
         let initial = initial.unwrap_or_default();
         let midpoint = initial.len() / 2;
-        let state = commit_witness(self, ps, witness, &initial[..midpoint])?;
         let mask_binding =
             self.combined()
                 .joint_masks()
@@ -160,6 +159,7 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
                         ps,
                     )
                 });
+        let state = commit_witness(self, ps, witness, &initial[..midpoint])?;
         Ok(FirstWitness {
             config: self,
             left: CommittedWitness {
@@ -171,7 +171,7 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
         })
     }
 
-    /// Receive the shared-mask root, L's root and the binding equations for the full mask collection.
+    /// Receive the shared-mask root, the binding equations for the full mask collection, and L's root.
     pub fn receive_first<H>(
         &self,
         vs: &mut VerifierState<H>,
@@ -182,12 +182,12 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
         Hash: ProverMessage<[H::U]>,
     {
         let masks = receive_masks(self, vs)?;
-        let irs = self.witness_commitment().receive_commitment(vs)?;
         let mask_binding = self
             .combined()
             .joint_masks()
             .map(|_| receive_binding(M::Source::extension_degree(), vs))
             .transpose()?;
+        let irs = self.witness_commitment().receive_commitment(vs)?;
         Ok(FirstCommitment {
             config: self,
             left: Commitment {
