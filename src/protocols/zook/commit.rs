@@ -115,6 +115,17 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                 irs_witness,
             }
         });
+        let mask_binding = self
+            .joint_masks()
+            .zip(joint_masks.as_ref())
+            .map(|(config, masks)| {
+                prove_binding(
+                    config,
+                    masks.coefficients.to_slice(),
+                    self.mask_source_degree(),
+                    ps,
+                )
+            });
 
         let state = if let Some(round) = self.first_round() {
             if let Some(masks) = round.masks() {
@@ -146,17 +157,6 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                 irs_witness,
             }
         };
-        let mask_binding = self
-            .joint_masks()
-            .zip(joint_masks.as_ref())
-            .map(|(config, masks)| {
-                prove_binding(
-                    config,
-                    masks.coefficients.to_slice(),
-                    self.mask_source_degree(),
-                    ps,
-                )
-            });
         CommittedWitness {
             state,
             joint_masks,
@@ -179,14 +179,14 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             .joint_masks()
             .map(|config| config.commit().receive_commitment(vs))
             .transpose()?;
-        let irs = match self.first_round() {
-            Some(round) => round.code_switch().source().receive_commitment(vs)?,
-            None => self.basecase().commit().receive_commitment(vs)?,
-        };
         let mask_binding = self
             .joint_masks()
             .map(|_| receive_binding(self.mask_source_degree(), vs))
             .transpose()?;
+        let irs = match self.first_round() {
+            Some(round) => round.code_switch().source().receive_commitment(vs)?,
+            None => self.basecase().commit().receive_commitment(vs)?,
+        };
         Ok(Commitment {
             irs,
             joint_masks,
@@ -208,7 +208,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
 /// Section 5.4, “ZO0K”, “The required masks”: the initial mask and Frobenius-check
 /// blinder are sampled in the source field. All other masks use the target field.
 /// A basecase-only witness is lifted first, so all its masks use the target field.
-fn sample_masks<M, R>(
+pub(super) fn sample_masks<M, R>(
     config: &JointMaskConfig<M::Target>,
     has_rounds: bool,
     rng: &mut R,

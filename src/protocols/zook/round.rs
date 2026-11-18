@@ -18,7 +18,7 @@ use crate::{
     protocols::{
         basecase::Opening,
         code_switch::{Claim, CovectorUpdateParams},
-        irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
+        irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
         params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
         sumcheck::SumcheckOpening,
         zook::{
@@ -289,6 +289,7 @@ pub(super) fn reduce_prover<M, H, R>(
     committed: CommittedWitness<M>,
     forms: &[&dyn LinearForm<M::Target>],
     evaluations: &[M::Target],
+    second: Option<(&Config<M>, IrsWitness<M::Source>)>,
 ) -> ProverRoundState<Identity<M::Target>>
 where
     M: Embedding + Default,
@@ -366,6 +367,7 @@ where
             Some(first),
         ) => prove_round(
             first,
+            second,
             ProverRoundState::<M> {
                 message,
                 irs_witness,
@@ -383,6 +385,7 @@ where
     for round in config.tail_rounds() {
         state = prove_round(
             round,
+            None,
             state,
             config
                 .joint_masks()
@@ -400,6 +403,7 @@ pub(super) fn reduce_verifier<'a, M, H>(
     commitment: Commitment<M::Target>,
     forms: &'a [&'a dyn LinearForm<M::Target>],
     evaluations: &[M::Target],
+    second: Option<(&Config<M>, &IrsCommitment)>,
 ) -> VerificationResult<VerifierRoundState<'a, M::Target>>
 where
     M: Embedding + Default,
@@ -471,6 +475,7 @@ where
     if let Some(first) = config.first_round() {
         verify_round(
             first,
+            second,
             &mut state,
             config.joint_masks().zip(config.witness_mask(1)),
             vs,
@@ -479,6 +484,7 @@ where
     for round in config.tail_rounds() {
         verify_round(
             round,
+            None,
             &mut state,
             config
                 .joint_masks()
@@ -492,6 +498,7 @@ where
 /// Section 5.4, “ZO0K”, Steps 1–4: carry masks, fold, overlay, then aggregate.
 fn prove_round<M, H, R>(
     round: &RoundConfig<M>,
+    second: Option<(&Config<M>, IrsWitness<M::Source>)>,
     mut state: ProverRoundState<M>,
     mask_plan: Option<(&JointMaskConfig<M::Target>, WitnessMaskConfig)>,
     ps: &mut ProverState<H, R>,
@@ -548,11 +555,15 @@ where
             next_mask,
         );
     }
+    let (source, witnesses) = match second {
+        Some((source, right)) => (source, vec![state.irs_witness, right]),
+        None => (round.code_switch().source(), vec![state.irs_witness]),
+    };
     let switched = round.code_switch().prove(
         ps,
         message,
-        round.code_switch().source(),
-        vec![state.irs_witness],
+        source,
+        witnesses,
         Claim {
             covector: &mut state.covector,
             sum: &mut state.sum,
@@ -589,6 +600,7 @@ where
 
 fn verify_round<M, H>(
     round: &RoundConfig<M>,
+    second: Option<(&Config<M>, &IrsCommitment)>,
     state: &mut VerifierRoundState<M::Target>,
     mask_plan: Option<(&JointMaskConfig<M::Target>, WitnessMaskConfig)>,
     vs: &mut VerifierState<H>,
@@ -614,12 +626,16 @@ where
             &opening,
         );
     }
+    let (source, roots) = match second {
+        Some((source, right)) => (source, vec![&state.irs, right]),
+        None => (round.code_switch().source(), vec![&state.irs]),
+    };
     let (irs, update) = round.code_switch().verify_for_implicit(
         vs,
         &mut state.sum,
         &opening.round_challenges,
-        round.code_switch().source(),
-        &[&state.irs],
+        source,
+        &roots,
     )?;
     state.kernel.aggregate(&update);
     if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {
@@ -792,7 +808,7 @@ mod tests {
             CommittedState::Round { message, .. } => message.mixed_lift(&M::default()),
             CommittedState::Basecase { message, .. } => message.clone(),
         };
-        let state = reduce_prover(&config, &mut ps, committed, &forms, &values);
+        let state = reduce_prover(&config, &mut ps, committed, &forms, &values, None);
         assert_overlays(&config, initial, &state);
         let _ = config
             .basecase()
@@ -805,7 +821,8 @@ mod tests {
         let proof = ps.proof();
         let mut vs = VerifierState::new_std(&ds, &proof);
         let commitment = config.receive_commitment(&mut vs).unwrap();
-        let received = reduce_verifier(&config, &mut vs, commitment, &forms, &values).unwrap();
+        let received =
+            reduce_verifier(&config, &mut vs, commitment, &forms, &values, None).unwrap();
         assert_eq!(state.sum, received.sum);
         assert_eq!(state.challenges, received.kernel.challenges);
         assert_eq!(state.claim_weights, received.kernel.claim_weights);
