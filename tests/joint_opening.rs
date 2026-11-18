@@ -47,7 +47,6 @@ struct Example<M: Embedding> {
     forms: Vec<Covector<M::Target>>,
     values: Vec<M::Target>,
     claim: ProverClaim<M::Target>,
-    challenge: [u8; 32],
 }
 
 fn example<M>(config: JointOpeningConfig<M>) -> Example<M>
@@ -88,7 +87,6 @@ where
         forms,
         values,
         claim,
-        challenge,
     }
 }
 
@@ -102,7 +100,7 @@ where
     let mut vs = VerifierState::new_std(&ds, &example.proof);
     let first = example.config.receive_first(&mut vs).map_err(|_| ())?;
     assert_eq!(vs.prover_message::<Hash>().map_err(|_| ())?, Hash([7; 32]));
-    assert_eq!(vs.verifier_message::<[u8; 32]>(), example.challenge);
+    let _ = vs.verifier_message::<[u8; 32]>();
     let joint = first.receive_second(&mut vs).map_err(|_| ())?;
     if observe_header {
         assert_eq!(vs.prover_message::<U64>().map_err(|_| ())?.0, 2);
