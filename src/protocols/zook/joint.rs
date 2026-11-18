@@ -106,7 +106,7 @@ fn commit_witness<M, H, R>(
     ps: &mut ProverState<H, R>,
     mut message: Buffer<M::Source>,
     mask: &[M::Source],
-) -> VerificationResult<CommittedState<M>>
+) -> CommittedState<M>
 where
     M: Embedding + Default,
     Standard: Distribution<M::Source>,
@@ -115,18 +115,20 @@ where
     M::Target: Codec<[H::U]>,
     Hash: ProverMessage<[H::U]>,
 {
-    if message.len() != config.witness_commitment().vector_size() {
-        return Err(VerificationError);
-    }
+    assert_eq!(
+        message.len(),
+        config.witness_commitment().vector_size(),
+        "zook witness length",
+    );
     if let Some(mut shape) = config.combined().witness_mask(0) {
         shape.num_polynomials /= 2;
         message = overlay_mask(message, mask, shape);
     }
     let root = config.witness_commitment().commit(ps, &[&message]);
-    Ok(CommittedState::Round {
+    CommittedState::Round {
         message,
         irs_witness: root,
-    })
+    }
 }
 
 impl<M: Embedding + Default> JointOpeningConfig<M> {
@@ -136,7 +138,7 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
         &self,
         ps: &mut ProverState<H, R>,
         witness: Buffer<M::Source>,
-    ) -> VerificationResult<FirstWitness<'_, M>>
+    ) -> FirstWitness<'_, M>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
         H: DuplexSpongeInterface,
@@ -159,8 +161,8 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
                         ps,
                     )
                 });
-        let state = commit_witness(self, ps, witness, &initial[..midpoint])?;
-        Ok(FirstWitness {
+        let state = commit_witness(self, ps, witness, &initial[..midpoint]);
+        FirstWitness {
             config: self,
             left: CommittedWitness {
                 state,
@@ -168,7 +170,7 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
                 mask_binding,
             },
             reserved: Zeroizing::new(initial[midpoint..].to_vec()),
-        })
+        }
     }
 
     /// Receive the shared-mask root, the binding equations for the full mask collection, and L's root.
@@ -205,7 +207,7 @@ impl<'a, M: Embedding + Default> FirstWitness<'a, M> {
         mut self,
         ps: &mut ProverState<H, R>,
         witness: Buffer<M::Source>,
-    ) -> VerificationResult<JointWitness<'a, M>>
+    ) -> JointWitness<'a, M>
     where
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
@@ -216,7 +218,7 @@ impl<'a, M: Embedding + Default> FirstWitness<'a, M> {
         let CommittedState::Round {
             message: right_message,
             irs_witness: right,
-        } = commit_witness(self.config, ps, witness, &self.reserved)?
+        } = commit_witness(self.config, ps, witness, &self.reserved)
         else {
             unreachable!("staged commitments always have a first folding block");
         };
@@ -224,11 +226,11 @@ impl<'a, M: Embedding + Default> FirstWitness<'a, M> {
             unreachable!("staged commitments always have a first folding block");
         };
         *message = message.concat(&right_message);
-        Ok(JointWitness {
+        JointWitness {
             config: self.config,
             left: self.left,
             right,
-        })
+        }
     }
 }
 
@@ -275,7 +277,7 @@ impl<M: Embedding + Default> JointWitness<'_, M> {
         ps: &mut ProverState<H, R>,
         forms: &[&dyn LinearForm<M::Target>],
         values: &[M::Target],
-    ) -> VerificationResult<ProverClaim<M::Target>>
+    ) -> ProverClaim<M::Target>
     where
         M::Target: Codec<[H::U]>,
         Standard: Distribution<M::Target>,
@@ -286,7 +288,10 @@ impl<M: Embedding + Default> JointWitness<'_, M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        check_claims(self.config, forms, values)?;
+        assert!(
+            check_claims(self.config, forms, values).is_ok(),
+            "zook joint claims",
+        );
         ps.prover_message(&U64(values.len() as u64));
         ps.prover_messages(values);
         let reduced = reduce_prover(
@@ -297,7 +302,7 @@ impl<M: Embedding + Default> JointWitness<'_, M> {
             values,
             Some((self.config.witness_commitment(), self.right)),
         );
-        Ok(self.config.combined().prove_final_opening(ps, reduced))
+        self.config.combined().prove_final_opening(ps, reduced)
     }
 }
 

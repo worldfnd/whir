@@ -61,12 +61,12 @@ where
     let mut ps = ProverState::new_std(&ds);
     let mut left = vec![M::Source::ZERO; n];
     left[0] = M::Source::ONE;
-    let first = config.commit_first(&mut ps, Buffer::from(left)).unwrap();
+    let first = config.commit_first(&mut ps, Buffer::from(left));
     ps.prover_message(&Hash([7; 32]));
     let challenge: [u8; 32] = ps.verifier_message();
     let mut right = vec![M::Source::ZERO; n];
     right[0] = M::Source::from(u64::from(challenge[0]));
-    let joint = first.commit_second(&mut ps, Buffer::from(right)).unwrap();
+    let joint = first.commit_second(&mut ps, Buffer::from(right));
     let mut forms = Vec::new();
     for (l, r) in [(2, 3), (5, 7)] {
         let mut weights = vec![M::Target::ZERO; 2 * n];
@@ -79,7 +79,7 @@ where
         M::Target::from(5 + 7 * u64::from(challenge[0])),
     ];
     let refs: Vec<&dyn LinearForm<M::Target>> = forms.iter().map(|f| f as _).collect();
-    let claim = joint.prove(&mut ps, &refs, &values).unwrap();
+    let claim = joint.prove(&mut ps, &refs, &values);
     ps.prover_message(&M::Target::from(987));
     Example {
         proof: ps.proof(),
