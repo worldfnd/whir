@@ -45,3 +45,44 @@ Options:
 - `--fold_type` sets the settings used to compute folds. Available `Naive`, `ProverHelps`
 - `-f` sets the field used, available are `Goldilocks2, Goldilocks3, Field192, Field256`.
 - `--hash` sets the hash used for the Merkle tree, available are `SHA3` and `Blake3`
+
+# Benchmarking Zook
+
+`tests/zk_bench.rs` times Zook commit, prove and verify. It is an ignored test, so it only runs when asked for:
+
+```
+LOG=20 MODE=std ITERS=3 cargo test --release --test zk_bench -- --ignored --nocapture
+```
+
+Each run prints one line per mode with the best time over `ITERS` runs, for example:
+
+```
+RESULT log=20 mode=Standard commit=0.170s prove=0.557s verify=0.0009s proof_digest=919fee7ff999ec11
+```
+
+`proof_digest` is a hash of the Standard-mode proof. It is deterministic, so two builds that should produce identical proofs must print the same digest. ZK proofs are randomised, so ZK runs print `-` instead.
+
+Settings are read from environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LOG` | `20` | log2 of the witness length |
+| `MODE` | `std,zk` | comma-separated modes: `std`, `zk` |
+| `ITERS` | `3` | runs per mode; the best time is reported |
+| `SEC` | `128` | target security bits |
+| `POW` | `10` | proof-of-work bits per step |
+| `RATE` | `2` | starting log2 inverse rate (`2` = rate 1/4) |
+| `FOLD` | `4` | folding factor |
+| `HASH` | `sha2` | Merkle hash: `sha2` or `blake3` |
+| `EMB` | `base` | `base`: Goldilocks witness, cubic-extension claims; `ext`: cubic-extension witness |
+
+With the cubic Goldilocks extension, ZK mode cannot reach 128 bits at larger sizes, so lower `SEC` for ZK runs (about 112 bits is the most that works at 2^20, and 99 at 2^22):
+
+```
+LOG=20 MODE=std        ITERS=3 cargo test --release --test zk_bench -- --ignored --nocapture
+LOG=20 MODE=zk SEC=100 ITERS=3 cargo test --release --test zk_bench -- --ignored --nocapture
+LOG=22 MODE=std        ITERS=3 cargo test --release --test zk_bench -- --ignored --nocapture
+LOG=22 MODE=zk SEC=99  ITERS=3 cargo test --release --test zk_bench -- --ignored --nocapture
+```
+
+To compare two versions, run the same commands on each, then compare the times and check that the Standard-mode `proof_digest` values match.

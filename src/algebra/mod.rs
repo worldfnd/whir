@@ -151,9 +151,9 @@ pub fn mixed_dot<F: Field, G: Field>(
 }
 
 /// Compute `accumulator[i] += sum_j scalars[j] * points[j]^i`
-pub fn geometric_accumulate<F: Field>(accumulator: &mut [F], mut scalars: Vec<F>, points: &[F]) {
+pub fn geometric_accumulate<F: Field>(accumulator: &mut [F], scalars: &[F], points: &[F]) {
     assert_eq!(scalars.len(), points.len());
-    geometric_accumulate_inner(accumulator, &mut scalars, points);
+    GeometricAccumulator::new(points).accumulate(accumulator, scalars);
 }
 
 /// Accumulate geometric sequences over packed polynomial prefixes.
@@ -185,48 +185,93 @@ pub(crate) fn geometric_accumulate_prefixes<F: Field>(
 }
 
 /// Reuse scalar scratch across geometric accumulations.
+///
+/// Points in the base prime field (in-domain query points) advance their scalars with
+/// `mul_by_base_prime_field`, which for an extension of degree `d` costs `d` base-field
+/// multiplications instead of a full extension multiplication.
 pub(crate) struct GeometricAccumulator<F: Field> {
-    points: Vec<F>,
+    /// Indices of the base-field points, then of the remaining points.
+    order: Vec<usize>,
+    base: Vec<F::BasePrimeField>,
+    extension: Vec<F>,
     scratch: Vec<F>,
 }
 
 impl<F: Field> GeometricAccumulator<F> {
     pub(crate) fn new(points: &[F]) -> Self {
+        let mut base = Vec::new();
+        let mut base_order = Vec::new();
+        let mut extension = Vec::new();
+        let mut extension_order = Vec::new();
+        for (index, &point) in points.iter().enumerate() {
+            let mut coordinates = point.to_base_prime_field_elements();
+            let first = coordinates.next().expect("field has a coordinate");
+            if coordinates.all(|c| c == F::BasePrimeField::ZERO) {
+                base.push(first);
+                base_order.push(index);
+            } else {
+                extension.push(point);
+                extension_order.push(index);
+            }
+        }
+        base_order.extend(extension_order);
         Self {
-            points: points.to_vec(),
+            order: base_order,
+            base,
+            extension,
             scratch: vec![F::ZERO; points.len()],
         }
     }
 
     /// Add `sum_j scalars[j] * points[j]^i` at each index `i`, starting at zero.
     pub(crate) fn accumulate(&mut self, accumulator: &mut [F], scalars: &[F]) {
-        self.scratch.copy_from_slice(scalars);
-        geometric_accumulate_inner(accumulator, &mut self.scratch, &self.points);
+        for (scratch, &index) in self.scratch.iter_mut().zip(&self.order) {
+            *scratch = scalars[index];
+        }
+        geometric_accumulate_inner(accumulator, &mut self.scratch, &self.base, &self.extension);
     }
 }
 
-fn geometric_accumulate_inner<F: Field>(accumulator: &mut [F], scalars: &mut [F], points: &[F]) {
-    if points.is_empty() {
+/// `scalars` lists the scalars of `base` points first, then those of `extension` points.
+fn geometric_accumulate_inner<F: Field>(
+    accumulator: &mut [F],
+    scalars: &mut [F],
+    base: &[F::BasePrimeField],
+    extension: &[F],
+) {
+    if scalars.is_empty() {
         return;
     }
     #[cfg(feature = "parallel")]
     if accumulator.len() > workload_size::<F>() {
         let half = accumulator.len() / 2;
         let (low, high) = accumulator.split_at_mut(half);
-        let mut scalars_high: Vec<_> = scalars
+        let (base_scalars, extension_scalars) = scalars.split_at(base.len());
+        let mut scalars_high: Vec<_> = base_scalars
             .iter()
-            .zip(points)
-            .map(|(s, x)| *s * x.pow([half as u64]))
+            .zip(base)
+            .map(|(s, x)| s.mul_by_base_prime_field(&x.pow([half as u64])))
+            .chain(
+                extension_scalars
+                    .iter()
+                    .zip(extension)
+                    .map(|(s, x)| *s * x.pow([half as u64])),
+            )
             .collect();
         rayon::join(
-            || geometric_accumulate_inner(low, scalars, points),
-            || geometric_accumulate_inner(high, &mut scalars_high, points),
+            || geometric_accumulate_inner(low, scalars, base, extension),
+            || geometric_accumulate_inner(high, &mut scalars_high, base, extension),
         );
         return;
     }
 
+    let (base_scalars, extension_scalars) = scalars.split_at_mut(base.len());
     for entry in accumulator {
-        for (scalar, point) in scalars.iter_mut().zip(points) {
+        for (scalar, point) in base_scalars.iter_mut().zip(base) {
+            *entry += *scalar;
+            *scalar = scalar.mul_by_base_prime_field(point);
+        }
+        for (scalar, point) in extension_scalars.iter_mut().zip(extension) {
             *entry += *scalar;
             *scalar *= *point; // TODO: Skip on last
         }
@@ -288,7 +333,7 @@ mod tests {
                                 .sum::<F>()
                         })
                         .collect();
-                    geometric_accumulate(&mut actual, scalars.clone(), points);
+                    geometric_accumulate(&mut actual, &scalars, points);
                     assert_eq!(actual, expected);
                     let mut reused = coefficients.clone();
                     accumulation.accumulate(&mut reused, &scalars);
