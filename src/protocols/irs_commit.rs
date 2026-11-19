@@ -11,7 +11,7 @@
 //! them using the [`matrix_commit`] protocol. Sampling is done with replacement, so may produce
 //! fewer than `in_domain_samples` distinct rows.
 //!
-use std::{f64, fmt, num::NonZeroUsize};
+use std::{fmt, num::NonZeroUsize};
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};

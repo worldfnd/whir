@@ -68,11 +68,8 @@ where
             if method == 0 {
                 joint
                     .commit_first(&mut ps, witnesses[0].clone())
-                    .unwrap()
                     .commit_second(&mut ps, witnesses[1].clone())
-                    .unwrap()
-                    .prove(&mut ps, &pair_refs, &values)
-                    .unwrap();
+                    .prove(&mut ps, &pair_refs, &values);
             } else {
                 let handles = witnesses
                     .each_ref()

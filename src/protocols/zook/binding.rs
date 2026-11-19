@@ -38,7 +38,7 @@ impl<F: Field> MaskBinding<F> {
     }
 }
 
-/// Publish the two Phase 0 evaluations after both commitment roots.
+/// Publish the two Phase 0 evaluations after the shared-mask root, before any witness root.
 pub(super) fn prove_binding<F, H, R>(
     config: &JointMaskConfig<F>,
     coefficients: &[F],

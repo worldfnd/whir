@@ -42,7 +42,6 @@ struct Example<M: Embedding> {
     forms: Vec<Covector<M::Target>>,
     values: Vec<M::Target>,
     claim: ProverClaim<M::Target>,
-    challenge: [u8; 32],
 }
 
 fn example<M>(config: JointOpeningConfig<M>) -> Example<M>
@@ -57,12 +56,12 @@ where
     let mut ps = ProverState::new_std(&ds);
     let mut left = vec![M::Source::ZERO; n];
     left[0] = M::Source::ONE;
-    let first = config.commit_first(&mut ps, Buffer::from(left)).unwrap();
+    let first = config.commit_first(&mut ps, Buffer::from(left));
     ps.prover_message(&Hash([7; 32]));
     let challenge: [u8; 32] = ps.verifier_message();
     let mut right = vec![M::Source::ZERO; n];
     right[0] = M::Source::from(u64::from(challenge[0]));
-    let joint = first.commit_second(&mut ps, Buffer::from(right)).unwrap();
+    let joint = first.commit_second(&mut ps, Buffer::from(right));
     let mut forms = Vec::new();
     for (l, r) in [(2, 3), (5, 7)] {
         let mut weights = vec![M::Target::ZERO; 2 * n];
@@ -75,7 +74,7 @@ where
         M::Target::from(5 + 7 * u64::from(challenge[0])),
     ];
     let refs: Vec<&dyn LinearForm<M::Target>> = forms.iter().map(|f| f as _).collect();
-    let claim = joint.prove(&mut ps, &refs, &values).unwrap();
+    let claim = joint.prove(&mut ps, &refs, &values);
     ps.prover_message(&M::Target::from(987));
     Example {
         proof: ps.proof(),
@@ -83,7 +82,6 @@ where
         forms,
         values,
         claim,
-        challenge,
     }
 }
 
@@ -97,7 +95,7 @@ where
     let mut vs = VerifierState::new_std(&ds, &example.proof);
     let first = example.config.receive_first(&mut vs).map_err(|_| ())?;
     assert_eq!(vs.prover_message::<Hash>().map_err(|_| ())?, Hash([7; 32]));
-    let challenge: [u8; 32] = vs.verifier_message();
+    let _ = vs.verifier_message::<[u8; 32]>();
     let joint = first.receive_second(&mut vs).map_err(|_| ())?;
     if observe_header {
         assert_eq!(vs.prover_message::<U64>().map_err(|_| ())?.0, 2);
@@ -126,9 +124,7 @@ where
         vs.prover_message::<M::Target>().map_err(|_| ())?,
         M::Target::from(987)
     );
-    vs.check_eof().map_err(|_| ())?;
-    assert_eq!(challenge, example.challenge);
-    Ok(())
+    vs.check_eof().map_err(|_| ())
 }
 
 fn rejects<T, E>(run: impl FnOnce() -> Result<T, E>) {

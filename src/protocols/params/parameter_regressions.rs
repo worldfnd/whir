@@ -245,11 +245,8 @@ fn prove_and_verify<M>(
     let claim = if let Some(joint) = joint {
         joint
             .commit_first(&mut prover, left)
-            .unwrap()
             .commit_second(&mut prover, Buffer::from(&witness[n..]))
-            .unwrap()
             .prove(&mut prover, &refs, &values)
-            .unwrap()
     } else {
         let left = config.commit(&mut prover, left);
         config.prove(&mut prover, left, &refs, &values)
