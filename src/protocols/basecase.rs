@@ -32,22 +32,22 @@ pub enum BasecaseMode {
 }
 
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(bound = "")]
-pub struct Config<F: Field> {
-    commit: irs_commit::Config<Identity<F>>,
+pub struct Config<'a, F: Field> {
+    commit: &'a irs_commit::Config<Identity<F>>,
     sumcheck: sumcheck::Config<F>,
     mode: BasecaseMode,
     pow: proof_of_work::Config,
 }
 
-impl<F: Field> Config<F> {
+impl<'a, F: Field> Config<'a, F> {
     /// Standard basecase has no γ challenge — PoW must be `none()`. ZK
     /// basecase has a γ-combination slot (Lemma 7.4) and may or may not need
     /// PoW depending on whether the analytic floor already clears the target
     /// (under unique decoding it often does).
     pub fn new(
-        commit: irs_commit::Config<Identity<F>>,
+        commit: &'a irs_commit::Config<Identity<F>>,
         sumcheck: sumcheck::Config<F>,
         mode: BasecaseMode,
         pow: proof_of_work::Config,
@@ -65,8 +65,8 @@ impl<F: Field> Config<F> {
         }
     }
 
-    pub const fn commit(&self) -> &irs_commit::Config<Identity<F>> {
-        &self.commit
+    pub const fn commit(&self) -> &'a irs_commit::Config<Identity<F>> {
+        self.commit
     }
 
     pub const fn sumcheck(&self) -> &sumcheck::Config<F> {
@@ -312,30 +312,8 @@ mod tests {
     use super::*;
     use crate::{algebra::fields, protocols::proof_of_work, transcript::DomainSeparator};
 
-    impl<F: Field> Config<F> {
-        pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
-            let commit =
-                irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
-            (commit, bool::weighted(0.8)).prop_map(move |(commit, is_zk)| Self {
-                commit,
-                sumcheck: sumcheck::Config::new(
-                    size,
-                    proof_of_work::Config::none(),
-                    size.next_power_of_two().trailing_zeros() as usize,
-                    sumcheck::SumcheckMode::Standard,
-                ),
-                mode: if is_zk {
-                    BasecaseMode::ZeroKnowledge
-                } else {
-                    BasecaseMode::Standard
-                },
-                pow: proof_of_work::Config::none(),
-            })
-        }
-    }
-
     #[cfg_attr(feature = "tracing", instrument)]
-    fn test_config<F>(seed: u64, config: &Config<F>)
+    fn test_config<F>(seed: u64, config: &Config<'_, F>)
     where
         F: Field + Codec,
         Standard: Distribution<F>,
@@ -388,9 +366,24 @@ mod tests {
         Standard: Distribution<F>,
     {
         crate::tests::init();
-        let configs = (0_usize..1 << 10, 0_usize..1 << 10)
-            .prop_flat_map(|(size, mask_length)| Config::arbitrary(size, mask_length));
-        proptest!(|(seed: u64, config in configs)| {
+        let configs = (0_usize..1 << 10, 0_usize..1 << 10).prop_flat_map(|(size, mask_length)| {
+            (
+                irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1),
+                bool::weighted(0.8),
+            )
+        });
+        proptest!(|(seed: u64, (commit, is_zk) in configs)| {
+            let config = Config::new(
+                &commit,
+                sumcheck::Config::new(
+                    commit.vector_size(),
+                    proof_of_work::Config::none(),
+                    commit.vector_size().next_power_of_two().trailing_zeros() as usize,
+                    sumcheck::SumcheckMode::Standard,
+                ),
+                if is_zk { BasecaseMode::ZeroKnowledge } else { BasecaseMode::Standard },
+                proof_of_work::Config::none(),
+            );
             test_config(seed, &config);
         });
     }

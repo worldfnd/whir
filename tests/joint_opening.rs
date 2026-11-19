@@ -13,7 +13,7 @@ use whir::{
     buffer::Buffer,
     hash::Hash,
     protocols::{
-        params::{FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec},
+        params::{DecodingRegime, Mode, Params, RateSchedule},
         zook::{JointOpeningConfig, ProverClaim},
     },
     transcript::{
@@ -22,22 +22,17 @@ use whir::{
 };
 
 fn config<M: Embedding + Default>(mode: Mode, n: usize, first: usize) -> JointOpeningConfig<M> {
-    JointOpeningConfig::derive(
-        SecuritySpec::new(128)
-            .with_mode(mode)
-            .with_pow_budget(PowBudget::Forbidden),
-        TuningSpec {
-            vector_size: n,
-            starting_log_inv_rate: 1,
-            folding_factor: FoldingFactor::ConstantFromSecondRound {
-                initial: first,
-                rest: 2,
-            },
-            rate_schedule: RateSchedule::Capped {
-                max_log_inv_rate: 1,
-            },
-        },
-    )
+    JointOpeningConfig::derive(Params {
+        mode,
+        regime: DecodingRegime::Johnson,
+        bits: 128,
+        pow: 0,
+        hash: whir::hash::BLAKE3,
+        size: n,
+        rate: 1,
+        folds: [first, 2],
+        schedule: RateSchedule::Capped(1),
+    })
     .unwrap()
 }
 

@@ -40,11 +40,11 @@ pub enum CodeSwitchMode {
 
 /// Code-switching IOR config with optional ZK.
 #[must_use]
-#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize)]
 #[serde(bound = "")]
-pub struct Config<M: Embedding> {
-    source: IrsConfig<M>,
-    target: IrsConfig<Identity<M::Target>>,
+pub struct Config<'a, M: Embedding> {
+    source: &'a IrsConfig<M>,
+    target: &'a IrsConfig<Identity<M::Target>>,
     mode: CodeSwitchMode,
     out_domain_samples: usize,
     pow: proof_of_work::Config,
@@ -90,11 +90,11 @@ pub struct CovectorUpdateParams<F: Field> {
     pub in_domain_eval_points: Vec<F>,
 }
 
-impl<M: Embedding> Config<M> {
+impl<'a, M: Embedding> Config<'a, M> {
     /// Create a code-switch config.
     pub fn new(
-        source_config: IrsConfig<M>,
-        target_config: IrsConfig<Identity<M::Target>>,
+        source_config: &'a IrsConfig<M>,
+        target_config: &'a IrsConfig<Identity<M::Target>>,
         out_domain_samples: usize,
         mode: CodeSwitchMode,
         pow: proof_of_work::Config,
@@ -171,12 +171,12 @@ impl<M: Embedding> Config<M> {
         }
     }
 
-    pub const fn source(&self) -> &IrsConfig<M> {
-        &self.source
+    pub const fn source(&self) -> &'a IrsConfig<M> {
+        self.source
     }
 
-    pub const fn target(&self) -> &IrsConfig<Identity<M::Target>> {
-        &self.target
+    pub const fn target(&self) -> &'a IrsConfig<Identity<M::Target>> {
+        self.target
     }
 
     pub const fn mode(&self) -> &CodeSwitchMode {
@@ -550,7 +550,7 @@ impl<M: Embedding> Config<M> {
             verifier_state,
             sum,
             folding_randomness,
-            &self.source,
+            self.source,
             &[commitment],
         )?;
 
@@ -569,7 +569,7 @@ impl<M: Embedding> Config<M> {
     }
 }
 
-impl<M: Embedding> fmt::Display for Config<M> {
+impl<M: Embedding> fmt::Display for Config<'_, M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -649,7 +649,25 @@ mod tests {
         transcript::{codecs::U64, DomainSeparator},
     };
 
-    impl<M: Embedding> Config<M> {
+    #[derive(Debug)]
+    struct TestConfig<M: Embedding> {
+        source: IrsConfig<M>,
+        target: IrsConfig<Identity<M::Target>>,
+        mode: CodeSwitchMode,
+        out_domain_samples: usize,
+    }
+
+    impl<M: Embedding> TestConfig<M> {
+        fn view(&self) -> Config<'_, M> {
+            Config::new(
+                &self.source,
+                &self.target,
+                self.out_domain_samples,
+                self.mode.clone(),
+                proof_of_work::Config::none(),
+            )
+        }
+
         pub fn arbitrary(embedding: M) -> impl Strategy<Value = Self>
         where
             M: Default + 'static,
@@ -724,13 +742,12 @@ mod tests {
                                     } else {
                                         CodeSwitchMode::Standard
                                     };
-                                    Self::new(
-                                        source.clone(),
+                                    Self {
+                                        source: source.clone(),
                                         target,
-                                        ood,
+                                        out_domain_samples: ood,
                                         mode,
-                                        proof_of_work::Config::none(),
-                                    )
+                                    }
                                 })
                             })
                         })
@@ -741,7 +758,7 @@ mod tests {
 
     /// Sample folding randomness of length log2(source.interleaving_depth).
     fn sample_folding_randomness<F: Field>(
-        config: &Config<Identity<F>>,
+        config: &Config<'_, Identity<F>>,
         rng: &mut impl RngCore,
     ) -> Vec<F>
     where
@@ -754,7 +771,7 @@ mod tests {
     /// Simulate what the orchestrator does: build (r || fresh_s) where r is
     /// the *folded* source IRS randomness. Returns empty vec in non-ZK mode.
     fn build_mask_msg<F: Field>(
-        config: &Config<Identity<F>>,
+        config: &Config<'_, Identity<F>>,
         source_witness: &IrsWitness<F>,
         folding_randomness: &[F],
         rng: &mut impl RngCore,
@@ -778,7 +795,7 @@ mod tests {
         mask
     }
 
-    fn test_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<Identity<F>>)
+    fn test_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
         Hash: ProverMessage<[u8]>,
@@ -814,7 +831,7 @@ mod tests {
         let witness = config.prove(
             &mut prover_state,
             folded_message_buffer,
-            &config.source,
+            config.source,
             vec![source_witness],
             Claim {
                 covector: &mut covector,
@@ -845,7 +862,7 @@ mod tests {
         assert_eq!(covector, verifier_covector);
     }
 
-    fn test_ior_identity_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<Identity<F>>)
+    fn test_ior_identity_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
         Hash: ProverMessage<[u8]>,
@@ -891,7 +908,7 @@ mod tests {
         let _witness = config.prove(
             &mut prover_state,
             folded_message,
-            &config.source,
+            config.source,
             vec![source_witness],
             Claim {
                 covector: &mut covector,
@@ -923,7 +940,7 @@ mod tests {
         assert_eq!(dot(&h, verifier_covector.to_slice()), verifier_sum);
     }
 
-    fn test_tampered_ood_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<Identity<F>>)
+    fn test_tampered_ood_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
         Hash: ProverMessage<[u8]>,
@@ -959,7 +976,7 @@ mod tests {
         let _witness = config.prove(
             &mut prover_state,
             tampered,
-            &config.source,
+            config.source,
             vec![source_witness],
             Claim {
                 covector: &mut covector,
@@ -1000,9 +1017,9 @@ mod tests {
         Hash: ProverMessage<[u8]>,
     {
         crate::tests::init();
-        let configs = Config::arbitrary(Identity::<F>::new());
+        let configs = TestConfig::arbitrary(Identity::<F>::new());
         proptest!(|(seed: u64, config in configs)| {
-            test_config(seed, &config);
+            test_config(seed, &config.view());
         });
     }
 
@@ -1061,8 +1078,8 @@ mod tests {
             ..params.clone()
         });
         let config = Config::new(
-            source,
-            target,
+            &source,
+            &target,
             1,
             CodeSwitchMode::Standard,
             PowConfig::none(),
@@ -1098,22 +1115,24 @@ mod tests {
     #[test]
     fn test_ior_identity() {
         crate::tests::init();
-        let configs = Config::arbitrary(Identity::<fields::Field64>::new());
+        let configs = TestConfig::arbitrary(Identity::<fields::Field64>::new());
         proptest!(|(seed: u64, config in configs)| {
             prop_assume!(config.source.in_domain_samples() > 0);
-            test_ior_identity_config(seed, &config);
+            test_ior_identity_config(seed, &config.view());
         });
     }
 
     #[test]
     fn test_tampered_ood() {
         crate::tests::init();
-        let configs = Config::arbitrary(Identity::<fields::Field64>::new())
-            .prop_filter("non-ZK", |config| {
-                !config.is_zk() && config.source.mask_length() == 0
-            });
+        let configs = TestConfig::arbitrary(Identity::<fields::Field64>::new()).prop_filter(
+            "non-ZK",
+            |config| {
+                matches!(config.mode, CodeSwitchMode::Standard) && config.source.mask_length() == 0
+            },
+        );
         proptest!(|(seed: u64, config in configs)| {
-            test_tampered_ood_config(seed, &config);
+            test_tampered_ood_config(seed, &config.view());
         });
     }
 }

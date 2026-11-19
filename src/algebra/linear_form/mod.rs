@@ -35,7 +35,7 @@ pub trait LinearForm<F: Field>: Any + Send + Sync {
     /// the tensor product $a = a_0 ⊗ a_1 ⊗ ⋯ ⊗ a_(k-1)$ where $k ≥ ⌈log_2 size⌉$ and
     /// $a_i = (1-point_i, point_i)$ truncated to `self.size()`.
     ///
-    /// This function can be used by the verifier to check the [`FinalClaim`].
+    /// The verifier uses this function to check its final claim.
     fn mle_evaluate(&self, point: &[F]) -> F;
 
     /// Accumulate the covector representation of the linear form.
@@ -43,7 +43,7 @@ pub trait LinearForm<F: Field>: Any + Send + Sync {
     /// Take $w ∈ 𝔽^n$ such that evaluating the linear form on $v ∈ 𝔽^n$ equals the inner
     /// product $⟨w,v⟩$. Then this function computes $accumulator_i += scalar · w_i$.
     ///
-    /// This function is only called by the prover.
+    /// Used by the prover and by batched verifier evaluations of custom forms.
     fn accumulate(&self, accumulator: &mut [F], scalar: F);
 }
 

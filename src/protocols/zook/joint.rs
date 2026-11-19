@@ -70,10 +70,8 @@ where
 {
     config.combined().joint_masks().map(|layout| {
         let (coefficients, initial) = sample_masks::<M, _>(layout, true, ps.rng());
-        let opening_blinder = Buffer::random(ps.rng(), layout.commit().vector_size());
-        let irs_witness = layout
-            .commit()
-            .commit(ps, &[&coefficients, &opening_blinder]);
+        let opening_blinder = Buffer::random(ps.rng(), layout.commit.vector_size());
+        let irs_witness = layout.commit.commit(ps, &[&coefficients, &opening_blinder]);
         let masks = JointMaskWitness {
             coefficients,
             opening_blinder,
@@ -97,7 +95,7 @@ where
     config
         .combined()
         .joint_masks()
-        .map(|layout| layout.commit().receive_commitment(vs))
+        .map(|layout| layout.commit.receive_commitment(vs))
         .transpose()
 }
 
@@ -263,7 +261,7 @@ fn check_claims<M: Embedding>(
         || forms.len() != values.len()
         || forms
             .iter()
-            .any(|form| form.size() != config.combined().tuning().vector_size)
+            .any(|form| form.size() != config.combined().params().size)
     {
         return Err(VerificationError);
     }

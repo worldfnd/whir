@@ -66,7 +66,7 @@ pub fn scalar_mul<F: Field>(vector: &mut [F], weight: F) {
 
 /// Scalar mul add into new vector.
 ///
-/// Returns r such that r[i] = a[i] + c · b[i].
+/// Returns `r` such that `r[i] = a[i] + c · b[i]`.
 pub fn scalar_mul_add_new<F: Field>(a: &[F], c: F, b: &[F]) -> Vec<F> {
     zip_strict(a.iter(), b.iter())
         .map(|(a, b)| *a + c * *b)
