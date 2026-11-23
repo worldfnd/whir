@@ -32,6 +32,11 @@
 //! buffer/               backend-agnostic vector storage
 //! hash/, engines.rs     hash engines and their registry
 //! transcript/           Fiat–Shamir transcript (spongefish)
+//! bits.rs               security levels and error probabilities in bits
+//! type_info.rs          type tags checked on deserialization
+//! ark_serde.rs          Serde support for ark_ff types
+//! utils.rs              iterator and sizing helpers
+//! bin/main.rs           command-line demo
 //! ```
 
 pub mod algebra;

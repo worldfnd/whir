@@ -183,7 +183,7 @@ struct GeometricAccumulator<F: Field> {
 }
 
 impl<F: Field> GeometricAccumulator<F> {
-    pub(crate) fn new(points: &[F]) -> Self {
+    fn new(points: &[F]) -> Self {
         // `Field` does not fix the coordinate layout. The embedding is linear, so
         // `coordinates(a) = a * coordinates(ONE)` for every base-field `a`, and a
         // nonzero coordinate `k` of `ONE` determines the only candidate `a`.
@@ -222,7 +222,7 @@ impl<F: Field> GeometricAccumulator<F> {
     }
 
     /// Add `sum_j scalars[j] * points[j]^i` at each index `i`, starting at zero.
-    pub(crate) fn accumulate(&mut self, accumulator: &mut [F], scalars: &[F]) {
+    fn accumulate(&mut self, accumulator: &mut [F], scalars: &[F]) {
         for (scratch, &index) in self.scratch.iter_mut().zip(&self.order) {
             *scratch = scalars[index];
         }

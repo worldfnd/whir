@@ -1,5 +1,5 @@
 //! Field-level sumcheck kernels: round-polynomial coefficients and folds over dense vectors.
-//! The interactive protocol that uses them is `protocols::sumcheck`.
+//! `buffer::cpu` calls them; `protocols::sumcheck` reaches them through `Buffer`.
 
 use ark_ff::{AdditiveGroup, Field};
 #[cfg(feature = "parallel")]
