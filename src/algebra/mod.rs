@@ -199,15 +199,28 @@ pub(crate) struct GeometricAccumulator<F: Field> {
 
 impl<F: Field> GeometricAccumulator<F> {
     pub(crate) fn new(points: &[F]) -> Self {
+        // `Field` does not fix the coordinate layout. The embedding is linear, so
+        // `coordinates(a) = a * coordinates(ONE)` for every base-field `a`, and a
+        // nonzero coordinate `k` of `ONE` determines the only candidate `a`.
+        let one: Vec<_> = F::ONE.to_base_prime_field_elements().collect();
+        let k = one
+            .iter()
+            .position(|&c| c != F::BasePrimeField::ZERO)
+            .expect("one is nonzero");
+        let scale = (one[k] != F::BasePrimeField::ONE)
+            .then(|| one[k].inverse().expect("coordinate is nonzero"));
         let mut base = Vec::new();
         let mut base_order = Vec::new();
         let mut extension = Vec::new();
         let mut extension_order = Vec::new();
         for (index, &point) in points.iter().enumerate() {
-            let mut coordinates = point.to_base_prime_field_elements();
-            let first = coordinates.next().expect("field has a coordinate");
-            if coordinates.all(|c| c == F::BasePrimeField::ZERO) {
-                base.push(first);
+            let coordinate = point
+                .to_base_prime_field_elements()
+                .nth(k)
+                .expect("field has a coordinate");
+            let candidate = scale.map_or(coordinate, |scale| coordinate * scale);
+            if F::from_base_prime_field(candidate) == point {
+                base.push(candidate);
                 base_order.push(index);
             } else {
                 extension.push(point);
@@ -319,6 +332,12 @@ mod tests {
             for queries in [0, 3, points.len()] {
                 let points = &points[..queries];
                 let mut accumulation = GeometricAccumulator::new(points);
+                let base_points = match queries {
+                    0 => 0,
+                    3 => 3,
+                    _ => 4,
+                };
+                assert_eq!(accumulation.base.len(), base_points);
                 for _ in 0..3 {
                     let scalars = random_vector::<F>(&mut rng, points.len());
                     let mut actual = coefficients.clone();
