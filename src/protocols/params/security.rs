@@ -17,13 +17,12 @@ use crate::{
 };
 type Target<M> = Irs<Identity<<M as Embedding>::Target>>;
 
-/// Raw-rate slack and the original log/exp roundtrip give log2(1-distance).
+/// Return log2(1 - distance) for the given decoding regime and code rate.
 pub fn decoding_distance(policy: DecodingRegime, rho: f64) -> f64 {
-    let reconstructed = rate(-rho.log2());
     match policy {
-        DecodingRegime::Unique => f64::midpoint(1.0, reconstructed),
-        DecodingRegime::Johnson => reconstructed.sqrt() + rho.sqrt() / 20.0,
-        DecodingRegime::Capacity => reconstructed + rho / 20.0,
+        DecodingRegime::Unique => f64::midpoint(1.0, rho),
+        DecodingRegime::Johnson => rho.sqrt() + rho.sqrt() / 20.0,
+        DecodingRegime::Capacity => rho + rho / 20.0,
     }
     .log2()
 }
