@@ -239,7 +239,7 @@ mod tests {
             random_vector,
         },
         buffer::{Buffer, BufferMath, BufferOps},
-        soundness::DecodingRegime,
+        decoding::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState},
         whir::{
             commit::CommittedWitness,

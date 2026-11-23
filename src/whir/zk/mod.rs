@@ -139,7 +139,7 @@ mod tests {
             embedding::Basefield,
             fields::{Field64, Field64_2},
         },
-        soundness::DecodingRegime,
+        decoding::DecodingRegime,
         whir::params::{Mode, Params, ProtocolConfig, RateSchedule},
     };
 

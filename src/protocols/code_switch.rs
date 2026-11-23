@@ -636,12 +636,12 @@ mod tests {
     #[cfg(debug_assertions)]
     use crate::{
         algebra::fields::Field64,
+        decoding::DecodingRegime,
         hash::BLAKE3,
         protocols::{
             irs_commit::{IrsMode, IrsParams},
             proof_of_work::Config as PowConfig,
         },
-        soundness::DecodingRegime,
         transcript::codecs::Empty,
     };
     use crate::{

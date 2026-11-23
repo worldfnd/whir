@@ -101,5 +101,5 @@ lto = "thin" # LTO breaks line attribution.
 opt-level = 3
 
 [[bench]]
-name = "pair_opening"
+name = "joint_opening_bench"
 harness = false

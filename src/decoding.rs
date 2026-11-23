@@ -34,7 +34,7 @@ pub fn decoding_distance(policy: DecodingRegime, rho: f64) -> f64 {
 
 /// Canonical [list size, log2(1-distance), log2(MCA error)].
 /// Johnson uses BCSS25 Theorem 1.5; Capacity uses STIR Conjecture 5.6.
-pub fn decoding(policy: DecodingRegime, rho: f64, length: usize, field: f64) -> [f64; 3] {
+pub fn decoding_bounds(policy: DecodingRegime, rho: f64, length: usize, field: f64) -> [f64; 3] {
     use DecodingRegime::{Capacity, Johnson, Unique};
     let r = -rho.log2();
     let d = (length as f64).log2();

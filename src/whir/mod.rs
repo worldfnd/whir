@@ -2,7 +2,7 @@
 //! Zero-knowledge mode uses overlaid witness masks and a joint mask commitment.
 
 mod commit;
-mod joint;
+mod joint_opening;
 mod kernel;
 pub mod params;
 mod prover;
@@ -14,6 +14,6 @@ mod zk;
 mod tests;
 
 pub use commit::{Commitment, CommittedWitness};
-pub use joint::{FirstCommitment, FirstWitness, JointCommitment, JointWitness};
+pub use joint_opening::{FirstCommitment, FirstWitness, JointCommitment, JointWitness};
 pub use prover::ProverClaim;
 pub use verifier::FinalClaim;

@@ -4,7 +4,7 @@ use ark_ff::{AdditiveGroup, Field};
 use whir::algebra::{
     dot,
     fields::Field64,
-    sumcheck::{compute_sumcheck_polynomial, fold},
+    sumcheck_kernels::{compute_sumcheck_polynomial, fold},
     univariate_evaluate,
 };
 

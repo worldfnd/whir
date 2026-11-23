@@ -1,7 +1,7 @@
 use divan::{black_box, AllocProfiler, Bencher};
 use whir::algebra::{
     fields::Field64 as F,
-    sumcheck::{compute_sumcheck_polynomial, fold},
+    sumcheck_kernels::{compute_sumcheck_polynomial, fold},
 };
 
 #[global_allocator]

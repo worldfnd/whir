@@ -17,6 +17,7 @@ use crate::{
         embedding::{Embedding, Identity},
         fields::FieldWithSize,
     },
+    decoding::DecodingRegime,
     engines::EngineId,
     protocols::{
         basecase::{BasecaseMode, Config as BasecaseConfig},
@@ -25,20 +26,19 @@ use crate::{
         proof_of_work::Config as PowConfig,
         sumcheck::Config as SumcheckConfig,
     },
-    soundness::DecodingRegime,
     type_info::Typed,
 };
 
+mod adaptive_rates;
 mod derive;
-mod joint;
+mod joint_opening;
 mod masks;
-mod search;
 mod security;
 #[cfg(test)]
 mod tests;
 
 pub use derive::DeriveError;
-pub use joint::JointOpeningConfig;
+pub use joint_opening::JointOpeningConfig;
 type Result<T> = std::result::Result<T, DeriveError>;
 pub use masks::{JointMaskConfig, WitnessMaskConfig};
 

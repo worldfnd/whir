@@ -10,11 +10,11 @@ use crate::{
         fields::FieldWithSize,
     },
     bits::Bits,
+    decoding::decoding_distance,
     protocols::{
         irs_commit::{Config as Irs, IrsMode},
         proof_of_work::Config as Pow,
     },
-    soundness::decoding_distance,
 };
 type Target<M> = Irs<Identity<<M as Embedding>::Target>>;
 

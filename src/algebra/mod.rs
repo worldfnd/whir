@@ -3,7 +3,7 @@ pub mod fields;
 pub mod linear_form;
 mod multilinear;
 pub mod ntt;
-pub mod sumcheck;
+pub mod sumcheck_kernels;
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, Rng};

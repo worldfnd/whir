@@ -423,7 +423,7 @@ mod tests {
             linear_form::{Evaluate, MultilinearExtension, UnivariateEvaluation},
             random_vector, univariate_evaluate,
         },
-        soundness::DecodingRegime,
+        decoding::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator},
         whir::params::{Mode, Params, RateSchedule},
     };

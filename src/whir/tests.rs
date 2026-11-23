@@ -11,8 +11,8 @@ use crate::{
         random_vector,
     },
     buffer::{Buffer, BufferMath, BufferOps},
+    decoding::DecodingRegime,
     hash,
-    soundness::DecodingRegime,
     transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
     whir::params::{Mode, Params, RateSchedule},
 };

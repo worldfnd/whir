@@ -203,7 +203,7 @@ mod tests {
         ProtocolConfig::derive(Params {
             bits: 80,
             mode,
-            regime: crate::soundness::DecodingRegime::Johnson,
+            regime: crate::decoding::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
             size: vector_size,

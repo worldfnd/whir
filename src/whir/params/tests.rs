@@ -8,9 +8,9 @@ use crate::{
         fields::{Field64, Field64_2},
     },
     bits::Bits,
+    decoding::decoding_bounds,
     hash::BLAKE3,
     protocols::irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
-    soundness::decoding,
     test_utils::assert_close,
 };
 
@@ -78,7 +78,7 @@ fn independent_decoding_and_probability_anchors() {
         (Johnson, 40.0, 0.525, -38.623_375_386_827_36),
         (Capacity, 5120.0, 0.2625, -49.678_071_905_112_64),
     ] {
-        let actual = decoding(policy, 0.25, 16, 64.0);
+        let actual = decoding_bounds(policy, 0.25, 16, 64.0);
         assert_close(actual[0], list);
         assert_close(actual[1], f64::log2(distance));
         assert_close(actual[2], mca);

@@ -4,20 +4,21 @@ use security::{grind_to_at, round_bits, usize_to_f64};
 use thiserror::Error;
 
 use super::{
-    embedding_degree, masks, require, search, security, DecodingRegime, Params, ProtocolConfig,
-    ProtocolSpec, RateSchedule, Result, RoundConfig, RoundContext, WitnessMaskConfig,
+    adaptive_rates, embedding_degree, masks, require, security, DecodingRegime, Params,
+    ProtocolConfig, ProtocolSpec, RateSchedule, Result, RoundConfig, RoundContext,
+    WitnessMaskConfig,
 };
 use crate::{
     algebra::{
         embedding::{Embedding, Identity},
         fields::FieldWithSize,
     },
+    decoding::rate,
     protocols::{
         code_switch::{CodeSwitchMode, Config as CodeSwitchConfig},
         irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
         sumcheck::{Config as SumcheckConfig, SumcheckMaskLen, SumcheckMode},
     },
-    soundness::rate,
     type_info::Typed,
 };
 
@@ -206,8 +207,11 @@ fn round_layout<M: Embedding + Default>(spec: &Params) -> Result<Vec<RoundContex
     layout.push(source);
     if let RateSchedule::Adaptive(knee_weight) = spec.schedule {
         if layout.len() > 1 {
-            let rates =
-                search::plan_adaptive_rates::<M>(spec, knee_weight.0.into_inner(), &layout)?;
+            let rates = adaptive_rates::plan_adaptive_rates::<M>(
+                spec,
+                knee_weight.0.into_inner(),
+                &layout,
+            )?;
             for (context, rate) in layout.iter_mut().skip(1).zip(rates) {
                 context.rate = rate;
             }

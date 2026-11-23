@@ -23,10 +23,10 @@ use tracing::instrument;
 use crate::{
     algebra::{dot, embedding::Embedding, fields::FieldWithSize, lift, ntt},
     buffer::{Buffer, BufferMath, BufferOps},
+    decoding::{decoding_bounds, decoding_distance, DecodingRegime},
     engines::EngineId,
     hash::Hash,
     protocols::{challenge_indices::challenge_indices, matrix_commit},
-    soundness::{decoding, decoding_distance, DecodingRegime},
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
         VerifierMessage, VerifierState,
@@ -327,7 +327,7 @@ impl<M: Embedding> Config<M> {
     }
 
     fn decoding(&self) -> [f64; 3] {
-        decoding(
+        decoding_bounds(
             self.regime,
             self.rate(),
             self.masked_message_length(),

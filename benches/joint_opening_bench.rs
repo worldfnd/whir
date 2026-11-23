@@ -1,5 +1,5 @@
 //! Compare complete pair openings with two independent openings of the same claims.
-//! Run `RAYON_NUM_THREADS=6 cargo bench --bench pair_opening -- 18 5`.
+//! Run `RAYON_NUM_THREADS=6 cargo bench --bench joint_opening_bench -- 18 5`.
 
 use std::{env::args, time::Instant};
 
