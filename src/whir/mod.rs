@@ -3,12 +3,12 @@
 
 mod binding;
 mod claims;
-pub mod commit;
+mod commit;
 mod joint;
 pub mod params;
-pub mod prover;
+mod prover;
 mod round;
-pub mod verifier;
+mod verifier;
 
 use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};

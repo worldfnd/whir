@@ -23,7 +23,7 @@ impl Display for DecodingRegime {
     }
 }
 /// Return log2(1 - distance) for the given decoding regime and code rate.
-pub fn decoding_distance(policy: DecodingRegime, rho: f64) -> f64 {
+pub(crate) fn decoding_distance(policy: DecodingRegime, rho: f64) -> f64 {
     match policy {
         DecodingRegime::Unique => f64::midpoint(1.0, rho),
         DecodingRegime::Johnson => rho.sqrt() + rho.sqrt() / 20.0,
@@ -34,7 +34,7 @@ pub fn decoding_distance(policy: DecodingRegime, rho: f64) -> f64 {
 
 /// Canonical [list size, log2(1-distance), log2(MCA error)].
 /// Johnson uses BCSS25 Theorem 1.5; Capacity uses STIR Conjecture 5.6.
-pub fn decoding(policy: DecodingRegime, rho: f64, length: usize, field: f64) -> [f64; 3] {
+pub(crate) fn decoding(policy: DecodingRegime, rho: f64, length: usize, field: f64) -> [f64; 3] {
     use DecodingRegime::{Capacity, Johnson, Unique};
     let r = -rho.log2();
     let d = (length as f64).log2();

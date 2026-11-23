@@ -10,7 +10,7 @@ use crate::{
 
 /// Draw a geometric challenge `[1, x, x², …]` of length `count` as a host
 /// `Vec`. Used by the (host-side) verifiers; the prover uses the buffer
-/// variants below.
+/// variant below.
 pub fn geometric_challenge<T, F>(transcript: &mut T, count: usize) -> Vec<F>
 where
     T: VerifierMessage,

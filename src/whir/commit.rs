@@ -33,7 +33,7 @@ pub struct CommittedWitness<M: Embedding> {
 
 /// Joint masks and their final-opening blinder, committed as two columns in one tree.
 #[derive(Clone, Debug)]
-pub(crate) struct JointMaskWitness<F: Field> {
+pub struct JointMaskWitness<F: Field> {
     pub(crate) coefficients: Buffer<F>,
     pub(crate) opening_blinder: Buffer<F>,
     pub(crate) irs_witness: IrsWitness<F>,
@@ -50,7 +50,7 @@ impl<F: Field> Drop for JointMaskWitness<F> {
 
 /// Internal: the two branches differ in their IRS witness field type.
 #[derive(Clone, Debug)]
-pub(crate) enum CommittedState<M: Embedding> {
+pub enum CommittedState<M: Embedding> {
     /// Plan has ≥ 1 round; committed through `rounds[0].code_switch.source`.
     /// The message stays in `M::Source`: the first round's sumcheck lifts it
     /// into `M::Target` at its first fold.

@@ -157,12 +157,12 @@ impl<M: Embedding> ProtocolConfig<M> {
             |code| code.vector_size(),
         )
     }
-    pub fn first_round(&self) -> Option<RoundConfig<'_, M>> {
+    pub(crate) fn first_round(&self) -> Option<RoundConfig<'_, M>> {
         self.first
             .as_ref()
             .map(|source| derive::round(self.params(), source, &self.targets[0], 0).unwrap())
     }
-    pub fn tail_rounds(
+    pub(crate) fn tail_rounds(
         &self,
     ) -> impl ExactSizeIterator<Item = RoundConfig<'_, Identity<M::Target>>> {
         self.targets
@@ -193,11 +193,11 @@ impl<M: Embedding> ProtocolConfig<M> {
             PowConfig::none(),
         )
     }
-    pub const fn joint_masks(&self) -> Option<&JointMaskConfig<M::Target>> {
+    pub(crate) const fn joint_masks(&self) -> Option<&JointMaskConfig<M::Target>> {
         self.joint_masks.as_ref()
     }
     /// Mask dimensions come from the commitment that owns the corresponding witness.
-    pub fn witness_mask(&self, index: usize) -> Option<WitnessMaskConfig> {
+    pub(crate) fn witness_mask(&self, index: usize) -> Option<WitnessMaskConfig> {
         assert!(index <= self.num_rounds());
         if !self.params().mode.is_zk() {
             return None;

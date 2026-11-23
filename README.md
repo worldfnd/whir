@@ -17,22 +17,38 @@ cargo run --release -- --help
 Usage: main [OPTIONS]
 
 Options:
-  -l, --security-level <SECURITY_LEVEL>          [default: 128]
-  -p, --pow-bits <POW_BITS>                      [default: 20]
-  -d, --num-variables <NUM_VARIABLES>            [default: 20]
-  -e, --evaluations <NUM_EVALUATIONS>            [default: 1]
-      --linear-constraints <NUM_LINEAR_CONSTRAINTS>  [default: 0]
-  -r, --rate <RATE>                              [default: 1]
-      --reps <VERIFIER_REPETITIONS>              [default: 1000]
-  -i, --initfold <FIRST_ROUND_FOLDING_FACTOR>    [default: 4]
-  -k, --fold <FOLDING_FACTOR>                    [default: 4]
-      --decoding-regime <DECODING_REGIME>        [default: Johnson]
-  -f, --field <FIELD>                            [default: Goldilocks3]
-      --hash <HASH>                              [default: Blake3]
-      --schedule <SCHEDULE>                      [default: stepping]
+  -l, --security-level <SECURITY_LEVEL>
+          [default: 128]
+  -p, --pow-bits <POW_BITS>
+          Maximum proof of work difficulty in bits [default: 20]
+  -d, --num-variables <NUM_VARIABLES>
+          [default: 20]
+  -e, --evaluations <NUM_EVALUATIONS>
+          [default: 1]
+      --linear-constraints <NUM_LINEAR_CONSTRAINTS>
+          [default: 0]
+  -r, --rate <RATE>
+          [default: 1]
+      --reps <VERIFIER_REPETITIONS>
+          [default: 1000]
+  -i, --initfold <FIRST_ROUND_FOLDING_FACTOR>
+          [default: 4]
+  -k, --fold <FOLDING_FACTOR>
+          [default: 4]
+      --decoding-regime <DECODING_REGIME>
+          Reed–Solomon decoding regime: Unique, Johnson, or Capacity [default: Johnson]
+  -f, --field <FIELD>
+          [default: Goldilocks3]
+      --hash <HASH>
+          [default: Blake3]
+      --schedule <SCHEDULE>
+          Rate schedule: `stepping`, `capped:<max log inv rate>`, or `adaptive:<knee weight>` [default: stepping]
       --zk
-  -h, --help                                     Print help
-  -V, --version                                  Print version
+          Run in zero-knowledge mode. Requires Johnson decoding
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 Options:
