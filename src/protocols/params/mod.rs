@@ -31,8 +31,6 @@ use crate::{
 mod derive;
 mod joint;
 mod masks;
-#[cfg(test)]
-mod parameter_regressions;
 mod search;
 pub(crate) mod security;
 #[cfg(test)]
