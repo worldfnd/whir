@@ -1,5 +1,5 @@
 //! WHIR/ZOOK bounds from ProveKit §6.4 and Appendix A, pinned at 6605cf5242567e17899a26c27db829c7ce9eb478.
-use std::f64::consts::{LN_2, LOG2_10};
+use std::f64::consts::LN_2;
 
 use ark_ff::Field;
 
@@ -14,56 +14,10 @@ use crate::{
         irs_commit::{Config as Irs, IrsMode},
         proof_of_work::Config as Pow,
     },
+    soundness::decoding_distance,
 };
 type Target<M> = Irs<Identity<<M as Embedding>::Target>>;
 
-/// Return log2(1 - distance) for the given decoding regime and code rate.
-pub fn decoding_distance(policy: DecodingRegime, rho: f64) -> f64 {
-    match policy {
-        DecodingRegime::Unique => f64::midpoint(1.0, rho),
-        DecodingRegime::Johnson => rho.sqrt() + rho.sqrt() / 20.0,
-        DecodingRegime::Capacity => rho + rho / 20.0,
-    }
-    .log2()
-}
-
-/// Canonical [list size, log2(1-distance), log2(MCA error)].
-/// Johnson uses BCSS25 Theorem 1.5; Capacity uses STIR Conjecture 5.6.
-pub fn decoding(policy: DecodingRegime, rho: f64, length: usize, field: f64) -> [f64; 3] {
-    use DecodingRegime::{Capacity, Johnson, Unique};
-    let r = -rho.log2();
-    let d = (length as f64).log2();
-    let slack = if policy == Johnson {
-        rho.sqrt() / 20.0
-    } else {
-        rho / 20.0
-    };
-    let list = match policy {
-        Unique => 0.0,
-        Johnson => -1.0 - slack.log2() + 0.5 * r,
-        Capacity => d + r - slack.log2(),
-    };
-    let mca = match policy {
-        Unique => d + r,
-        Johnson => {
-            assert!(slack.log2() >= -(0.5 * r + LOG2_10 + 1.0) - 1e-6);
-            (2.0 * 10.5_f64.powi(5) / 3.0).log2() + d + 2.5 * r
-        }
-        Capacity => {
-            assert!(slack.log2() >= -(r + LOG2_10 + 1.0) - 1e-6);
-            d + 3.0 * r + LOG2_10 + 1.0
-        }
-    };
-    [
-        2_f64.powf(list),
-        decoding_distance(policy, rho),
-        mca - field,
-    ]
-}
-
-pub(super) fn rate(r: f64) -> f64 {
-    2_f64.powf(-r)
-}
 pub(super) const fn usize_to_f64(n: usize) -> f64 {
     n as f64
 }

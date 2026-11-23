@@ -10,6 +10,7 @@ use crate::{
     bits::Bits,
     hash::BLAKE3,
     protocols::irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
+    soundness::decoding,
 };
 
 pub(super) fn assert_close(actual: f64, expected: f64) {

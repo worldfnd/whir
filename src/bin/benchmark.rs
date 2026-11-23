@@ -16,8 +16,8 @@ use whir::{
     buffer::Buffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
-    protocols::params::{DecodingRegime, Mode, Params, ProtocolConfig, RateSchedule},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
+    DecodingRegime, Mode, Params, ProtocolConfig, RateSchedule,
 };
 
 #[derive(Parser, Debug)]

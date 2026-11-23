@@ -12,13 +12,13 @@ use crate::{
     algebra::{embedding::Embedding, random_vector},
     buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
-    protocols::{
-        irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
-        params::{JointMaskConfig, ProtocolConfig, WitnessMaskConfig},
-        zook::binding::{prove_binding, receive_binding, MaskBinding},
-    },
+    protocols::irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
     transcript::{
         Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,
+    },
+    whir::{
+        binding::{prove_binding, receive_binding, MaskBinding},
+        params::{JointMaskConfig, ProtocolConfig, WitnessMaskConfig},
     },
 };
 
@@ -288,11 +288,9 @@ mod tests {
             fields::{Field64, Field64_2},
             univariate_evaluate,
         },
-        protocols::{
-            irs_commit::Evaluations,
-            params::{Mode, Params, RateSchedule},
-        },
+        protocols::irs_commit::Evaluations,
         transcript::{codecs::Empty, DomainSeparator, VerifierMessage},
+        whir::params::{Mode, Params, RateSchedule},
     };
 
     type M = Basefield<Field64_2>;
@@ -301,7 +299,7 @@ mod tests {
         ProtocolConfig::derive(Params {
             bits: 80,
             mode,
-            regime: crate::protocols::params::DecodingRegime::Johnson,
+            regime: crate::soundness::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
             size: vector_size,

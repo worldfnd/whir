@@ -25,14 +25,8 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     engines::EngineId,
     hash::Hash,
-    protocols::{
-        challenge_indices::challenge_indices,
-        matrix_commit,
-        params::{
-            security::{decoding, decoding_distance},
-            DecodingRegime,
-        },
-    },
+    protocols::{challenge_indices::challenge_indices, matrix_commit},
+    soundness::{decoding, decoding_distance, DecodingRegime},
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
         VerifierMessage, VerifierState,

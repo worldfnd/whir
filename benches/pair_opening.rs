@@ -13,8 +13,8 @@ use whir::{
         random_vector,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    protocols::params::{JointOpeningConfig, Mode, Params, ProtocolConfig, RateSchedule},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
+    JointOpeningConfig, Mode, Params, ProtocolConfig, RateSchedule,
 };
 
 fn measure<M>(name: &str, log_size: u32, runs: usize)
@@ -27,7 +27,7 @@ where
     let params = Params {
         bits: 128,
         mode: Mode::ZeroKnowledge,
-        regime: whir::protocols::params::DecodingRegime::Johnson,
+        regime: whir::DecodingRegime::Johnson,
         pow: 0,
         hash: whir::hash::BLAKE3,
         size,

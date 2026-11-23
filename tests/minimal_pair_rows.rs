@@ -15,9 +15,9 @@ use whir::{
     protocols::{
         code_switch::mixed_fold_chunks,
         irs_commit::{Config, IrsMode, IrsParams},
-        params::DecodingRegime,
     },
     transcript::{codecs::Empty, DomainSeparator, ProverState},
+    DecodingRegime,
 };
 
 #[test]

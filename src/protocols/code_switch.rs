@@ -639,9 +639,9 @@ mod tests {
         hash::BLAKE3,
         protocols::{
             irs_commit::{IrsMode, IrsParams},
-            params::DecodingRegime,
             proof_of_work::Config as PowConfig,
         },
+        soundness::DecodingRegime,
         transcript::codecs::Empty,
     };
     use crate::{

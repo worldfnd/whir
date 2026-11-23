@@ -1,6 +1,6 @@
 //! Construction and execution use the same bounds and mask dimensions.
 use ark_ff::Field;
-use security::{grind_to_at, rate, round_bits, usize_to_f64};
+use security::{grind_to_at, round_bits, usize_to_f64};
 use thiserror::Error;
 
 use super::{
@@ -17,6 +17,7 @@ use crate::{
         irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
         sumcheck::{Config as SumcheckConfig, SumcheckMaskLen, SumcheckMode},
     },
+    soundness::rate,
     type_info::Typed,
 };
 

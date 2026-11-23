@@ -8,11 +8,11 @@ use crate::{
         embedding::{Embedding, Frobenius},
         univariate_evaluate,
     },
-    protocols::params::JointMaskConfig,
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
         VerifierState,
     },
+    whir::params::JointMaskConfig,
 };
 
 /// Three deferred equations on the committed joint-mask coefficients.
@@ -121,8 +121,8 @@ mod tests {
             fields::{Field64, Field64_2},
             linear_form::{Covector, Evaluate, UnivariateEvaluation},
         },
-        protocols::params::{Mode, Params, ProtocolConfig, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator, MockSponge},
+        whir::params::{Mode, Params, ProtocolConfig, RateSchedule},
     };
 
     fn binding_forms<F: Field>(
@@ -161,7 +161,7 @@ mod tests {
         ProtocolConfig::derive(Params {
             bits: 80,
             mode: Mode::ZeroKnowledge,
-            regime: crate::protocols::params::DecodingRegime::Johnson,
+            regime: crate::soundness::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
             size: 4096,

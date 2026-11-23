@@ -6,10 +6,7 @@
 //!
 //! [ProveKit whitepaper]: https://github.com/worldfnd/provekit/tree/6605cf5242567e17899a26c27db829c7ce9eb478/whitepaper
 
-use std::{
-    fmt::{self, Display, Formatter},
-    str::FromStr,
-};
+use std::str::FromStr;
 
 use ark_ff::Field;
 use ordered_float::OrderedFloat;
@@ -25,6 +22,7 @@ use crate::{
         proof_of_work::Config as PowConfig,
         sumcheck::Config as SumcheckConfig,
     },
+    soundness::DecodingRegime,
     type_info::Typed,
 };
 
@@ -102,18 +100,6 @@ struct RoundContext {
     size: usize,
     rate: u32,
     folds: u32,
-}
-/// Unique, Johnson, and conjectured capacity decoding bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DecodingRegime {
-    Unique,
-    Johnson,
-    Capacity,
-}
-impl Display for DecodingRegime {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
-    }
 }
 impl FromStr for DecodingRegime {
     type Err = DeriveError;

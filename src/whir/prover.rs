@@ -14,17 +14,15 @@ use crate::{
     },
     buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
-    protocols::{
-        params::ProtocolConfig,
-        zook::{
-            commit::CommittedWitness,
-            round::{reduce_prover, ProverRoundState},
-            ProverClaim,
-        },
-    },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerifierMessage,
+    },
+    whir::{
+        commit::CommittedWitness,
+        params::ProtocolConfig,
+        round::{reduce_prover, ProverRoundState},
+        ProverClaim,
     },
 };
 

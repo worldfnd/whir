@@ -12,13 +12,10 @@ use whir::{
     },
     buffer::Buffer,
     hash::Hash,
-    protocols::{
-        params::{DecodingRegime, Mode, Params, RateSchedule},
-        zook::{JointOpeningConfig, ProverClaim},
-    },
     transcript::{
         codecs::U64, Codec, DomainSeparator, Proof, ProverState, VerifierMessage, VerifierState,
     },
+    DecodingRegime, JointOpeningConfig, Mode, Params, ProverClaim, RateSchedule,
 };
 
 fn config<M: Embedding + Default>(mode: Mode, n: usize, first: usize) -> JointOpeningConfig<M> {

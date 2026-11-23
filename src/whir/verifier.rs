@@ -17,12 +17,6 @@ use crate::{
     protocols::{
         basecase::Opening,
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
-        params::ProtocolConfig,
-        zook::{
-            commit::Commitment,
-            round::{reduce_verifier, VerifierRoundState},
-            FinalClaim,
-        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, VerificationResult,
@@ -30,6 +24,12 @@ use crate::{
     },
     utils::zip_strict,
     verify,
+    whir::{
+        commit::Commitment,
+        params::ProtocolConfig,
+        round::{reduce_verifier, VerifierRoundState},
+        FinalClaim,
+    },
 };
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
@@ -190,11 +190,12 @@ mod tests {
             random_vector,
         },
         buffer::{Buffer, BufferMath, BufferOps},
-        protocols::{
-            params::{DecodingRegime, Mode, Params, RateSchedule},
-            zook::commit::CommittedWitness,
-        },
+        soundness::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState},
+        whir::{
+            commit::CommittedWitness,
+            params::{Mode, Params, RateSchedule},
+        },
     };
 
     #[test]

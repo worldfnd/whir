@@ -7,8 +7,9 @@ use zeroize::Zeroizing;
 use super::{
     binding::{prove_binding, receive_binding},
     commit::{overlay_mask, sample_masks, CommittedState, JointMaskWitness},
+    params::JointOpeningConfig,
     round::{reduce_prover, reduce_verifier},
-    Commitment, CommittedWitness, FinalClaim, JointOpeningConfig, ProverClaim,
+    Commitment, CommittedWitness, FinalClaim, ProverClaim,
 };
 use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},

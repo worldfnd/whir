@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{embedding::Identity, fields::Field64_2},
-        protocols::params::tests::{assert_close, code},
+        whir::params::tests::{assert_close, code},
     };
 
     #[test]

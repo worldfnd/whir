@@ -19,20 +19,19 @@ use crate::{
         basecase::Opening,
         code_switch::{Claim, CovectorUpdateParams},
         irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
-        params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
         sumcheck::SumcheckOpening,
-        zook::{
-            binding::MaskBinding,
-            claims::{sumcheck_blinding, MaskClaims},
-            commit::{
-                overlay_mask, Commitment, CommittedState, CommittedWitness, JointMaskWitness,
-            },
-            evaluate_padded, FinalClaim,
-        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerificationResult, VerifierMessage, VerifierState,
+    },
+    whir::{
+        binding::MaskBinding,
+        claims::{sumcheck_blinding, MaskClaims},
+        commit::{overlay_mask, Commitment, CommittedState, CommittedWitness, JointMaskWitness},
+        evaluate_padded,
+        params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
+        FinalClaim,
     },
 };
 
@@ -666,8 +665,9 @@ mod tests {
             linear_form::{Covector, Evaluate},
             random_vector, univariate_evaluate,
         },
-        protocols::params::{DecodingRegime, Mode, Params, RateSchedule},
+        soundness::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator},
+        whir::params::{Mode, Params, RateSchedule},
     };
 
     #[test]
