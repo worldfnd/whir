@@ -353,6 +353,32 @@ mod tests {
         full_roundtrip(&config, 4, 5, "roundtrip_multiple_claims_standard");
     }
 
+    /// Standard mode accepts every decoding regime and fold layout, including
+    /// Unique's fixed single OOD sample and folding factor 1.
+    #[test]
+    fn roundtrip_standard_all_regimes_and_folds() {
+        for (i, regime) in [
+            DecodingRegime::Unique,
+            DecodingRegime::Johnson,
+            DecodingRegime::Capacity,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (j, folds) in [[1, 1], [2, 3]].into_iter().enumerate() {
+                let config = ProtocolConfig::<SmallEmbed>::derive(Params {
+                    regime,
+                    folds,
+                    ..small_params(Mode::Standard, 1 << 12)
+                })
+                .unwrap();
+                assert!(config.has_rounds(), "expected at least one round");
+                let label = format!("roundtrip_standard_{regime}_{folds:?}");
+                full_roundtrip(&config, 2, 20 + (2 * i + j) as u64, &label);
+            }
+        }
+    }
+
     // ── Negative tests: input validation ─────────────────────────────────────
 
     #[test]
