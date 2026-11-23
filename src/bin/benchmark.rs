@@ -13,12 +13,10 @@ use whir::{
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
     },
-    bits::Bits,
     buffer::Buffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
-    parameters::ProtocolParameters,
-    protocols::params::DecodingRegime,
+    protocols::params::{DecodingRegime, Mode, Params, ProtocolConfig, RateSchedule},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -26,10 +24,10 @@ use whir::{
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short = 'l', long, default_value = "128")]
-    security_level: usize,
+    security_level: u32,
 
     #[arg(short = 'p', long, default_value = "20")]
-    pow_bits: usize,
+    pow_bits: u32,
 
     #[arg(short = 'd', long, default_value = "20")]
     num_variables: usize,
@@ -38,7 +36,7 @@ struct Args {
     num_evaluations: usize,
 
     #[arg(short = 'r', long, default_value = "1")]
-    rate: usize,
+    rate: u32,
 
     #[arg(long = "reps", default_value = "1000")]
     verifier_repetitions: usize,
@@ -61,9 +59,9 @@ struct Args {
 
 #[derive(Debug, Serialize)]
 struct BenchmarkOutput {
-    security_level: usize,
-    pow_bits: usize,
-    starting_rate: usize,
+    security_level: u32,
+    pow_bits: u32,
+    starting_rate: u32,
     num_variables: usize,
     repetitions: usize,
     initial_folding_factor: usize,
@@ -79,13 +77,6 @@ struct BenchmarkOutput {
     whir_prover_hashes: usize,
     whir_verifier_time: Duration,
     whir_verifier_hashes: usize,
-
-    // Whir LDT
-    whir_ldt_argument_size: usize,
-    whir_ldt_prover_time: Duration,
-    whir_ldt_prover_hashes: usize,
-    whir_ldt_verifier_time: Duration,
-    whir_ldt_verifier_hashes: usize,
 }
 
 fn main() {
@@ -124,84 +115,9 @@ where
 
     let num_coeffs = 1 << num_variables;
 
-    let whir_params = ProtocolParameters {
-        security_level,
-        pow_bits,
-        initial_folding_factor: first_round_folding_factor,
-        folding_factor,
-        decoding_regime,
-        starting_log_inv_rate: starting_rate,
-        batch_size: 1,
-        hash_id: args.hash.hash_id(),
-    };
-
-    let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
-
-    let (
-        whir_ldt_prover_time,
-        whir_ldt_argument_size,
-        whir_ldt_prover_hashes,
-        whir_ldt_verifier_time,
-        whir_ldt_verifier_hashes,
-    ) = {
-        // Run LDT
-        use whir::protocols::whir::Config;
-
-        let params = Config::<M>::new(1 << num_variables, &whir_params);
-        if !params.check_max_pow_bits(Bits::new(whir_params.pow_bits as f64)) {
-            println!("WARN: more PoW bits required than specified.");
-        }
-
-        let ds = DomainSeparator::protocol(&params)
-            .session(&format!("Example at {}:{}", file!(), line!()))
-            .instance(&Empty);
-
-        let mut prover_state = ProverState::new_std(&ds);
-
-        let whir_ldt_prover_time = Instant::now();
-
-        HASH_COUNTER.reset();
-
-        let vector_buffer = Buffer::from(vector.as_slice());
-        let witness = params.commit(&mut prover_state, &[&vector_buffer]);
-
-        let _ = params.prove(
-            &mut prover_state,
-            &[&vector_buffer],
-            vec![&witness],
-            vec![],
-            Buffer::from(vec![]),
-        );
-
-        let whir_ldt_prover_time = whir_ldt_prover_time.elapsed();
-        let proof = prover_state.proof();
-        let whir_ldt_argument_size = proof.narg_string.len() + proof.hints.len();
-        let whir_ldt_prover_hashes = HASH_COUNTER.get();
-
-        HASH_COUNTER.reset();
-        let whir_ldt_verifier_time = Instant::now();
-        let evaluations: Vec<M::Target> = Vec::new();
-        for _ in 0..reps {
-            let mut verifier_state = VerifierState::new_std(&ds, &proof);
-
-            let commitment = params.receive_commitment(&mut verifier_state).unwrap();
-            let final_claim = params
-                .verify(&mut verifier_state, &[&commitment], &evaluations)
-                .unwrap();
-            final_claim.verify([]).unwrap();
-        }
-
-        let whir_ldt_verifier_time = whir_ldt_verifier_time.elapsed();
-        let whir_ldt_verifier_hashes = HASH_COUNTER.get() / reps;
-
-        (
-            whir_ldt_prover_time,
-            whir_ldt_argument_size,
-            whir_ldt_prover_hashes,
-            whir_ldt_verifier_time,
-            whir_ldt_verifier_hashes,
-        )
-    };
+    let vector = (0..num_coeffs as u64)
+        .map(M::Source::from)
+        .collect::<Vec<_>>();
 
     let (
         whir_prover_time,
@@ -210,13 +126,18 @@ where
         whir_verifier_time,
         whir_verifier_hashes,
     ) = {
-        // Run PCS
-        use whir::protocols::whir::Config;
-
-        let params = Config::<M>::new(1 << num_variables, &whir_params);
-        if !params.check_max_pow_bits(Bits::new(whir_params.pow_bits as f64)) {
-            println!("WARN: more PoW bits required than specified.");
-        }
+        let params = ProtocolConfig::<M>::derive(Params {
+            mode: Mode::Standard,
+            regime: decoding_regime,
+            bits: security_level,
+            pow: pow_bits,
+            hash: args.hash.hash_id(),
+            size: num_coeffs,
+            rate: starting_rate,
+            folds: [first_round_folding_factor, folding_factor],
+            schedule: RateSchedule::Stepping,
+        })
+        .unwrap_or_else(|e| panic!("invalid parameters: {e:?}"));
 
         let ds = DomainSeparator::protocol(&params)
             .session(&format!("Example at {}:{}", file!(), line!()))
@@ -228,35 +149,25 @@ where
             .map(|i| vec![M::Target::from(i as u64); num_variables])
             .collect();
 
+        let embedding = M::default();
         let mut weights: Vec<Box<dyn Evaluate<M>>> = Vec::new();
         let mut evaluations = Vec::new();
 
         for point in &points {
             let linear_form = MultilinearExtension::new(point.clone());
-            evaluations.push(linear_form.evaluate(params.embedding(), &vector));
+            evaluations.push(linear_form.evaluate(&embedding, &vector));
             weights.push(Box::new(linear_form));
         }
+        let weights: Vec<&dyn LinearForm<M::Target>> = weights
+            .iter()
+            .map(|w| w.as_ref() as &dyn LinearForm<M::Target>)
+            .collect();
 
         HASH_COUNTER.reset();
         let whir_prover_time = Instant::now();
 
-        let vector_buffer = Buffer::from(vector.as_slice());
-        let witness = params.commit(&mut prover_state, &[&vector_buffer]);
-
-        let prove_linear_forms: Vec<Box<dyn LinearForm<M::Target>>> = points
-            .iter()
-            .map(|p| {
-                Box::new(MultilinearExtension::new(p.clone())) as Box<dyn LinearForm<M::Target>>
-            })
-            .collect();
-
-        let _ = params.prove(
-            &mut prover_state,
-            &[&vector_buffer],
-            vec![&witness],
-            prove_linear_forms,
-            Buffer::from(evaluations.as_slice()),
-        );
+        let committed = params.commit(&mut prover_state, Buffer::from(vector.as_slice()));
+        let _ = params.prove(&mut prover_state, committed, &weights, &evaluations);
 
         let whir_prover_time = whir_prover_time.elapsed();
         let proof = prover_state.proof();
@@ -270,15 +181,9 @@ where
 
             let commitment = params.receive_commitment(&mut verifier_state).unwrap();
             let final_claim = params
-                .verify(&mut verifier_state, &[&commitment], &evaluations)
+                .verify(&mut verifier_state, commitment, &weights, &evaluations)
                 .unwrap();
-            final_claim
-                .verify(
-                    weights
-                        .iter()
-                        .map(|w| w.as_ref() as &dyn LinearForm<M::Target>),
-                )
-                .unwrap();
+            final_claim.verify(&weights).unwrap();
         }
 
         let whir_verifier_time = whir_verifier_time.elapsed();
@@ -312,13 +217,6 @@ where
         whir_prover_hashes,
         whir_verifier_time,
         whir_verifier_hashes,
-
-        // Whir LDT
-        whir_ldt_prover_time,
-        whir_ldt_argument_size,
-        whir_ldt_prover_hashes,
-        whir_ldt_verifier_time,
-        whir_ldt_verifier_hashes,
     };
 
     let mut out_file = OpenOptions::new()

@@ -8,12 +8,10 @@ use whir::{
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
     },
-    bits::Bits,
     buffer::Buffer,
     cmdline_utils::{AvailableFields, AvailableHash},
     hash::HASH_COUNTER,
-    parameters::ProtocolParameters,
-    protocols::params::DecodingRegime,
+    protocols::params::{DecodingRegime, KneeWeight, Mode, Params, ProtocolConfig, RateSchedule},
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
 
@@ -21,11 +19,11 @@ use whir::{
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short = 'l', long, default_value = "128")]
-    security_level: usize,
+    security_level: u32,
 
     /// Maximum proof of work difficulty in bits.
     #[arg(short = 'p', long, default_value = "20")]
-    pow_bits: usize,
+    pow_bits: u32,
 
     #[arg(short = 'd', long, default_value = "20")]
     num_variables: usize,
@@ -37,7 +35,7 @@ struct Args {
     num_linear_constraints: usize,
 
     #[arg(short = 'r', long, default_value = "1")]
-    rate: usize,
+    rate: u32,
 
     #[arg(long = "reps", default_value = "1000")]
     verifier_repetitions: usize,
@@ -48,7 +46,7 @@ struct Args {
     #[arg(short = 'k', long = "fold", default_value = "4")]
     folding_factor: usize,
 
-    /// Reed–Solomon decoding regime: Unique or Johnson (list-decoding).
+    /// Reed–Solomon decoding regime: Unique, Johnson, or Capacity.
     #[arg(long = "decoding-regime", default_value = "Johnson")]
     decoding_regime: DecodingRegime,
 
@@ -57,6 +55,31 @@ struct Args {
 
     #[arg(long = "hash", default_value = "Blake3")]
     hash: AvailableHash,
+
+    /// Rate schedule: `stepping`, `capped:<max log inv rate>`, or `adaptive:<knee weight>`.
+    #[arg(long = "schedule", default_value = "stepping", value_parser = parse_schedule)]
+    schedule: RateSchedule,
+
+    /// Run in zero-knowledge mode. Requires Johnson decoding.
+    #[arg(long = "zk")]
+    zk: bool,
+}
+
+fn parse_schedule(s: &str) -> Result<RateSchedule, String> {
+    match s.split_once(':') {
+        None if s == "stepping" => Ok(RateSchedule::Stepping),
+        Some(("capped", cap)) => cap
+            .parse()
+            .map(RateSchedule::Capped)
+            .map_err(|e| format!("invalid cap: {e}")),
+        Some(("adaptive", weight)) => weight
+            .parse::<f64>()
+            .map(|w| RateSchedule::Adaptive(KneeWeight::from(w)))
+            .map_err(|e| format!("invalid knee weight: {e}")),
+        _ => Err(format!(
+            "invalid schedule: {s}, options are: stepping, capped:<u32>, adaptive:<f64>"
+        )),
+    }
 }
 
 fn main() {
@@ -82,39 +105,34 @@ where
     M: Embedding + Default,
     M::Target: Codec,
 {
-    use whir::protocols::whir::Config;
-
-    // Runs as a PCS
-    let security_level = args.security_level;
-    let pow_bits = args.pow_bits;
     let num_variables = args.num_variables;
-    let starting_rate = args.rate;
     let reps = args.verifier_repetitions;
-    let first_round_folding_factor = args.first_round_folding_factor;
-    let folding_factor = args.folding_factor;
-    let decoding_regime = args.decoding_regime;
     let num_evaluations = args.num_evaluations;
     let num_linear_constraints = args.num_linear_constraints;
-    let hash_id = args.hash.hash_id();
 
-    if num_evaluations + num_linear_constraints == 0 {
-        println!("No constraints specified, running as low-degree-test.");
-    }
+    assert!(
+        num_evaluations + num_linear_constraints > 0,
+        "WHIR requires at least one evaluation or linear constraint"
+    );
 
     let num_coeffs = 1 << num_variables;
 
-    let whir_params = ProtocolParameters {
-        security_level,
-        pow_bits,
-        initial_folding_factor: first_round_folding_factor,
-        folding_factor,
-        decoding_regime,
-        starting_log_inv_rate: starting_rate,
-        batch_size: 1,
-        hash_id,
-    };
-
-    let params = Config::<M>::new(1 << num_variables, &whir_params);
+    let params = ProtocolConfig::<M>::derive(Params {
+        mode: if args.zk {
+            Mode::ZeroKnowledge
+        } else {
+            Mode::Standard
+        },
+        regime: args.decoding_regime,
+        bits: args.security_level,
+        pow: args.pow_bits,
+        hash: args.hash.hash_id(),
+        size: num_coeffs,
+        rate: args.rate,
+        folds: [args.first_round_folding_factor, args.folding_factor],
+        schedule: args.schedule,
+    })
+    .unwrap_or_else(|e| panic!("invalid parameters: {e:?}"));
 
     let ds = DomainSeparator::protocol(&params)
         .session(&format!("Example at {}:{}", file!(), line!()))
@@ -123,55 +141,48 @@ where
     let mut prover_state = ProverState::new_std(&ds);
 
     println!("=========================================");
-    println!("Whir (PCS) 🌪️");
+    println!("Whir (PCS{}) 🌪️", if args.zk { " + ZK" } else { "" });
     println!("Field: {:?} and hash: {:?}", args.field, args.hash);
-    println!("{params}");
-    if !params.check_max_pow_bits(Bits::new(whir_params.pow_bits as f64)) {
-        println!("WARN: more PoW bits required than specified.");
-    }
+    println!("{:?}", params.params());
 
-    let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
-    let vector_buffer = Buffer::from(vector.as_slice());
+    let embedding = M::default();
+    let vector = (0..num_coeffs as u64)
+        .map(M::Source::from)
+        .collect::<Vec<_>>();
 
     let whir_commit_time = Instant::now();
-    let witness = params.commit(&mut prover_state, &[&vector_buffer]);
+    let committed = params.commit(&mut prover_state, Buffer::from(vector.as_slice()));
     let whir_commit_time = whir_commit_time.elapsed();
 
     // Allocate constraints
     let mut linear_forms: Vec<Box<dyn Evaluate<M>>> = Vec::new();
-    let mut prove_linear_forms: Vec<Box<dyn LinearForm<M::Target>>> = Vec::new();
     let mut evaluations = Vec::new();
 
     // Linear constraint
-    // We do these first to benefit from buffer recycling.
     for _ in 0..num_linear_constraints {
         let linear_form = Box::new(Covector {
-            vector: (0..num_coeffs).map(M::Target::from).collect(),
+            vector: (0..num_coeffs as u64).map(M::Target::from).collect(),
         });
-        evaluations.push(linear_form.evaluate(params.embedding(), &vector));
-        linear_forms.push(linear_form.clone());
-        prove_linear_forms.push(linear_form);
+        evaluations.push(linear_form.evaluate(&embedding, &vector));
+        linear_forms.push(linear_form);
     }
 
     // Evaluation constraint
-    let points: Vec<_> = (0..num_evaluations)
-        .map(|x| vec![M::Target::from(x as u64); num_variables])
-        .collect();
-    for point in &points {
-        let linear_form = Box::new(MultilinearExtension::new(point.clone()));
-        evaluations.push(linear_form.evaluate(params.embedding(), &vector));
-        linear_forms.push(linear_form.clone());
-        prove_linear_forms.push(linear_form);
+    for x in 0..num_evaluations {
+        let linear_form = Box::new(MultilinearExtension::new(vec![
+            M::Target::from(x as u64);
+            num_variables
+        ]));
+        evaluations.push(linear_form.evaluate(&embedding, &vector));
+        linear_forms.push(linear_form);
     }
+    let linear_forms: Vec<&dyn LinearForm<M::Target>> = linear_forms
+        .iter()
+        .map(|w| w.as_ref() as &dyn LinearForm<M::Target>)
+        .collect();
 
     let whir_prove_time = Instant::now();
-    let _ = params.prove(
-        &mut prover_state,
-        &[&vector_buffer],
-        vec![&witness],
-        prove_linear_forms,
-        Buffer::from(evaluations.as_slice()),
-    );
+    let _ = params.prove(&mut prover_state, committed, &linear_forms, &evaluations);
     let whir_prove_time = whir_prove_time.elapsed();
 
     let proof = prover_state.proof();
@@ -191,15 +202,9 @@ where
 
         let commitment = params.receive_commitment(&mut verifier_state).unwrap();
         let final_claim = params
-            .verify(&mut verifier_state, &[&commitment], &evaluations)
+            .verify(&mut verifier_state, commitment, &linear_forms, &evaluations)
             .unwrap();
-        final_claim
-            .verify(
-                linear_forms
-                    .iter()
-                    .map(|w| w.as_ref() as &dyn LinearForm<M::Target>),
-            )
-            .unwrap();
+        final_claim.verify(&linear_forms).unwrap();
     }
     println!(
         "Verifier time: {:.1?}",
