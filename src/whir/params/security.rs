@@ -1,4 +1,4 @@
-//! WHIR/ZOOK bounds from ProveKit §6.4 and Appendix A, pinned at 6605cf5242567e17899a26c27db829c7ce9eb478.
+//! WHIR standard and zero-knowledge bounds from ProveKit §6.4 and Appendix A, pinned at 6605cf5242567e17899a26c27db829c7ce9eb478.
 use std::f64::consts::LN_2;
 
 use ark_ff::Field;
@@ -44,24 +44,21 @@ pub(super) fn out_of_domain_bits(field: f64, n: usize) -> Result<f64> {
 }
 
 /// §5.3 preserves degree; Appendix A requires delta/2 <= theta < 1-sqrt(1-delta).
-pub(super) fn validate_zook_code<M: Embedding>(
-    code: &Irs<M>,
-    columns: Option<usize>,
-) -> Result<()> {
+pub(super) fn validate_zk_code<M: Embedding>(code: &Irs<M>, columns: Option<usize>) -> Result<()> {
     require(
         matches!(code.mode(), IrsMode::Standard) && code.regime() == DecodingRegime::Johnson,
-        "Zook requires standard IRS encoding and Johnson decoding",
+        "zero-knowledge mode requires standard IRS encoding and Johnson decoding",
     )?;
     let rho = code.rate();
     let theta = 1.0 - 2_f64.powf(decoding_distance(code.regime(), rho));
     let distance = 1.0 - rho + 1.0 / code.codeword_length() as f64;
     require(
         !(theta < distance / 2.0 || theta >= 1.0 - (1.0 - distance).sqrt()),
-        "invalid Zook proximity",
+        "invalid zero-knowledge proximity",
     )?;
     require(
         columns.is_none_or(|n| code.num_vectors() == n && code.interleaving_depth() == 1),
-        "invalid Zook columns",
+        "invalid zero-knowledge columns",
     )
 }
 
@@ -76,12 +73,12 @@ fn agreement<M: Embedding>(code: &Irs<M>) -> Bits {
 }
 
 /// §6.4 queries: L²*m/(2*(Q-n))+(1-theta)^s; aggregation: L*s/Q.
-pub(super) fn zook_query_error_bits<M: Embedding>(
+pub(super) fn zk_query_error_bits<M: Embedding>(
     source: &Irs<M>,
     target: &Target<M>,
 ) -> Result<(Bits, Bits)> {
-    validate_zook_code(source, None)?;
-    validate_zook_code(target, None)?;
+    validate_zk_code(source, None)?;
+    validate_zk_code(target, None)?;
     require(
         source.num_vectors() == 1
             && target.num_vectors() == 1
@@ -98,7 +95,7 @@ pub(super) fn zook_query_error_bits<M: Embedding>(
     ))
 }
 
-/// Per-step sumcheck and optional code-switch bounds. Final Zook sumcheck uses 2/Q.
+/// Per-step sumcheck and optional code-switch bounds. Final zero-knowledge sumcheck uses 2/Q.
 pub(super) fn round_bits<M: Embedding>(
     source: &Irs<M>,
     target: Option<&Target<M>>,
@@ -107,7 +104,7 @@ pub(super) fn round_bits<M: Embedding>(
 ) -> Result<(Bits, Option<Bits>)> {
     let field = M::Target::field_size_bits();
     let sumcheck = if mode.is_zk() {
-        validate_zook_code(source, target.is_none().then_some(1))?;
+        validate_zk_code(source, target.is_none().then_some(1))?;
         if target.is_some() {
             agreement(source)
         } else {
@@ -121,7 +118,7 @@ pub(super) fn round_bits<M: Embedding>(
         return Ok((sumcheck, None));
     };
     let switch = if mode.is_zk() {
-        let (queries, aggregation) = zook_query_error_bits(source, target)?;
+        let (queries, aggregation) = zk_query_error_bits(source, target)?;
         queries.min(aggregation)
     } else {
         let list = target.list_size();
@@ -144,8 +141,8 @@ pub(super) fn final_bits<F: Field>(
     witness: &Irs<Identity<F>>,
     masks: &Irs<Identity<F>>,
 ) -> Result<(Bits, Bits, Bits)> {
-    validate_zook_code(witness, Some(1))?;
-    validate_zook_code(masks, Some(2))?;
+    validate_zk_code(witness, Some(1))?;
+    validate_zk_code(masks, Some(2))?;
     let list = masks.list_size();
     let binding = bits(
         list.log2() + (list + 1.0).log2() - 1.0 + (masks.message_length() as f64).log2()
@@ -158,7 +155,7 @@ pub(super) fn final_bits<F: Field>(
     ))
 }
 
-/// Zook gets no grinding credit. Tighten rounded thresholds before checking the budget.
+/// Zero-knowledge mode gets no grinding credit. Tighten rounded thresholds before checking the budget.
 pub(super) fn grind_to_at(spec: &Params, analytic: Bits, label: &'static str) -> Result<Pow> {
     let target = Bits::new(f64::from(spec.bits));
     if spec.mode.is_zk() {

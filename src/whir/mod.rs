@@ -1,4 +1,5 @@
-//! Zook with overlaid witness masks and a joint mask commitment.
+//! WHIR opening in standard and zero-knowledge modes.
+//! Zero-knowledge mode uses overlaid witness masks and a joint mask commitment.
 
 mod binding;
 mod claims;
@@ -130,7 +131,7 @@ mod tests {
 
     /// Construct a deterministic `DomainSeparator` for the given label.
     fn make_ds(label: &str) -> DomainSeparator<'static, Empty> {
-        DomainSeparator::protocol(&"zook-test")
+        DomainSeparator::protocol(&"whir-test")
             .session(&label.to_string())
             .instance(&EMPTY)
     }
@@ -365,7 +366,7 @@ mod tests {
         let form: MultilinearExtension<SmallF> = MultilinearExtension {
             point: random_vector(&mut rng, mu),
         };
-        let ds = DomainSeparator::protocol(&"zook-test")
+        let ds = DomainSeparator::protocol(&"whir-test")
             .session(&"count-mismatch".to_string())
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -380,13 +381,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "zook requires ≥ 1")]
+    #[should_panic(expected = "whir requires ≥ 1")]
     fn prove_rejects_empty_forms() {
         let config =
             ProtocolConfig::<SmallEmbed>::derive(small_params(Mode::Standard, 1 << 12)).unwrap();
         let mut rng = StdRng::seed_from_u64(0);
         let witness = Buffer::<SmallF>::random(&mut rng, config.params().size);
-        let ds = DomainSeparator::protocol(&"zook-test")
+        let ds = DomainSeparator::protocol(&"whir-test")
             .session(&"empty-forms".to_string())
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -583,7 +584,7 @@ mod tests {
         let form_refs: Vec<&dyn LinearForm<LargeF>> =
             forms.iter().map(|f| f as &dyn LinearForm<LargeF>).collect();
 
-        let ds = DomainSeparator::protocol(&"zook-large-test")
+        let ds = DomainSeparator::protocol(&"whir-large-test")
             .session(&format!("three-claims mode={} seed={seed}", mode.is_zk()))
             .instance(&Empty);
 

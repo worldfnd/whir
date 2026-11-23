@@ -75,12 +75,12 @@ pub struct Commitment<F: Field> {
 }
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    /// Commit all Zook masks, then the padded witness with overlaid prefixes.
+    /// Commit all masks, then the padded witness with overlaid prefixes.
     ///
     /// Section 5.3, “Overlaid masks instead of zk-encoding”: each source polynomial
     /// is committed as `p + mask` with unchanged degree. Section 5.4, “ZO0K”,
     /// “The required masks”: every mask is sampled before folding starts.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::commit", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "whir::commit", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
     pub fn commit<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
@@ -93,7 +93,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        assert_eq!(witness.len(), self.params().size, "zook witness length",);
+        assert_eq!(witness.len(), self.params().size, "whir witness length");
 
         witness.resize_zeroed(self.padded_vector_size());
         let mut initial_mask = Zeroizing::new(Vec::new());
@@ -159,7 +159,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     }
 
     /// Verifier mirror of [`Self::commit`].
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::receive_commitment", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "whir::receive_commitment", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
     pub fn receive_commitment<H>(
         &self,
         vs: &mut VerifierState<H>,
@@ -316,7 +316,7 @@ mod tests {
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
         let witness = Buffer::<M::Source>::ones(config.params().size);
-        let ds = DomainSeparator::protocol(&"zook-commit-test")
+        let ds = DomainSeparator::protocol(&"whir-commit-test")
             .session(&"joint mask and witness commitment")
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -576,10 +576,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "zook witness length")]
+    #[should_panic(expected = "whir witness length")]
     fn commit_rejects_wrong_witness_size() {
         let config = config::<M>(Mode::ZeroKnowledge, 4096);
-        let ds = DomainSeparator::protocol(&"zook-commit-test")
+        let ds = DomainSeparator::protocol(&"whir-commit-test")
             .session(&"wrong witness size")
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);

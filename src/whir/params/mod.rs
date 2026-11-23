@@ -1,4 +1,4 @@
-//! Parameter selection for WHIR and Zook.
+//! Parameter selection for WHIR in standard and zero-knowledge modes.
 //!
 //! Requests contain user choices. Construction owns each commitment once and checks its bounds.
 //! Borrowed execution views use that canonical sequence; deserialization repeats construction.
@@ -39,7 +39,7 @@ pub use joint::JointOpeningConfig;
 type Result<T> = std::result::Result<T, DeriveError>;
 pub use masks::{JointMaskConfig, WitnessMaskConfig};
 
-/// Select standard WHIR or Zook with overlaid masks.
+/// Select standard WHIR or zero-knowledge WHIR with overlaid masks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
     Standard,
@@ -58,7 +58,7 @@ pub struct Params {
     pub regime: DecodingRegime,
     /// Required security bits for each checked protocol step.
     pub bits: u32,
-    /// Maximum grinding bits per step; Zook receives no grinding credit.
+    /// Maximum grinding bits per step; zero-knowledge mode receives no grinding credit.
     pub pow: u32,
     pub hash: EngineId,
     pub size: usize,
@@ -179,7 +179,7 @@ impl<M: Embedding> ProtocolConfig<M> {
     pub fn final_commit(&self) -> &IrsConfig<Identity<M::Target>> {
         self.targets.last().expect("final commitment")
     }
-    /// Standard terminal primitive; Zook uses only its sumcheck after blinding the final claim.
+    /// Standard terminal primitive; zero-knowledge mode uses only its sumcheck after blinding the final claim.
     pub(crate) fn basecase(&self) -> BasecaseConfig<'_, M::Target> {
         BasecaseConfig::new(
             self.final_commit(),

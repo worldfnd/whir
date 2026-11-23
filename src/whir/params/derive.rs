@@ -29,7 +29,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     pub fn derive(spec: Params) -> Result<Self> {
         require(
             !spec.mode.is_zk() || spec.regime == DecodingRegime::Johnson,
-            "Zook requires Johnson decoding",
+            "zero-knowledge mode requires Johnson decoding",
         )?;
         let layout = round_layout::<M>(&spec)?;
         Self::build(&spec, &layout)
@@ -269,7 +269,7 @@ pub(super) fn solve_with_num_vectors<M: Embedding + Default>(
     if rate == 0.0 {
         return Err(DeriveError("dimension overflow"));
     }
-    // Zook query steps sum two error terms; reserve half the error budget
+    // Zero-knowledge query steps sum two error terms; reserve half the error budget
     // for the in-domain term. No grinding credit is used for these IOP bounds.
     let security_target = if spec.mode.is_zk() {
         f64::from(spec.bits) + 1.0

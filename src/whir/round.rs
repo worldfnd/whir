@@ -1,4 +1,4 @@
-//! Joint-mask claim reduction through Zook folding rounds.
+//! Joint-mask claim reduction through WHIR folding rounds.
 
 use std::any::Any;
 
@@ -306,7 +306,7 @@ where
         evaluations.len(),
         "linear_forms.len() != evaluations.len()"
     );
-    assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
+    assert!(!forms.is_empty(), "whir requires ≥ 1 linear form");
     let claim_weights = geometric_sequence(M::Target::ONE, ps.verifier_message(), forms.len());
     let mut covector = vec![M::Target::ZERO; config.padded_vector_size()];
     for (form, &weight) in forms.iter().zip(&claim_weights) {
@@ -419,7 +419,7 @@ where
         evaluations.len(),
         "linear_forms.len() != evaluations.len()"
     );
-    assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
+    assert!(!forms.is_empty(), "whir requires ≥ 1 linear form");
     assert!(forms.iter().all(|form| form.size() <= config.params().size));
     let claim_weights = geometric_sequence(M::Target::ONE, vs.verifier_message(), forms.len());
     let sum = evaluations

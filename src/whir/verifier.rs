@@ -1,4 +1,4 @@
-//! Zook verifier: replay joint-mask rounds, then check the final opening.
+//! WHIR verifier: replay joint-mask rounds, then check the final opening.
 
 use ark_ff::{Field, Zero};
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
@@ -34,7 +34,7 @@ use crate::{
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Verify the supplied linear evaluations against the received commitment.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify"))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "whir::verify"))]
     pub fn verify<H>(
         &self,
         vs: &mut VerifierState<H>,

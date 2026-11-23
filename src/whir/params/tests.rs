@@ -38,7 +38,7 @@ fn adaptive_weight_preserves_normalization() {
 struct UnregisteredFieldConfig;
 
 #[test]
-fn unsupported_zook_regime_fails_before_ntt_lookup() {
+fn unsupported_zk_regime_fails_before_ntt_lookup() {
     type F = ark_ff::Fp64<ark_ff::MontBackend<UnregisteredFieldConfig, 1>>;
     for regime in [Unique, Capacity] {
         let result = ProtocolConfig::<Identity<F>>::derive(Params {
@@ -54,7 +54,7 @@ fn unsupported_zook_regime_fails_before_ntt_lookup() {
         });
         assert_eq!(
             result.unwrap_err(),
-            DeriveError("Zook requires Johnson decoding")
+            DeriveError("zero-knowledge mode requires Johnson decoding")
         );
     }
 }
@@ -112,7 +112,7 @@ fn independent_decoding_and_probability_anchors() {
 }
 
 #[test]
-fn zook_equations_and_hypotheses() {
+fn zk_equations_and_hypotheses() {
     let source = code::<Basefield<Field64_2>>(256, 4, 0.25, 1);
     let target = code::<Identity<Field64_2>>(64, 2, 0.125, 1);
     let witness = code::<Identity<Field64_2>>(64, 1, 0.25, 1);
@@ -120,7 +120,7 @@ fn zook_equations_and_hypotheses() {
     // Independent §6.4 probabilities with p=18446744069414584321, Q=p², and 87 queries.
     // Agreement: L*((2/3)*L^4*rho+1)*n/Q; DEEP: L²*m/(2*(Q-n)).
     // Binding: L*(L+1)*m/(2*(Q-1)); final queries sum two equal errors.
-    let (queries, aggregation) = zook_query_error_bits(&source, &target).unwrap();
+    let (queries, aggregation) = zk_query_error_bits(&source, &target).unwrap();
     let (sumcheck, _) = round_bits(&source, Some(&target), 1, Mode::ZeroKnowledge).unwrap();
     let (binding, combination, final_queries) = final_bits(&witness, &masks).unwrap();
     for (actual, expected) in [
@@ -137,13 +137,13 @@ fn zook_equations_and_hypotheses() {
         for depth in [1, 2] {
             let code = code::<Identity<Field64_2>>(128, depth, 0.25, vectors);
             assert_eq!(
-                validate_zook_code(&code, Some(2)).is_ok(),
+                validate_zk_code(&code, Some(2)).is_ok(),
                 vectors == 2 && depth == 1
             );
         }
     }
-    assert!(validate_zook_code(&code::<Identity<Field64>>(2, 1, 0.5, 1), None).is_err());
-    assert!(zook_query_error_bits(&source, &code::<Identity<Field64_2>>(32, 1, 0.25, 1)).is_err());
+    assert!(validate_zk_code(&code::<Identity<Field64>>(2, 1, 0.5, 1), None).is_err());
+    assert!(zk_query_error_bits(&source, &code::<Identity<Field64_2>>(32, 1, 0.25, 1)).is_err());
 }
 
 #[test]
