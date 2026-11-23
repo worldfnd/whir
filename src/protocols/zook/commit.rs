@@ -80,7 +80,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Section 5.3, “Overlaid masks instead of zk-encoding”: each source polynomial
     /// is committed as `p + mask` with unchanged degree. Section 5.4, “ZO0K”,
     /// “The required masks”: every mask is sampled before folding starts.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::commit", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::commit", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
     pub fn commit<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
@@ -93,11 +93,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        assert_eq!(
-            witness.len(),
-            self.tuning().vector_size,
-            "zook witness length",
-        );
+        assert_eq!(witness.len(), self.params().size, "zook witness length",);
 
         witness.resize_zeroed(self.padded_vector_size());
         let mut initial_mask = Zeroizing::new(Vec::new());
@@ -105,10 +101,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             let (coefficients, source_mask) =
                 sample_masks::<M, _>(config, self.has_rounds(), ps.rng());
             initial_mask = source_mask;
-            let opening_blinder = Buffer::random(ps.rng(), config.commit().vector_size());
-            let irs_witness = config
-                .commit()
-                .commit(ps, &[&coefficients, &opening_blinder]);
+            let opening_blinder = Buffer::random(ps.rng(), config.commit.vector_size());
+            let irs_witness = config.commit.commit(ps, &[&coefficients, &opening_blinder]);
             JointMaskWitness {
                 coefficients,
                 opening_blinder,
@@ -128,10 +122,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             });
 
         let state = if let Some(round) = self.first_round() {
-            if let Some(masks) = round.masks() {
-                witness = overlay_mask(witness, &initial_mask, masks.witness);
+            if let Some(masks) = round.masks {
+                witness = overlay_mask(witness, &initial_mask, masks);
             }
-            let irs_witness = round.code_switch().source().commit(ps, &[&witness]);
+            let irs_witness = round.code_switch.source().commit(ps, &[&witness]);
             CommittedState::Round {
                 message: witness,
                 irs_witness,
@@ -143,15 +137,15 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             if let (Some(config), Some(joint), Some(mask)) = (
                 self.joint_masks(),
                 joint_masks.as_ref(),
-                self.basecase().witness_mask(),
+                self.witness_mask(0),
             ) {
                 message = overlay_mask(
                     message,
-                    &joint.coefficients.to_slice()[config.witness_masks()[0].clone()],
-                    *mask,
+                    &joint.coefficients.to_slice()[config.witness_masks[0].clone()],
+                    mask,
                 );
             }
-            let irs_witness = self.basecase().commit().commit(ps, &[&message]);
+            let irs_witness = self.final_commit().commit(ps, &[&message]);
             CommittedState::Basecase {
                 message,
                 irs_witness,
@@ -165,7 +159,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     }
 
     /// Verifier mirror of [`Self::commit`].
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::receive_commitment", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::receive_commitment", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
     pub fn receive_commitment<H>(
         &self,
         vs: &mut VerifierState<H>,
@@ -177,15 +171,15 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     {
         let joint_masks = self
             .joint_masks()
-            .map(|config| config.commit().receive_commitment(vs))
+            .map(|config| config.commit.receive_commitment(vs))
             .transpose()?;
         let mask_binding = self
             .joint_masks()
             .map(|_| receive_binding(self.mask_source_degree(), vs))
             .transpose()?;
         let irs = match self.first_round() {
-            Some(round) => round.code_switch().source().receive_commitment(vs)?,
-            None => self.basecase().commit().receive_commitment(vs)?,
+            Some(round) => round.code_switch.source().receive_commitment(vs)?,
+            None => self.final_commit().receive_commitment(vs)?,
         };
         Ok(Commitment {
             irs,
@@ -218,12 +212,12 @@ where
     R: RngCore + CryptoRng,
     Standard: Distribution<M::Source> + Distribution<M::Target>,
 {
-    let mut coefficients = vec![M::Target::ZERO; config.commit().vector_size()];
+    let mut coefficients = vec![M::Target::ZERO; config.commit.vector_size()];
     for range in config
-        .sumcheck_masks()
+        .sumcheck_masks
         .iter()
-        .chain(config.witness_masks().iter().skip(usize::from(has_rounds)))
-        .chain(once(config.blinder()))
+        .chain(config.witness_masks.iter().skip(usize::from(has_rounds)))
+        .chain(once(&config.blinder))
     {
         for coefficient in &mut coefficients[range.clone()] {
             *coefficient = rng.gen();
@@ -231,7 +225,7 @@ where
     }
     let embedding = M::default();
     let initial_mask = if has_rounds {
-        let range = config.witness_masks()[0].clone();
+        let range = config.witness_masks[0].clone();
         let mask = Zeroizing::new(random_vector::<M::Source>(&mut *rng, range.len()));
         for (coefficient, &value) in coefficients[range].iter_mut().zip(mask.iter()) {
             *coefficient = embedding.map(value);
@@ -240,7 +234,7 @@ where
     } else {
         Zeroizing::new(Vec::new())
     };
-    for coefficient in &mut coefficients[config.basefield_blinder().clone()] {
+    for coefficient in &mut coefficients[config.basefield_blinder.clone()] {
         *coefficient = if has_rounds {
             embedding.map(rng.gen())
         } else {
@@ -296,7 +290,7 @@ mod tests {
         },
         protocols::{
             irs_commit::Evaluations,
-            params::{FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec},
+            params::{Mode, Params, RateSchedule},
         },
         transcript::{codecs::Empty, DomainSeparator, VerifierMessage},
     };
@@ -304,17 +298,17 @@ mod tests {
     type M = Basefield<Field64_2>;
 
     fn config<M: Embedding + Default>(mode: Mode, vector_size: usize) -> ProtocolConfig<M> {
-        ProtocolConfig::derive(
-            SecuritySpec::new(80)
-                .with_mode(mode)
-                .with_pow_budget(PowBudget::Forbidden),
-            TuningSpec {
-                vector_size,
-                starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
-                rate_schedule: RateSchedule::Stepping,
-            },
-        )
+        ProtocolConfig::derive(Params {
+            bits: 80,
+            mode,
+            regime: crate::protocols::params::DecodingRegime::Johnson,
+            pow: 0,
+            hash: crate::hash::BLAKE3,
+            size: vector_size,
+            rate: 2,
+            folds: [2, 2],
+            schedule: RateSchedule::Stepping,
+        })
         .unwrap()
     }
 
@@ -323,26 +317,26 @@ mod tests {
         M::Target: Codec<[u8]>,
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
-        let witness = Buffer::<M::Source>::ones(config.tuning().vector_size);
+        let witness = Buffer::<M::Source>::ones(config.params().size);
         let ds = DomainSeparator::protocol(&"zook-commit-test")
             .session(&"joint mask and witness commitment")
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
         let committed = config.commit(&mut ps, witness);
         if let Some((layout, masks)) = config.joint_masks().zip(committed.joint_masks.as_ref()) {
-            let _ = layout.commit().open(&mut ps, &[&masks.irs_witness]);
+            let _ = layout.commit.open(&mut ps, &[&masks.irs_witness]);
         }
         match &committed.state {
             CommittedState::Round { irs_witness, .. } => {
                 let _ = config
                     .first_round()
                     .unwrap()
-                    .code_switch()
+                    .code_switch
                     .source()
                     .open(&mut ps, &[irs_witness]);
             }
             CommittedState::Basecase { irs_witness, .. } => {
-                let _ = config.basecase().commit().open(&mut ps, &[irs_witness]);
+                let _ = config.final_commit().open(&mut ps, &[irs_witness]);
             }
         }
         let prover_challenge: M::Target = ps.verifier_message();
@@ -372,7 +366,7 @@ mod tests {
         );
         if let Some(layout) = config.joint_masks() {
             let values = layout
-                .commit()
+                .commit
                 .verify(&mut vs, &[received.joint_masks.as_ref().unwrap()])
                 .unwrap();
             let joint = committed.joint_masks.as_ref().unwrap();
@@ -394,14 +388,13 @@ mod tests {
         }
         match &committed.state {
             CommittedState::Round { message, .. } => {
-                let code = config.first_round().unwrap().code_switch().source();
+                let code = config.first_round().unwrap().code_switch.source();
                 let values = code.verify(&mut vs, &[&received.irs]).unwrap();
                 assert_openings(&values, message, code.interleaving_depth());
             }
             CommittedState::Basecase { message, .. } => {
                 let values = config
-                    .basecase()
-                    .commit()
+                    .final_commit()
                     .verify(&mut vs, &[&received.irs])
                     .unwrap();
                 assert_openings(&values, message, 1);
@@ -452,8 +445,8 @@ mod tests {
         let joint = committed.joint_masks.as_ref().unwrap();
         let layout = config.joint_masks().unwrap();
         let round = config.first_round().unwrap();
-        let mask = round.masks().unwrap().witness;
-        let range = layout.witness_masks()[0].clone();
+        let mask = round.masks.unwrap();
+        let range = layout.witness_masks[0].clone();
         let CommittedState::Round {
             message,
             irs_witness,
@@ -464,7 +457,7 @@ mod tests {
         assert_eq!(message.len(), config.padded_vector_size());
         assert!(irs_witness.masks.is_empty());
         assert!(joint.irs_witness.masks.is_empty());
-        let block_len = round.code_switch().source().message_length();
+        let block_len = round.code_switch.source().message_length();
         for (index, &value) in message.to_slice().iter().enumerate() {
             let column = index / block_len;
             let coefficient = index % block_len;
@@ -485,7 +478,7 @@ mod tests {
         let committed = roundtrip(&config);
         let joint = committed.joint_masks.as_ref().unwrap();
         let layout = config.joint_masks().unwrap();
-        let range = layout.witness_masks()[0].clone();
+        let range = layout.witness_masks[0].clone();
         let CommittedState::Basecase {
             message,
             irs_witness,
@@ -494,7 +487,7 @@ mod tests {
             panic!("expected a basecase-only commitment");
         };
         assert_eq!(message.len(), config.padded_vector_size());
-        assert!(message.len() > config.tuning().vector_size);
+        assert!(message.len() > config.params().size);
         assert!(irs_witness.masks.is_empty());
         for (index, &value) in message.to_slice().iter().enumerate() {
             let original = if index < 8 {
@@ -517,29 +510,29 @@ mod tests {
         let layout = config.joint_masks().unwrap();
         let mut rng = StdRng::seed_from_u64(17);
         let (mut coefficients, initial) = sample_masks::<M, _>(layout, true, &mut rng);
-        let first = layout.witness_masks()[0].clone();
+        let first = layout.witness_masks[0].clone();
         for (&value, &source) in coefficients.to_slice()[first.clone()]
             .iter()
             .zip(initial.iter())
         {
             assert_eq!(value, M::default().map(source));
         }
-        for range in [first, layout.basefield_blinder().clone()] {
+        for range in [first, layout.basefield_blinder.clone()] {
             assert!(coefficients.to_slice()[range]
                 .iter()
                 .all(|value| value.frobenius_map(1) == *value));
         }
         for range in layout
-            .sumcheck_masks()
+            .sumcheck_masks
             .iter()
-            .chain(layout.witness_masks().iter().skip(1))
-            .chain(once(layout.blinder()))
+            .chain(layout.witness_masks.iter().skip(1))
+            .chain(once(&layout.blinder))
         {
             assert!(coefficients.to_slice()[range.clone()]
                 .iter()
                 .any(|value| value.frobenius_map(1) != *value));
         }
-        assert!(coefficients.to_slice()[layout.basefield_blinder().end..]
+        assert!(coefficients.to_slice()[layout.basefield_blinder.end..]
             .iter()
             .all(|value| *value == Field64_2::ZERO));
         coefficients.wipe();

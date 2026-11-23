@@ -311,7 +311,7 @@ where
     let claim_weights = geometric_sequence(M::Target::ONE, ps.verifier_message(), forms.len());
     let mut covector = vec![M::Target::ZERO; config.padded_vector_size()];
     for (form, &weight) in forms.iter().zip(&claim_weights) {
-        assert!(form.size() <= config.tuning().vector_size);
+        assert!(form.size() <= config.params().size);
         form.accumulate(&mut covector[..form.size()], weight);
     }
     let sum = evaluations
@@ -326,9 +326,9 @@ where
         committed.mask_binding,
     ) {
         (Some(layout), Some(mask), Some(joint), Some(binding)) => {
-            let mut claims = MaskClaims::new(layout.commit().vector_size());
+            let mut claims = MaskClaims::new(layout.commit.vector_size());
             claims.subtract_witness_mask(
-                layout.witness_masks()[0].clone(),
+                layout.witness_masks[0].clone(),
                 mask,
                 config.padded_vector_size() / mask.num_polynomials,
                 |index| covector[index],
@@ -366,7 +366,7 @@ where
             },
             Some(first),
         ) => prove_round(
-            first,
+            &first,
             second,
             ProverRoundState::<M> {
                 message,
@@ -384,12 +384,12 @@ where
     };
     for round in config.tail_rounds() {
         state = prove_round(
-            round,
+            &round,
             None,
             state,
             config
                 .joint_masks()
-                .zip(config.witness_mask(round.round_index() + 1)),
+                .zip(config.witness_mask(round.index + 1)),
             ps,
         );
     }
@@ -421,9 +421,7 @@ where
         "linear_forms.len() != evaluations.len()"
     );
     assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
-    assert!(forms
-        .iter()
-        .all(|form| form.size() <= config.tuning().vector_size));
+    assert!(forms.iter().all(|form| form.size() <= config.params().size));
     let claim_weights = geometric_sequence(M::Target::ONE, vs.verifier_message(), forms.len());
     let sum = evaluations
         .iter()
@@ -445,11 +443,11 @@ where
         commitment.mask_binding,
     ) {
         (Some(layout), Some(mask), Some(joint), Some(binding)) => {
-            let mut claims = MaskClaims::new(layout.commit().vector_size());
+            let mut claims = MaskClaims::new(layout.commit.vector_size());
             let coefficients = kernel.mask_coefficients(mask);
             let message_length = config.padded_vector_size() / mask.num_polynomials;
             claims.subtract_witness_mask(
-                layout.witness_masks()[0].clone(),
+                layout.witness_masks[0].clone(),
                 mask,
                 message_length,
                 |index| {
@@ -474,7 +472,7 @@ where
     };
     if let Some(first) = config.first_round() {
         verify_round(
-            first,
+            &first,
             second,
             &mut state,
             config.joint_masks().zip(config.witness_mask(1)),
@@ -483,12 +481,12 @@ where
     }
     for round in config.tail_rounds() {
         verify_round(
-            round,
+            &round,
             None,
             &mut state,
             config
                 .joint_masks()
-                .zip(config.witness_mask(round.round_index() + 1)),
+                .zip(config.witness_mask(round.index + 1)),
             vs,
         )?;
     }
@@ -515,23 +513,23 @@ where
     Hash: ProverMessage<[H::U]>,
 {
     assert_eq!(state.masks.is_some(), mask_plan.is_some());
-    let index = round.round_index();
-    let remaining_size = round.sumcheck().final_size();
+    let index = round.index;
+    let remaining_size = round.sumcheck.final_size();
     let carried = state.masks.as_ref().map_or(M::Target::ZERO, |masks| {
         masks.claims.evaluate(masks.joint.coefficients.to_slice())
     });
     let blinding = match state.masks.as_ref().zip(mask_plan) {
         Some((masks, (layout, _))) => sumcheck_blinding(
-            &masks.joint.coefficients.to_slice()[layout.sumcheck_masks()[index].clone()],
+            &masks.joint.coefficients.to_slice()[layout.sumcheck_masks[index].clone()],
             remaining_size,
         ),
         None => Zeroizing::new(Vec::new()),
     };
     // The generic prover accepts the dot and carried terms separately.
     state.sum -= carried;
-    let (mut message, opening) = round.sumcheck().prove_with_carried_sum(
+    let (mut message, opening) = round.sumcheck.prove_with_carried_sum(
         ps,
-        round.code_switch().source().embedding(),
+        round.code_switch.source().embedding(),
         state.message,
         &mut state.covector,
         &mut state.sum,
@@ -545,21 +543,21 @@ where
         .extend_from_slice(&opening.round_challenges);
     if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {
         masks.claims.fold_sumcheck(
-            layout.sumcheck_masks()[index].clone(),
+            layout.sumcheck_masks[index].clone(),
             remaining_size,
             &opening,
         );
         message = overlay_mask(
             message,
-            &masks.joint.coefficients.to_slice()[layout.witness_masks()[index + 1].clone()],
+            &masks.joint.coefficients.to_slice()[layout.witness_masks[index + 1].clone()],
             next_mask,
         );
     }
     let (source, witnesses) = match second {
         Some((source, right)) => (source, vec![state.irs_witness, right]),
-        None => (round.code_switch().source(), vec![state.irs_witness]),
+        None => (round.code_switch.source(), vec![state.irs_witness]),
     };
-    let switched = round.code_switch().prove(
+    let switched = round.code_switch.prove(
         ps,
         message,
         source,
@@ -573,9 +571,9 @@ where
     );
     if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {
         masks.claims.subtract_target_mask(
-            layout.witness_masks()[index + 1].clone(),
+            layout.witness_masks[index + 1].clone(),
             next_mask,
-            round.code_switch().target().message_length(),
+            round.code_switch.target().message_length(),
             &switched.update,
             |coefficient| state.covector.to_slice()[coefficient],
         );
@@ -616,21 +614,21 @@ where
     Hash: ProverMessage<[H::U]>,
 {
     assert_eq!(state.masks.is_some(), mask_plan.is_some());
-    let index = round.round_index();
-    let opening = round.sumcheck().verify(vs, &mut state.sum)?;
+    let index = round.index;
+    let opening = round.sumcheck.verify(vs, &mut state.sum)?;
     state.kernel.fold(&opening);
     if let Some((masks, (layout, _))) = state.masks.as_mut().zip(mask_plan) {
         masks.claims.fold_sumcheck(
-            layout.sumcheck_masks()[index].clone(),
+            layout.sumcheck_masks[index].clone(),
             state.kernel.size,
             &opening,
         );
     }
     let (source, roots) = match second {
         Some((source, right)) => (source, vec![&state.irs, right]),
-        None => (round.code_switch().source(), vec![&state.irs]),
+        None => (round.code_switch.source(), vec![&state.irs]),
     };
-    let (irs, update) = round.code_switch().verify_for_implicit(
+    let (irs, update) = round.code_switch.verify_for_implicit(
         vs,
         &mut state.sum,
         &opening.round_challenges,
@@ -640,9 +638,9 @@ where
     state.kernel.aggregate(&update);
     if let Some((masks, (layout, next_mask))) = state.masks.as_mut().zip(mask_plan) {
         let coefficients = state.kernel.mask_coefficients(next_mask);
-        let message_length = round.code_switch().target().message_length();
+        let message_length = round.code_switch.target().message_length();
         masks.claims.subtract_target_mask(
-            layout.witness_masks()[index + 1].clone(),
+            layout.witness_masks[index + 1].clone(),
             next_mask,
             message_length,
             &update,
@@ -668,9 +666,7 @@ mod tests {
             linear_form::{Covector, Evaluate},
             random_vector, univariate_evaluate,
         },
-        protocols::params::{
-            FoldingFactor, Mode, PowBudget, RateSchedule, SecuritySpec, TuningSpec,
-        },
+        protocols::params::{DecodingRegime, Mode, Params, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator},
     };
 
@@ -772,17 +768,17 @@ mod tests {
     ) where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
-        let config = ProtocolConfig::<M>::derive(
-            SecuritySpec::new(80)
-                .with_mode(mode)
-                .with_pow_budget(PowBudget::Forbidden),
-            TuningSpec {
-                vector_size: size,
-                starting_log_inv_rate: 2,
-                folding_factor: FoldingFactor::Constant(2),
-                rate_schedule: RateSchedule::Stepping,
-            },
-        )
+        let config = ProtocolConfig::<M>::derive(Params {
+            bits: 80,
+            mode,
+            regime: DecodingRegime::Johnson,
+            pow: 0,
+            hash: crate::hash::BLAKE3,
+            size,
+            rate: 2,
+            folds: [2, 2],
+            schedule: RateSchedule::Stepping,
+        })
         .unwrap();
         if size == 4096 {
             assert!(config.num_rounds() >= 2);
@@ -815,7 +811,7 @@ mod tests {
             .commit()
             .open(&mut ps, &[&state.irs_witness]);
         if let Some((layout, masks)) = config.joint_masks().zip(state.masks.as_ref()) {
-            let _ = layout.commit().open(&mut ps, &[&masks.joint.irs_witness]);
+            let _ = layout.commit.open(&mut ps, &[&masks.joint.irs_witness]);
         }
         let challenge: Field64_2 = ps.verifier_message();
         let proof = ps.proof();
@@ -862,13 +858,8 @@ mod tests {
         let folds = config
             .first_round()
             .into_iter()
-            .map(|r| r.sumcheck().num_rounds())
-            .chain(
-                config
-                    .tail_rounds()
-                    .iter()
-                    .map(|r| r.sumcheck().num_rounds()),
-            );
+            .map(|r| r.sumcheck.num_rounds())
+            .chain(config.tail_rounds().map(|r| r.sumcheck.num_rounds()));
         let mut offset = 0;
         for (index, count) in folds.enumerate() {
             for &challenge in &state.challenges[offset..offset + count] {
@@ -878,7 +869,7 @@ mod tests {
             if let Some((layout, masks)) = config.joint_masks().zip(state.masks.as_ref()) {
                 expected = overlay_mask(
                     expected,
-                    &masks.joint.coefficients.to_slice()[layout.witness_masks()[index + 1].clone()],
+                    &masks.joint.coefficients.to_slice()[layout.witness_masks[index + 1].clone()],
                     config.witness_mask(index + 1).unwrap(),
                 );
             }
@@ -901,7 +892,7 @@ mod tests {
                     state.sum,
                     state.message.dot(&state.covector) + checked.claims.evaluate(coefficients)
                 );
-                let evaluations = layout.commit().verify(vs, &[&checked.joint]).unwrap();
+                let evaluations = layout.commit.verify(vs, &[&checked.joint]).unwrap();
                 assert_eq!(evaluations.matrix.len(), 2 * evaluations.points.len());
                 for (&point, row) in evaluations
                     .points

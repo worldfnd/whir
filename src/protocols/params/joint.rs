@@ -6,9 +6,7 @@ use crate::{
     algebra::embedding::Embedding,
     protocols::{
         irs_commit::Config,
-        params::{
-            DeriveError, FoldingFactor, LayoutError, ProtocolConfig, SecuritySpec, TuningSpec,
-        },
+        params::{DeriveError, Params, ProtocolConfig},
     },
 };
 
@@ -25,39 +23,30 @@ pub struct JointOpeningConfig<M: Embedding> {
 
 impl<M: Embedding + Default> JointOpeningConfig<M> {
     /// Derive a joint plan from the desired per-witness size and security settings.
-    /// `tuning.vector_size` is the size of each witness; the first folding block gains
+    /// `params.size` is the size of each witness; the first folding block gains
     /// one selector round. Requires an unpadded joint opening plan with a first folding block.
-    pub fn derive(security: SecuritySpec, mut tuning: TuningSpec) -> Result<Self, DeriveError> {
-        if !tuning.vector_size.is_power_of_two() {
-            return Err(LayoutError::VectorSizeNotPowerOfTwo {
-                vector_size: tuning.vector_size,
-            }
-            .into());
+    pub fn derive(mut params: Params) -> Result<Self, DeriveError> {
+        if !params.size.is_power_of_two() {
+            return Err(DeriveError("vector length must be a power of two"));
         }
-        let min = tuning.folding_factor.min();
-        if min == 0 {
-            return Err(LayoutError::FoldingFactorBelowOne { min }.into());
+        if params.folds.contains(&0) {
+            return Err(DeriveError("folding factors must be positive"));
         }
-        tuning.vector_size = tuning
-            .vector_size
+        params.size = params
+            .size
             .checked_mul(2)
-            .ok_or(DeriveError::SizeOverflow)?;
-        tuning.folding_factor = FoldingFactor::ConstantFromSecondRound {
-            initial: tuning
-                .folding_factor
-                .at_round(0)
-                .checked_add(1)
-                .ok_or(DeriveError::SizeOverflow)?,
-            rest: tuning.folding_factor.at_round(1),
-        };
-        let combined = ProtocolConfig::derive(security, tuning)?;
-        if combined.tuning().vector_size != combined.padded_vector_size() {
-            return Err(DeriveError::UnsupportedJointOpeningLayout);
+            .ok_or(DeriveError("dimension overflow"))?;
+        params.folds[0] = params.folds[0]
+            .checked_add(1)
+            .ok_or(DeriveError("dimension overflow"))?;
+        let combined = ProtocolConfig::derive(params)?;
+        if combined.params().size != combined.padded_vector_size() {
+            return Err(DeriveError("unsupported joint opening layout"));
         }
         let witness_commitment = combined
             .first_round()
-            .and_then(|round| round.code_switch().source().pair_half())
-            .ok_or(DeriveError::UnsupportedJointOpeningLayout)?;
+            .and_then(|round| round.code_switch.source().pair_half())
+            .ok_or(DeriveError("unsupported joint opening layout"))?;
         Ok(Self {
             combined,
             witness_commitment,
