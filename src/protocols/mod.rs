@@ -19,5 +19,4 @@ pub mod merkle_tree;
 pub mod params;
 pub mod proof_of_work;
 pub mod sumcheck;
-pub mod whir;
 pub mod zook;

@@ -21,7 +21,7 @@ use ark_std::rand::{
 };
 pub use cpu::CpuBuffer;
 
-use crate::algebra::{embedding::Embedding, linear_form::LinearForm};
+use crate::algebra::embedding::Embedding;
 
 /// Compile-time-selected prover backend.
 ///
@@ -104,20 +104,6 @@ pub trait BufferMath<F: Field>: Clone {
     /// Inner product with another buffer of the same length.
     fn dot(&self, other: &Self) -> F;
 
-    /// Bilinear form over `self`, a row-major matrix with `rows.len()` rows
-    /// and `cols.len()` columns:
-    /// `Σ_i rows[i] · Σ_j cols[j] · self[i · cols.len() + j]`.
-    ///
-    /// Equivalently `rowsᵀ · self · cols`. Generalizes [`Buffer::dot`] to a
-    /// weighted reduction of a matrix; `dot` is the special case where `self`
-    /// is the identity.
-    fn bilinear_form(&self, rows: &Self, cols: &Self) -> F;
-
-    /// Tensor (outer) product `self ⊗ other`, row-major: length
-    /// `self.len() · other.len()` with entry `[i · other.len() + j] = self[i] · other[j]`.
-    #[must_use]
-    fn tensor_product(&self, other: &Self) -> Self;
-
     /// Equality-polynomial weights `eq(point, ·)` over the Boolean hypercube
     /// `{0,1}^{point.len()}`, as a buffer of length `1 << point.len()`.
     ///
@@ -148,13 +134,6 @@ pub trait BufferMath<F: Field>: Clone {
     /// Accumulate `Σ_j scalars[j] · points[j]^i` into entry `i` for the
     /// first `prefix_len` entries of the buffer.
     fn accumulate_geometric(&mut self, points: &[F], scalars: &Self, prefix_len: usize);
-
-    /// Random linear combination of linear forms into a covector buffer.
-    fn linear_forms_rlc(
-        size: usize,
-        linear_forms: &mut [Box<dyn LinearForm<F>>],
-        rlc_coeffs: &Self,
-    ) -> Self;
 
     fn geometric_challenge<G: Field>(current: G, base: G, length: usize) -> Self::TargetBuffer<G>;
 
@@ -216,11 +195,4 @@ pub trait BufferMath<F: Field>: Clone {
         accumulator: &mut Self::TargetBuffer<M::Target>,
         weight: M::Target,
     );
-
-    /// Random linear combination of vectors, lifted into the target field.
-    fn mixed_linear_combination<M: Embedding<Source = F>>(
-        embedding: &M,
-        vectors: &[&Self],
-        coeffs: &Self::TargetBuffer<M::Target>,
-    ) -> Self::TargetBuffer<M::Target>;
 }

@@ -86,11 +86,6 @@ harness = false
 name = "sumcheck"
 harness = false
 
-# Enable to bench zook std + ZK vs Base WHIR performance
-# [[bench]]
-# name = "zook_vs_whir"
-# harness = false
-
 [profile.dev]
 debug = 1
 opt-level = 1

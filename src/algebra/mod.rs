@@ -37,16 +37,6 @@ pub fn dot<F: Field>(a: &[F], b: &[F]) -> F {
     mixed_dot(&embedding::Identity::new(), a, b)
 }
 
-pub fn tensor_product<F: Field>(a: &[F], b: &[F]) -> Vec<F> {
-    let mut result = Vec::with_capacity(a.len() * b.len());
-    for &x in a {
-        for &y in b {
-            result.push(x * y);
-        }
-    }
-    result
-}
-
 /// Lift a vector to an embedding.
 pub fn lift<M: Embedding>(embedding: &M, source: &[M::Source]) -> Vec<M::Target> {
     #[cfg(not(feature = "parallel"))]

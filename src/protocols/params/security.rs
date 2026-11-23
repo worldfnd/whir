@@ -67,9 +67,6 @@ pub(super) fn rate(r: f64) -> f64 {
 pub(super) const fn usize_to_f64(n: usize) -> f64 {
     n as f64
 }
-pub fn ood_per_sample_log2(k: usize, field: f64) -> f64 {
-    ((k - 1) as f64).log2() - field
-}
 fn bits(error: f64) -> Bits {
     Bits::new((-error).max(0.0))
 }

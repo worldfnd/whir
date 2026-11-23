@@ -5,7 +5,6 @@ pub mod buffer;
 pub mod cmdline_utils;
 pub mod engines;
 pub mod hash;
-pub mod parameters;
 pub mod protocols;
 pub mod transcript;
 pub mod type_info;
