@@ -3,6 +3,7 @@
 
 mod commit;
 mod joint;
+mod kernel;
 pub mod params;
 mod prover;
 mod round;
