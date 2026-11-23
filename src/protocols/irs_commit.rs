@@ -729,7 +729,6 @@ pub fn num_ood_samples(
 /// Always ≥ 1 — the type carries that invariant so callers don't need to
 /// re-prove it locally.
 ///
-/// This is used by [`whir_zk`].
 // TODO: A method with cleaner abstraction.
 #[allow(clippy::cast_sign_loss)]
 pub(crate) fn num_in_domain_queries(
