@@ -209,7 +209,7 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         }
         crate::algebra::geometric_accumulate(
             &mut self.data[..prefix_len],
-            scalars.to_slice().to_vec(),
+            scalars.to_slice(),
             points,
         );
     }
@@ -399,7 +399,7 @@ mod tests {
             // Reference: accumulate Σ_j scalars[j]·points[j]^i into the prefix
             // of a plain vector.
             let mut reference = vec![F::ZERO; len];
-            geometric_accumulate(&mut reference[..size], scalars.clone(), &points);
+            geometric_accumulate(&mut reference[..size], &scalars, &points);
 
             assert_eq!(
                 buffer.to_slice(),
