@@ -250,19 +250,12 @@ pub(crate) mod tests {
     use proptest::proptest;
 
     use super::*;
-    use crate::algebra::{fields::Field64, random_vector};
+    use crate::{
+        algebra::{fields::Field64, random_vector},
+        test_utils::zero_pad,
+    };
 
     type F = Field64;
-
-    /// Zero-pad to the next power of two.
-    pub fn zero_pad<F: Field>(values: &[F]) -> Vec<F> {
-        if values.is_empty() {
-            return Vec::new();
-        }
-        let mut vec = values.to_vec();
-        vec.resize(vec.len().next_power_of_two(), F::ZERO);
-        vec
-    }
 
     #[test]
     fn sumcheck_poly_zero_extend() {

@@ -365,7 +365,7 @@ mod tests {
     where
         Standard: Distribution<F>,
     {
-        crate::tests::init();
+        crate::test_utils::init();
         let configs = (0_usize..1 << 10, 0_usize..1 << 10).prop_flat_map(|(size, mask_length)| {
             (
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1),

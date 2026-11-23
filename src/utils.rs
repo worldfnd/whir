@@ -1,12 +1,7 @@
-#[cfg(test)]
-use std::fmt::Debug;
 use std::{
     iter::{FusedIterator, RepeatN},
     slice::ChunksExact,
 };
-
-#[cfg(test)]
-use serde::{Deserialize, Serialize};
 
 pub enum EitherIter<A, B> {
     Left(A),
@@ -123,24 +118,4 @@ pub fn chunks_exact_or_empty<T>(
     } else {
         EitherIter::Right(slice.chunks_exact(chunk_size))
     }
-}
-
-#[cfg(test)]
-#[track_caller]
-pub fn test_serde<T: Debug + PartialEq + Serialize + for<'a> Deserialize<'a>>(value: &T) {
-    // Test in human-readable format
-    let json = serde_json::to_string_pretty(value).expect("json serialization failed");
-    let deserialized = serde_json::from_str(&json).expect("json deserialization failed");
-    assert_eq!(value, &deserialized, "json serde roundtrip failed");
-
-    // Test in schemaless binary format
-
-    let bytes = {
-        let mut writer = Vec::new();
-        ciborium::into_writer(value, &mut writer).expect("ciborium serialization failed");
-        writer
-    };
-    let deserialized =
-        ciborium::from_reader(bytes.as_slice()).expect("ciborium deserialization failed");
-    assert_eq!(value, &deserialized, "ciborium serde roundtrip failed");
 }

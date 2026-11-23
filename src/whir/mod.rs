@@ -581,7 +581,7 @@ mod tests {
     type LargeEmbed = Identity<LargeF>;
 
     fn large_roundtrip(mode: Mode, seed: u64) {
-        crate::tests::init();
+        crate::test_utils::init();
         let config = ProtocolConfig::<LargeEmbed>::derive(Params {
             mode,
             bits: 128,

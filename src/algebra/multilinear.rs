@@ -195,7 +195,7 @@ mod tests {
     use proptest::proptest;
 
     use super::*;
-    use crate::algebra::{random_vector, sumcheck::tests::zero_pad};
+    use crate::{algebra::random_vector, test_utils::zero_pad};
 
     pub type F = crate::algebra::fields::Field64;
 

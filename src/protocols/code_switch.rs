@@ -1016,7 +1016,7 @@ mod tests {
         Standard: Distribution<F>,
         Hash: ProverMessage<[u8]>,
     {
-        crate::tests::init();
+        crate::test_utils::init();
         let configs = TestConfig::arbitrary(Identity::<F>::new());
         proptest!(|(seed: u64, config in configs)| {
             test_config(seed, &config.view());
@@ -1114,7 +1114,7 @@ mod tests {
 
     #[test]
     fn test_ior_identity() {
-        crate::tests::init();
+        crate::test_utils::init();
         let configs = TestConfig::arbitrary(Identity::<fields::Field64>::new());
         proptest!(|(seed: u64, config in configs)| {
             prop_assume!(config.source.in_domain_samples() > 0);
@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test]
     fn test_tampered_ood() {
-        crate::tests::init();
+        crate::test_utils::init();
         let configs = TestConfig::arbitrary(Identity::<fields::Field64>::new()).prop_filter(
             "non-ZK",
             |config| {

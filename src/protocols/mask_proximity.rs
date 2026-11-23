@@ -481,7 +481,7 @@ mod tests {
         Standard: Distribution<F>,
         Hash: crate::transcript::ProverMessage<[u8]>,
     {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(seed: u64, config in Config::arbitrary())| {
             test_config(seed, &config);
         });
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_tampered_mask_rejected() {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
             prop_assume!(config.c_zk_commit.in_domain_samples() > 0);
             test_tampered_mask_config(seed, &config);
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_tampered_combined_msg_rejected() {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
             prop_assume!(config.c_zk_commit.in_domain_samples() > 0);
             test_tampered_combined_msg_config(seed, &config);
@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn test_discharge_roundtrip() {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
             test_discharge_config(seed, &config);
         });
@@ -773,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_discharge_wrong_claim_rejected() {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(seed: u64, config in Config::<fields::Field64>::arbitrary())| {
             test_discharge_wrong_claim_config(seed, &config);
         });

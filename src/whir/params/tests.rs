@@ -11,14 +11,9 @@ use crate::{
     hash::BLAKE3,
     protocols::irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
     soundness::decoding,
+    test_utils::assert_close,
 };
 
-pub(super) fn assert_close(actual: f64, expected: f64) {
-    assert!(
-        (actual - expected).abs() < 1e-9,
-        "actual {actual}, expected {expected}"
-    );
-}
 #[test]
 fn adaptive_weight_preserves_normalization() {
     for (input, expected) in [

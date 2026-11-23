@@ -414,7 +414,7 @@ pub(crate) mod tests {
         T: Copy + TypeInfo + Encodable + Send + Sync,
         Standard: Distribution<T>,
     {
-        crate::tests::init();
+        crate::test_utils::init();
         assert!(layers >= merkle_tree::layers_for_size(num_rows));
         assert!(indices.iter().all(|&index| index < num_rows));
 

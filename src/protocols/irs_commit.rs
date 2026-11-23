@@ -743,7 +743,7 @@ pub(crate) mod tests {
         M::Target: Codec,
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
-        crate::tests::init();
+        crate::test_utils::init();
 
         // Pseudo-random Instance
         let instance = U64(seed);

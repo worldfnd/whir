@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_pow() {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(config in Config::arbitrary())| {
             test_config(&config);
         });
