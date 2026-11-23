@@ -3,6 +3,7 @@
 mod cooley_tukey;
 mod matrix;
 mod transpose;
+pub mod type_map;
 mod utils;
 mod wavelet;
 
@@ -14,16 +15,15 @@ use std::{
 use ark_ff::Field;
 use static_assertions::assert_obj_safe;
 
-use self::matrix::MatrixMut;
 pub use self::{
     cooley_tukey::NttEngine,
     transpose::transpose,
     wavelet::{inverse_wavelet_transform, wavelet_transform},
 };
+use self::{matrix::MatrixMut, type_map::TypeMap};
 use crate::{
     algebra::fields,
     buffer::{Buffer, BufferOps, DefaultRs},
-    type_map::{self, TypeMap},
 };
 
 pub static NTT: LazyLock<TypeMap<NttFamily>> = LazyLock::new(|| {

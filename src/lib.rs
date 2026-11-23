@@ -8,7 +8,6 @@ pub mod hash;
 pub mod protocols;
 pub mod transcript;
 pub mod type_info;
-pub mod type_map;
 pub mod utils; // Utils in general
 mod whir;
 

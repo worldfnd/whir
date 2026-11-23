@@ -2,7 +2,7 @@ use ark_ff::Field;
 
 use super::{Evaluate, LinearForm};
 use crate::{
-    algebra::{eval_eq, mixed_multilinear_extend, Embedding},
+    algebra::{embedding::Embedding, eval_eq, mixed_multilinear_extend},
     utils::zip_strict,
 };
 
