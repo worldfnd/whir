@@ -1,3 +1,5 @@
+//! `Bits`: a security level or error probability in bits, with arithmetic for bound bookkeeping.
+
 use std::{
     cmp::Ordering,
     fmt::{self, Display},

@@ -72,7 +72,7 @@ impl Config {
     /// Used by parameter solvers: each PoW slot independently lifts its own
     /// soundness up to `target`. The caller is responsible for ensuring
     /// `analytic_error` is computed from the local protocol step (see e.g.
-    /// `params::security`).
+    /// `whir::params::security`).
     ///
     /// Returns [`PowError::GapExceedsGrindCap`] if the required difficulty
     /// exceeds [`MAX_DIFFICULTY`] — the spec is too tight for any single slot.

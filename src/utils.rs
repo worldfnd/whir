@@ -1,3 +1,5 @@
+//! Iterator and sizing helpers: `zip_strict`, `chunks_exact_or_empty`, `workload_size`.
+
 use std::{
     iter::{FusedIterator, RepeatN},
     slice::ChunksExact,

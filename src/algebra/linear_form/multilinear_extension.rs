@@ -1,3 +1,5 @@
+//! `MultilinearExtension`: the linear form that evaluates a vector's multilinear extension at a point.
+
 use ark_ff::Field;
 
 use super::{Evaluate, LinearForm};

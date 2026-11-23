@@ -1,3 +1,5 @@
+//! `Covector`: a linear form given explicitly by its coefficient vector.
+
 use ark_ff::Field;
 
 use super::{Evaluate, LinearForm};

@@ -1,3 +1,5 @@
+//! Fast wavelet transform (kernel `[1 0; 1 1]`) and its inverse, single and batched.
+
 use ark_ff::Field;
 #[cfg(feature = "parallel")]
 use {crate::utils::workload_size, rayon::prelude::*};

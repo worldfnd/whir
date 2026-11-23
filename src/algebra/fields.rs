@@ -1,3 +1,5 @@
+//! Concrete prime and extension fields (Goldilocks, BN254, 128/192-bit) and their size and type metadata.
+
 use ark_ff::{
     Field, Fp128, Fp192, Fp2, Fp256, Fp2Config, Fp3, Fp3Config, Fp64, MontBackend, MontConfig,
     MontFp, PrimeField,

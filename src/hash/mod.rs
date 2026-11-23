@@ -1,3 +1,5 @@
+//! Hash engines for Merkle trees and proof of work, selected at runtime by `EngineId`.
+
 mod blake3_engine;
 mod copy_engine;
 mod digest_engine;

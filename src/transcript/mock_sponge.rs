@@ -1,3 +1,4 @@
+//! Test-only sponge that replays fixed bytes.
 #![cfg(test)]
 
 use super::DuplexSpongeInterface;

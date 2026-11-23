@@ -1,4 +1,4 @@
-//! Produce challenge indices from a transcript.
+//! Draw geometric challenges `[1, x, x², …]` from a transcript, on the host or as buffers.
 
 use ark_ff::Field;
 

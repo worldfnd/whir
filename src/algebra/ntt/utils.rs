@@ -1,3 +1,5 @@
+//! Integer helpers for NTT sizing: gcd, lcm, divisors, and square-root factors.
+
 /// Compute the largest factor of `n` that is ≤ sqrt(n).
 /// Assumes `n` is of the form `2^k * {1,3,9}`.
 pub fn sqrt_factor(n: usize) -> usize {

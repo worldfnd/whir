@@ -1,3 +1,5 @@
+//! Global counter of hash invocations, reported by the binaries.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub static HASH_COUNTER: HashCounter = HashCounter::new();

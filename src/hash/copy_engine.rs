@@ -1,3 +1,5 @@
+//! `Copy`: a no-op hash engine for inputs of at most 32 bytes.
+
 use std::borrow::Cow;
 
 use const_oid::ObjectIdentifier;

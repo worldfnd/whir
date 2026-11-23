@@ -1,3 +1,5 @@
+//! Multilinear extensions, equality-polynomial weights, and eq-weighted chunk folding.
+
 use ark_ff::{AdditiveGroup, Field};
 
 use crate::algebra::embedding::{Embedding, Identity};

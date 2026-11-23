@@ -1,3 +1,5 @@
+//! In-place and out-of-place matrix transposes used by the six-step NTT, and the matching index permutation.
+
 use std::mem::swap;
 
 use super::MatrixMut;
