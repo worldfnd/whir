@@ -64,3 +64,13 @@ pub trait Evaluate<M: Embedding>: LinearForm<M::Target> {
 assert_obj_safe!(LinearForm<fields::Field64>);
 
 assert_obj_safe!(Evaluate<embedding::Basefield<fields::Field64_2>>);
+
+/// Evaluate a form extended with zeros to the Boolean cube described by `point`.
+pub(crate) fn evaluate_padded<F: Field>(form: &dyn LinearForm<F>, point: &[F]) -> F {
+    if form.size() == 0 {
+        return F::ZERO;
+    }
+    let dimensions = (usize::BITS - (form.size() - 1).leading_zeros()) as usize;
+    let (padding, point) = point.split_at(point.len() - dimensions);
+    padding.iter().map(|&r| F::ONE - r).product::<F>() * form.mle_evaluate(point)
+}

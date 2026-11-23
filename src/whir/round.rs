@@ -10,7 +10,7 @@ use crate::{
     algebra::{
         embedding::{Embedding, Identity},
         eq_weights, geometric_accumulate_prefixes, geometric_sequence,
-        linear_form::{LinearForm, MultilinearExtension, UnivariateEvaluation},
+        linear_form::{evaluate_padded, LinearForm, MultilinearExtension, UnivariateEvaluation},
         scalar_mul_add,
     },
     buffer::{Buffer, BufferMath, BufferOps},
@@ -29,7 +29,6 @@ use crate::{
         binding::MaskBinding,
         claims::{sumcheck_blinding, MaskClaims},
         commit::{overlay_mask, Commitment, CommittedState, CommittedWitness, JointMaskWitness},
-        evaluate_padded,
         params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
         FinalClaim,
     },
