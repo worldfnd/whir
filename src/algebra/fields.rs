@@ -1,10 +1,13 @@
+pub mod goldilocks;
+
 use ark_ff::{
-    Field, Fp128, Fp192, Fp2, Fp256, Fp2Config, Fp3, Fp3Config, Fp64, MontBackend, MontConfig,
-    MontFp, PrimeField,
+    Field, Fp128, Fp192, Fp2, Fp256, Fp2Config, Fp3, Fp3Config, MontBackend, MontConfig, MontFp,
+    PrimeField,
 };
 use serde::{Deserialize, Serialize};
 use zerocopy::IntoBytes;
 
+pub use self::goldilocks::{Field64, Goldilocks};
 use crate::type_info::TypeInfo;
 
 pub trait FieldWithSize {
@@ -81,14 +84,6 @@ pub type Field192 = Fp192<MontBackend<FConfig192, 3>>;
 #[generator = "3"]
 pub struct FrConfig128;
 pub type Field128 = Fp128<MontBackend<FrConfig128, 2>>;
-
-#[derive(MontConfig)]
-#[modulus = "18446744069414584321"]
-#[generator = "7"]
-#[small_subgroup_base = "15"]
-#[small_subgroup_power = "1"]
-pub struct FConfig64;
-pub type Field64 = Fp64<MontBackend<FConfig64, 1>>;
 
 pub type Field64_2 = Fp2<F2Config64>;
 pub struct F2Config64;
