@@ -26,25 +26,12 @@ use crate::{
         VerificationResult, VerifierMessage, VerifierState,
     },
     whir::{
-        binding::MaskBinding,
-        claims::{sumcheck_blinding, MaskClaims},
-        commit::{overlay_mask, Commitment, CommittedState, CommittedWitness, JointMaskWitness},
+        commit::{Commitment, CommittedState, CommittedWitness},
         params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
+        zk::{overlay_mask, sumcheck_blinding, MaskClaims, ProverMasks, VerifierMasks},
         FinalClaim,
     },
 };
-
-pub(super) struct ProverMasks<F: Field> {
-    pub(super) joint: JointMaskWitness<F>,
-    pub(super) binding: MaskBinding<F>,
-    pub(super) claims: MaskClaims<F>,
-}
-
-pub(super) struct VerifierMasks<F: Field> {
-    pub(super) joint: IrsCommitment,
-    pub(super) binding: MaskBinding<F>,
-    pub(super) claims: MaskClaims<F>,
-}
 
 /// The sum always includes the mask contribution; only the witness is folded.
 pub(super) struct ProverRoundState<M: Embedding> {

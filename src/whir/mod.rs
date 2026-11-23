@@ -1,14 +1,13 @@
 //! WHIR opening in standard and zero-knowledge modes.
 //! Zero-knowledge mode uses overlaid witness masks and a joint mask commitment.
 
-mod binding;
-mod claims;
 mod commit;
 mod joint;
 pub mod params;
 mod prover;
 mod round;
 mod verifier;
+mod zk;
 
 #[cfg(test)]
 mod tests;

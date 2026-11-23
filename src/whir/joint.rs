@@ -5,10 +5,10 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, R
 use zeroize::Zeroizing;
 
 use super::{
-    binding::{prove_binding, receive_binding},
-    commit::{overlay_mask, sample_masks, CommittedState, JointMaskWitness},
+    commit::CommittedState,
     params::JointOpeningConfig,
     round::{reduce_prover, reduce_verifier},
+    zk::{overlay_mask, prove_binding, receive_binding, sample_masks, JointMaskWitness},
     Commitment, CommittedWitness, FinalClaim, ProverClaim,
 };
 use crate::{
