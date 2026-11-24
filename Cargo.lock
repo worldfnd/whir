@@ -1995,6 +1995,7 @@ dependencies = [
  "digest",
  "hex",
  "hex-literal",
+ "num-bigint",
  "ordered-float",
  "proptest",
  "provekit-spongefish",
