@@ -14,6 +14,7 @@ pub enum Mode {
     Standard,
     ZeroKnowledge,
 }
+
 impl Mode {
     pub const fn is_zk(self) -> bool {
         matches!(self, Self::ZeroKnowledge)
@@ -36,6 +37,7 @@ pub struct Params {
     pub folds: [usize; 2],
     pub schedule: RateSchedule,
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RateSchedule {
     Stepping,
@@ -43,9 +45,11 @@ pub enum RateSchedule {
     /// Weighted Pareto knee: zero favors proof size; one favors encoding work.
     Adaptive(KneeWeight),
 }
+
 /// Clamp weights to `[0,1]`; NaN selects equal weighting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KneeWeight(pub(super) OrderedFloat<f64>);
+
 impl From<f64> for KneeWeight {
     fn from(value: f64) -> Self {
         Self(OrderedFloat(if value.is_nan() {
@@ -55,6 +59,7 @@ impl From<f64> for KneeWeight {
         }))
     }
 }
+
 impl RateSchedule {
     pub(super) fn step(self, rate: u32, folds: u32) -> u32 {
         let rate = rate.saturating_add(folds.saturating_sub(1));
@@ -64,6 +69,7 @@ impl RateSchedule {
         }
     }
 }
+
 /// The serialized request is the only external configuration input.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, bound = "")]

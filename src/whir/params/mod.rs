@@ -38,6 +38,7 @@ mod tests;
 pub use derive::DeriveError;
 pub use joint_opening::JointOpeningConfig;
 type Result<T> = std::result::Result<T, DeriveError>;
+
 pub use masks::{JointMaskConfig, WitnessMaskConfig};
 pub use request::{KneeWeight, Mode, Params, ProtocolSpec, RateSchedule};
 
@@ -62,6 +63,7 @@ impl<M: Embedding> Serialize for ProtocolConfig<M> {
         self.request.serialize(serializer)
     }
 }
+
 impl<'de, M: Embedding + Default> Deserialize<'de> for ProtocolConfig<M> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let request = ProtocolSpec::<M>::deserialize(deserializer)?;
@@ -78,17 +80,20 @@ impl<M: Embedding> ProtocolConfig<M> {
     pub const fn params(&self) -> &Params {
         &self.request.params
     }
+
     pub fn padded_vector_size(&self) -> usize {
         self.first.as_ref().map_or_else(
             || self.final_commit().vector_size(),
             |code| code.vector_size(),
         )
     }
+
     pub(crate) fn first_round(&self) -> Option<RoundConfig<'_, M>> {
         self.first
             .as_ref()
             .map(|source| derive::round(self.params(), source, &self.targets[0], 0).unwrap())
     }
+
     pub(crate) fn tail_rounds(
         &self,
     ) -> impl ExactSizeIterator<Item = RoundConfig<'_, Identity<M::Target>>> {
@@ -97,15 +102,19 @@ impl<M: Embedding> ProtocolConfig<M> {
             .enumerate()
             .map(|(i, pair)| derive::round(self.params(), &pair[0], &pair[1], i + 1).unwrap())
     }
+
     pub const fn has_rounds(&self) -> bool {
         self.first.is_some()
     }
+
     pub fn num_rounds(&self) -> usize {
         self.targets.len() - 1 + usize::from(self.has_rounds())
     }
+
     pub fn final_commit(&self) -> &IrsConfig<Identity<M::Target>> {
         self.targets.last().expect("final commitment")
     }
+
     /// Standard terminal primitive; zero-knowledge mode uses only its sumcheck after blinding the final claim.
     pub(crate) fn basecase(&self) -> BasecaseConfig<'_, M::Target> {
         BasecaseConfig::new(
@@ -120,9 +129,11 @@ impl<M: Embedding> ProtocolConfig<M> {
             PowConfig::none(),
         )
     }
+
     pub(crate) const fn joint_masks(&self) -> Option<&JointMaskConfig<M::Target>> {
         self.joint_masks.as_ref()
     }
+
     /// Mask dimensions come from the commitment that owns the corresponding witness.
     pub(crate) fn witness_mask(&self, index: usize) -> Option<WitnessMaskConfig> {
         assert!(index <= self.num_rounds());

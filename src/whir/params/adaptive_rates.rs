@@ -59,6 +59,7 @@ struct Planner<'a> {
     path: Vec<u32>,
     frontier: Vec<(Vec<u32>, Cost)>,
 }
+
 impl Planner<'_> {
     fn visit<M: Embedding + Default>(&mut self, rate: u32, cost: Cost, masks: usize) {
         let add = |a: Cost, b: Cost| [a[0] + b[0], a[1] + b[1]];

@@ -17,11 +17,13 @@ pub enum DecodingRegime {
     Johnson,
     Capacity,
 }
+
 impl Display for DecodingRegime {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
     }
 }
+
 /// Return log2(1 - distance) for the given decoding regime and code rate.
 pub fn decoding_distance(policy: DecodingRegime, rho: f64) -> f64 {
     match policy {

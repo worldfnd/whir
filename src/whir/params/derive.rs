@@ -35,6 +35,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let layout = round_layout::<M>(&spec)?;
         Self::build(&spec, &layout)
     }
+
     pub(super) fn build(spec: &Params, layout: &[RoundContext]) -> Result<Self> {
         let has_rounds = layout.len() > 1;
         let targets = layout
@@ -130,6 +131,7 @@ pub(super) fn round<'a, M: Embedding>(
         ),
     })
 }
+
 pub(super) fn terminal<F: Field>(
     spec: &Params,
     code: &IrsConfig<Identity<F>>,

@@ -21,6 +21,7 @@ type Target<M> = Irs<Identity<<M as Embedding>::Target>>;
 pub(super) const fn usize_to_f64(n: usize) -> f64 {
     n as f64
 }
+
 fn bits(error: f64) -> Bits {
     Bits::new((-error).max(0.0))
 }
@@ -36,6 +37,7 @@ pub(super) fn log2_sum(a: f64, b: f64) -> f64 {
     let larger = a.max(b);
     larger + 2_f64.powf(a.min(b) - larger).ln_1p() / LN_2
 }
+
 pub(super) fn out_of_domain_bits(field: f64, n: usize) -> Result<f64> {
     let fraction = 2_f64.powf((n as f64).log2() - field);
     let exhausts = fraction >= 1.0;

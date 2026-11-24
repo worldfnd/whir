@@ -240,6 +240,7 @@ fn geometric_accumulate_inner<F: Field>(
     if scalars.is_empty() {
         return;
     }
+
     #[cfg(feature = "parallel")]
     if accumulator.len() > workload_size::<F>() {
         let half = accumulator.len() / 2;

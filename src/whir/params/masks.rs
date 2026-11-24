@@ -18,6 +18,7 @@ pub struct WitnessMaskConfig {
     pub num_polynomials: usize,
     pub coefficients_per_polynomial: usize,
 }
+
 impl WitnessMaskConfig {
     pub(crate) fn for_code<M: Embedding>(code: &IrsConfig<M>, incoming: usize) -> Result<Self> {
         let length = code
@@ -35,6 +36,7 @@ impl WitnessMaskConfig {
             coefficients_per_polynomial: length,
         })
     }
+
     pub fn num_coefficients(self) -> Result<usize> {
         self.num_polynomials
             .checked_mul(self.coefficients_per_polynomial)

@@ -53,6 +53,7 @@ fn unsupported_zk_regime_fails_before_ntt_lookup() {
         );
     }
 }
+
 pub(super) fn code<M: Embedding + Default>(
     size: usize,
     depth: usize,
@@ -70,6 +71,7 @@ pub(super) fn code<M: Embedding + Default>(
         mode: IrsMode::Standard,
     })
 }
+
 #[test]
 fn independent_decoding_and_probability_anchors() {
     // Unique, BCSS25 Theorem 1.5, and STIR Conjecture 5.6 at k=16, rho=1/4, |F|=2^64.
