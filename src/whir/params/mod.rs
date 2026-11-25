@@ -6,12 +6,17 @@
 //!
 //! [ProveKit whitepaper]: https://github.com/worldfnd/provekit/tree/6605cf5242567e17899a26c27db829c7ce9eb478/whitepaper
 
+use std::fmt::{self, Display, Formatter};
+
 use ark_ff::Field;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    algebra::embedding::{Embedding, Identity},
+    algebra::{
+        embedding::{Embedding, Identity},
+        fields::FieldWithSize,
+    },
     engines::EngineId,
     protocols::{
         basecase::{BasecaseMode, Config as BasecaseConfig},
@@ -197,6 +202,47 @@ impl<M: Embedding> ProtocolConfig<M> {
         };
         Some(mask.expect("construction checked witness mask dimensions"))
     }
+}
+
+impl<M: Embedding> Display for ProtocolConfig<M> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let params = self.params();
+        writeln!(
+            f,
+            "{:?} mode, {} decoding, {} bits, {:.0}-bit target field",
+            params.mode,
+            params.regime,
+            params.bits,
+            M::Target::field_size_bits()
+        )?;
+        if let Some(round) = self.first_round() {
+            write_round(f, &round)?;
+        }
+        for round in self.tail_rounds() {
+            write_round(f, &round)?;
+        }
+        let basecase = self.basecase();
+        writeln!(f, "Final:")?;
+        writeln!(f, "  commit   {}", self.final_commit())?;
+        writeln!(f, "  sumcheck {}", basecase.sumcheck())?;
+        if let Some(masks) = self.joint_masks() {
+            writeln!(f, "Masks:")?;
+            writeln!(f, "  commit   {}", masks.commit)?;
+        }
+        Ok(())
+    }
+}
+
+fn write_round<M: Embedding>(f: &mut Formatter<'_>, round: &RoundConfig<'_, M>) -> fmt::Result {
+    writeln!(f, "Round {}:", round.index)?;
+    writeln!(f, "  commit   {}", round.code_switch.source())?;
+    writeln!(f, "  sumcheck {}", round.sumcheck)?;
+    writeln!(
+        f,
+        "  switch   ood {} pow {:.2}",
+        round.code_switch.out_domain_samples(),
+        round.code_switch.pow().difficulty()
+    )
 }
 
 /// A temporary execution view; each borrowed IRS has one owner in ProtocolConfig.

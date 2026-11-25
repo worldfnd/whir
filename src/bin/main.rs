@@ -215,7 +215,7 @@ where
     println!("=========================================");
     println!("Whir (PCS{}) 🌪️", if args.zk { " + ZK" } else { "" });
     println!("Field: {:?} and hash: {:?}", args.field, args.hash);
-    println!("{:?}", params.params());
+    println!("{params}");
 
     let embedding = M::default();
     let vector = (0..num_coeffs as u64)
