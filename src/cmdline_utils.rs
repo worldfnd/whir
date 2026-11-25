@@ -1,10 +1,8 @@
 use std::str::FromStr;
 
-use serde::Serialize;
-
 use crate::{engines::EngineId, hash};
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy)]
 pub enum AvailableFields {
     Goldilocks1, // Just Goldilocks
     Goldilocks2, // Quadratic extension of Goldilocks
@@ -30,7 +28,7 @@ impl FromStr for AvailableFields {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy)]
 pub enum AvailableHash {
     Sha2,
     Sha3,
