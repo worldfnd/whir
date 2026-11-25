@@ -262,10 +262,6 @@ impl<M: Embedding> Config<M> {
         self.interleaving_depth
     }
 
-    pub const fn matrix_commit(&self) -> &matrix_commit::Config<M::Source> {
-        &self.matrix_commit
-    }
-
     pub const fn regime(&self) -> DecodingRegime {
         self.regime
     }
@@ -328,10 +324,6 @@ impl<M: Embedding> Config<M> {
 
     pub fn rate(&self) -> f64 {
         self.masked_message_length() as f64 / self.codeword_length as f64
-    }
-
-    pub const fn unique_decoding(&self) -> bool {
-        matches!(self.regime, DecodingRegime::Unique)
     }
 
     fn decoding(&self) -> [f64; 3] {
