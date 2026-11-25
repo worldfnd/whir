@@ -57,7 +57,7 @@ struct Args {
     hash: AvailableHash,
 
     /// Rate schedule: `stepping`, `capped:<max log inv rate>`, or `adaptive:<knee weight>`.
-    #[arg(long = "schedule", default_value = "stepping", value_parser = parse_schedule)]
+    #[arg(long = "schedule", default_value = "adaptive:0.5", value_parser = parse_schedule)]
     schedule: RateSchedule,
 
     /// Run in zero-knowledge mode. Requires Johnson decoding.
