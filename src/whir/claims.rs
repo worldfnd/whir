@@ -11,9 +11,8 @@ use crate::{
         geometric_accumulate_prefixes,
         linear_form::{Covector, Evaluate},
     },
-    protocols::{
-        code_switch::CovectorUpdateParams, params::WitnessMaskConfig, sumcheck::SumcheckOpening,
-    },
+    protocols::{code_switch::CovectorUpdateParams, sumcheck::SumcheckOpening},
+    whir::params::WitnessMaskConfig,
 };
 
 /// The public linear functional `B(m)` in `c = <p_hat, K> + B(m)`.
@@ -175,11 +174,11 @@ mod tests {
         protocols::{
             proof_of_work::Config as PowConfig,
             sumcheck::{Config as SumcheckConfig, SumcheckMaskLen, SumcheckMode},
-            zook::commit::overlay_mask,
         },
         transcript::{
             codecs::Empty, Codec, DomainSeparator, ProverState, VerifierMessage, VerifierState,
         },
+        whir::commit::overlay_mask,
     };
 
     fn sumcheck_roundtrip<M: Embedding<Target = Field64_2> + Default>()

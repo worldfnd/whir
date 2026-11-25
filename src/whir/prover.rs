@@ -1,4 +1,4 @@
-//! Zook prover: joint-mask round reduction followed by final opening.
+//! WHIR prover: joint-mask round reduction followed by final opening.
 
 use std::mem::take;
 
@@ -14,23 +14,21 @@ use crate::{
     },
     buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
-    protocols::{
-        params::ProtocolConfig,
-        zook::{
-            commit::CommittedWitness,
-            round::{reduce_prover, ProverRoundState},
-            ProverClaim,
-        },
-    },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerifierMessage,
+    },
+    whir::{
+        commit::CommittedWitness,
+        params::ProtocolConfig,
+        round::{reduce_prover, ProverRoundState},
+        ProverClaim,
     },
 };
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Prove the supplied linear evaluations against the committed witness.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove"))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "whir::prove"))]
     pub fn prove<H, R>(
         &self,
         ps: &mut ProverState<H, R>,

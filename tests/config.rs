@@ -5,7 +5,7 @@ use whir::{
         embedding::{Basefield, Identity},
         fields::{Field64_2, Field64_3},
     },
-    protocols::params::{Mode, Params, ProtocolConfig, RateSchedule},
+    Mode, Params, ProtocolConfig, RateSchedule,
 };
 type Config = ProtocolConfig<Identity<Field64_2>>;
 
@@ -23,7 +23,7 @@ fn rejects_malformed_requests_and_embedding_changes() {
     let config = Config::derive(Params {
         bits: 40,
         mode: Mode::Standard,
-        regime: whir::protocols::params::DecodingRegime::Johnson,
+        regime: whir::DecodingRegime::Johnson,
         pow: 0,
         hash: whir::hash::BLAKE3,
         size: 8,

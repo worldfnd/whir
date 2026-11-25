@@ -1,21 +1,22 @@
-//! Zook with overlaid witness masks and a joint mask commitment.
+//! WHIR opening in standard and zero-knowledge modes.
+//! Zero-knowledge mode uses overlaid witness masks and a joint mask commitment.
 
 mod binding;
 mod claims;
-pub mod commit;
+mod commit;
 mod joint;
-pub mod prover;
+pub mod params;
+mod prover;
 mod round;
-pub mod verifier;
+mod verifier;
 
 use ark_ff::Field;
 pub use commit::{Commitment, CommittedWitness};
 pub use joint::{FirstCommitment, FirstWitness, JointCommitment, JointWitness};
 
-pub use crate::protocols::params::{JointOpeningConfig, ProtocolConfig};
 use crate::{algebra::linear_form::LinearForm, transcript::VerificationResult, verify};
 
-/// Output of [`ProtocolConfig::verify`].
+/// Output of [`ProtocolConfig::verify`](params::ProtocolConfig::verify).
 ///
 /// The verifier has completed all round checks. The caller must finish
 /// verification by checking that the input forms evaluate to the claimed value:
@@ -40,7 +41,7 @@ pub struct FinalClaim<F: ark_ff::Field> {
 }
 
 impl<F: ark_ff::Field> FinalClaim<F> {
-    /// Complete the verification started by [`ProtocolConfig::verify`].
+    /// Complete the verification started by [`ProtocolConfig::verify`](params::ProtocolConfig::verify).
     ///
     /// Checks `initial_claim_scale × Σ_j rlc_coefficients[j] × form_j.mle_evaluate(evaluation_point) == linear_forms_contribution`.
     ///
@@ -75,7 +76,7 @@ fn evaluate_padded<F: Field>(form: &dyn LinearForm<F>, point: &[F]) -> F {
     padding.iter().map(|&r| F::ONE - r).product::<F>() * form.mle_evaluate(point)
 }
 
-/// Values derived by [`ProtocolConfig::prove`] from the prover transcript.
+/// Values derived by [`ProtocolConfig::prove`](params::ProtocolConfig::prove) from the prover transcript.
 #[derive(Clone, Debug)]
 pub struct ProverClaim<F: ark_ff::Field> {
     /// Sumcheck challenges for the original witness dimensions, excluding padding.
@@ -88,7 +89,7 @@ pub struct ProverClaim<F: ark_ff::Field> {
 mod tests {
     use ark_std::rand::{rngs::StdRng, SeedableRng};
 
-    use super::{FinalClaim, ProtocolConfig, ProverClaim};
+    use super::{params::ProtocolConfig, FinalClaim, ProverClaim};
     use crate::{
         algebra::{
             embedding::{Basefield, Embedding, Identity},
@@ -98,8 +99,9 @@ mod tests {
         },
         buffer::{Buffer, BufferMath, BufferOps},
         hash,
-        protocols::params::{DecodingRegime, Mode, Params, RateSchedule},
+        soundness::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
+        whir::params::{Mode, Params, RateSchedule},
     };
 
     // ── Small-test field and config (Field64_2, λ=40, fast) ─────────────────
@@ -129,7 +131,7 @@ mod tests {
 
     /// Construct a deterministic `DomainSeparator` for the given label.
     fn make_ds(label: &str) -> DomainSeparator<'static, Empty> {
-        DomainSeparator::protocol(&"zook-test")
+        DomainSeparator::protocol(&"whir-test")
             .session(&label.to_string())
             .instance(&EMPTY)
     }
@@ -351,6 +353,32 @@ mod tests {
         full_roundtrip(&config, 4, 5, "roundtrip_multiple_claims_standard");
     }
 
+    /// Standard mode accepts every decoding regime and fold layout, including
+    /// Unique's fixed single OOD sample and folding factor 1.
+    #[test]
+    fn roundtrip_standard_all_regimes_and_folds() {
+        for (i, regime) in [
+            DecodingRegime::Unique,
+            DecodingRegime::Johnson,
+            DecodingRegime::Capacity,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (j, folds) in [[1, 1], [2, 3]].into_iter().enumerate() {
+                let config = ProtocolConfig::<SmallEmbed>::derive(Params {
+                    regime,
+                    folds,
+                    ..small_params(Mode::Standard, 1 << 12)
+                })
+                .unwrap();
+                assert!(config.has_rounds(), "expected at least one round");
+                let label = format!("roundtrip_standard_{regime}_{folds:?}");
+                full_roundtrip(&config, 2, 20 + (2 * i + j) as u64, &label);
+            }
+        }
+    }
+
     // ── Negative tests: input validation ─────────────────────────────────────
 
     #[test]
@@ -364,7 +392,7 @@ mod tests {
         let form: MultilinearExtension<SmallF> = MultilinearExtension {
             point: random_vector(&mut rng, mu),
         };
-        let ds = DomainSeparator::protocol(&"zook-test")
+        let ds = DomainSeparator::protocol(&"whir-test")
             .session(&"count-mismatch".to_string())
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -379,13 +407,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "zook requires ≥ 1")]
+    #[should_panic(expected = "whir requires ≥ 1")]
     fn prove_rejects_empty_forms() {
         let config =
             ProtocolConfig::<SmallEmbed>::derive(small_params(Mode::Standard, 1 << 12)).unwrap();
         let mut rng = StdRng::seed_from_u64(0);
         let witness = Buffer::<SmallF>::random(&mut rng, config.params().size);
-        let ds = DomainSeparator::protocol(&"zook-test")
+        let ds = DomainSeparator::protocol(&"whir-test")
             .session(&"empty-forms".to_string())
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -582,7 +610,7 @@ mod tests {
         let form_refs: Vec<&dyn LinearForm<LargeF>> =
             forms.iter().map(|f| f as &dyn LinearForm<LargeF>).collect();
 
-        let ds = DomainSeparator::protocol(&"zook-large-test")
+        let ds = DomainSeparator::protocol(&"whir-large-test")
             .session(&format!("three-claims mode={} seed={seed}", mode.is_zk()))
             .instance(&Empty);
 

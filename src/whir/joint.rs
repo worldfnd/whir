@@ -7,8 +7,9 @@ use zeroize::Zeroizing;
 use super::{
     binding::{prove_binding, receive_binding},
     commit::{overlay_mask, sample_masks, CommittedState, JointMaskWitness},
+    params::JointOpeningConfig,
     round::{reduce_prover, reduce_verifier},
-    Commitment, CommittedWitness, FinalClaim, JointOpeningConfig, ProverClaim,
+    Commitment, CommittedWitness, FinalClaim, ProverClaim,
 };
 use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
@@ -116,7 +117,7 @@ where
     assert_eq!(
         message.len(),
         config.witness_commitment().vector_size(),
-        "zook witness length",
+        "whir witness length",
     );
     if let Some(mut shape) = config.combined().witness_mask(0) {
         shape.num_polynomials /= 2;
@@ -288,7 +289,7 @@ impl<M: Embedding + Default> JointWitness<'_, M> {
     {
         assert!(
             check_claims(self.config, forms, values).is_ok(),
-            "zook joint claims",
+            "whir joint claims",
         );
         ps.prover_message(&U64(values.len() as u64));
         ps.prover_messages(values);

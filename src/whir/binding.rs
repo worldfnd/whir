@@ -8,11 +8,11 @@ use crate::{
         embedding::{Embedding, Frobenius},
         univariate_evaluate,
     },
-    protocols::params::JointMaskConfig,
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
         VerifierState,
     },
+    whir::params::JointMaskConfig,
 };
 
 /// Three deferred equations on the committed joint-mask coefficients.
@@ -121,8 +121,8 @@ mod tests {
             fields::{Field64, Field64_2},
             linear_form::{Covector, Evaluate, UnivariateEvaluation},
         },
-        protocols::params::{Mode, Params, ProtocolConfig, RateSchedule},
         transcript::{codecs::Empty, DomainSeparator, MockSponge},
+        whir::params::{Mode, Params, ProtocolConfig, RateSchedule},
     };
 
     fn binding_forms<F: Field>(
@@ -161,7 +161,7 @@ mod tests {
         ProtocolConfig::derive(Params {
             bits: 80,
             mode: Mode::ZeroKnowledge,
-            regime: crate::protocols::params::DecodingRegime::Johnson,
+            regime: crate::soundness::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
             size: 4096,
@@ -178,7 +178,7 @@ mod tests {
         let layout = config.joint_masks().unwrap();
         let mut coefficients = vec![Field64_2::ZERO; layout.commit.vector_size()];
         coefficients[layout.basefield_blinder.start] = Field64_2::ONE;
-        let ds = DomainSeparator::protocol(&"zook-binding-test")
+        let ds = DomainSeparator::protocol(&"whir-binding-test")
             .session(&"zero challenges")
             .instance(&Empty);
         let mut repr = <Field64_2 as Decoding<[u8]>>::Repr::default();
@@ -290,7 +290,7 @@ mod tests {
         let config = config();
         let layout = config.joint_masks().unwrap();
         let coefficients = vec![Field64_2::ONE; layout.commit.vector_size()];
-        let ds = DomainSeparator::protocol(&"zook-binding-test")
+        let ds = DomainSeparator::protocol(&"whir-binding-test")
             .session(&"false evaluations")
             .instance(&Empty);
         for changed in 0..2 {
@@ -320,7 +320,7 @@ mod tests {
         let config = config();
         let layout = config.joint_masks().unwrap();
         let coefficients = vec![Field64_2::ONE; layout.commit.vector_size()];
-        let ds = DomainSeparator::protocol(&"zook-binding-test")
+        let ds = DomainSeparator::protocol(&"whir-binding-test")
             .session(&"truncated evaluation")
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);

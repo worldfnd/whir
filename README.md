@@ -17,31 +17,50 @@ cargo run --release -- --help
 Usage: main [OPTIONS]
 
 Options:
-  -t, --type <PROTOCOL_TYPE>             [default: PCS]
-  -l, --security-level <SECURITY_LEVEL>  [default: 100]
+  -l, --security-level <SECURITY_LEVEL>
+          [default: 128]
   -p, --pow-bits <POW_BITS>
-  -d, --num-variables <NUM_VARIABLES>    [default: 20]
-  -e, --evaluations <NUM_EVALUATIONS>    [default: 1]
-  -r, --rate <RATE>                      [default: 1]
-      --reps <VERIFIER_REPETITIONS>      [default: 1000]
-  -k, --fold <FOLDING_FACTOR>            [default: 4]
-      --sec <SOUNDNESS_TYPE>             [default: ConjectureList]
-      --fold_type <FOLD_OPTIMISATION>    [default: ProverHelps]
-  -f, --field <FIELD>                    [default: Goldilocks2]
-      --hash <MERKLE_TREE>               [default: Blake3]
-  -h, --help                             Print help
-  -V, --version                          Print version
+          Maximum proof of work difficulty in bits [default: 20]
+  -d, --num-variables <NUM_VARIABLES>
+          [default: 20]
+  -e, --evaluations <NUM_EVALUATIONS>
+          [default: 1]
+      --linear-constraints <NUM_LINEAR_CONSTRAINTS>
+          [default: 0]
+  -r, --rate <RATE>
+          [default: 1]
+      --reps <VERIFIER_REPETITIONS>
+          [default: 1000]
+  -i, --initfold <FIRST_ROUND_FOLDING_FACTOR>
+          [default: 4]
+  -k, --fold <FOLDING_FACTOR>
+          [default: 4]
+      --decoding-regime <DECODING_REGIME>
+          Reed–Solomon decoding regime: Unique, Johnson, or Capacity [default: Johnson]
+  -f, --field <FIELD>
+          [default: Goldilocks3]
+      --hash <HASH>
+          [default: Blake3]
+      --schedule <SCHEDULE>
+          Rate schedule: `stepping`, `capped:<max log inv rate>`, or `adaptive:<knee weight>` [default: stepping]
+      --zk
+          Run in zero-knowledge mode. Requires Johnson decoding
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 Options:
-- `-t` can be either `PCS` or `LDT` to run as a (multilinear) PCS or a LDT
-- `-l` sets the (overall) security level of the scheme
-- `-p` sets the number of PoW bits (used for the query-phase). PoW bits for proximity gaps are set automatically.
-- `-d` sets the number of variables of the scheme.
-- `-e` sets the number of evaluations to prove. Only meaningful in PCS mode.
-- `-r` sets the log_inv of the rate
-- `-k` sets the number of variables to fold at each iteration. 
-- `--sec` sets the settings used to compute security. Available `UniqueDecoding`, `ProvableList`, `ConjectureList`
-- `--fold_type` sets the settings used to compute folds. Available `Naive`, `ProverHelps`
-- `-f` sets the field used, available are `Goldilocks2, Goldilocks3, Field192, Field256`.
-- `--hash` sets the hash used for the Merkle tree, available are `SHA3` and `Blake3`
+- `-l` sets the security level in bits.
+- `-p` sets the maximum proof-of-work bits per protocol step.
+- `-d` sets the number of variables. The committed vector has `2^d` entries.
+- `-e` sets the number of evaluation claims to prove.
+- `--linear-constraints` sets the number of extra linear-form claims to prove. `-e` plus `--linear-constraints` must be at least 1.
+- `-r` sets the log inverse of the starting rate.
+- `-i` sets the log folding factor of the first round. `-k` sets it for all later rounds.
+- `--decoding-regime` selects the soundness bound: `Unique`, `Johnson`, or `Capacity`.
+- `-f` sets the field: `Goldilocks1`, `Goldilocks2`, `Goldilocks3`, `Field128`, `Field192`, `Field256`.
+- `--hash` sets the Merkle tree hash: `Sha2`, `Sha3`, `Keccak`, `Blake3`.
+- `--schedule` sets the rate schedule: `stepping`, `capped:<max log inverse rate>`, or `adaptive:<knee weight in [0,1]>`.
+- `--zk` runs the zero-knowledge mode. It requires `Johnson` decoding.

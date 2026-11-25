@@ -16,10 +16,8 @@ use super::{
     utils::{lcm, sqrt_factor},
     PolynomialSegment, Polynomials, ReedSolomon,
 };
-#[cfg(not(feature = "rs_in_order"))]
-use crate::algebra::ntt::transpose::transpose_permute;
 use crate::{
-    algebra::ntt::utils::divisors,
+    algebra::ntt::{transpose::transpose_permute, utils::divisors},
     buffer::{Buffer, BufferOps},
 };
 
@@ -425,13 +423,11 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         while !codeword_length.is_multiple_of(coset_size) {
             coset_size = self.next_order(coset_size + 1).unwrap();
         }
-        #[cfg(not(feature = "rs_in_order"))]
         let num_cosets = codeword_length / coset_size;
 
         for &index in indices {
             assert!(index < codeword_length);
 
-            #[cfg(not(feature = "rs_in_order"))]
             let index = transpose_permute(index, num_cosets, coset_size);
             result.push(generator.pow([index as u64]));
         }
@@ -539,9 +535,6 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
             coset_size,
         );
         self.ntt_batch(&mut result, coset_size);
-
-        #[cfg(feature = "rs_in_order")]
-        transpose(&mut result, num_cosets, coset_size);
 
         // Transpose to row-major order with vectors stacked horizontally.
         transpose(&mut result, num_polys, codeword_length);

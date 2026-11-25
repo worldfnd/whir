@@ -7,7 +7,6 @@ use crate::utils::workload_size;
 // (This is because the algorithm recurses into 4 sub-matrices of half dimension; we assume those to be square matrices as well, which only works for powers of two).
 
 /// Compute the row-major index permutation for a transposition.
-#[cfg(not(feature = "rs_in_order"))]
 pub fn transpose_permute(index: usize, rows: usize, cols: usize) -> usize {
     debug_assert!(index < rows * cols);
     let (row, col) = (index / cols, index % cols);

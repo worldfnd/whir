@@ -77,9 +77,6 @@ parallel = ["dep:rayon"]
 rayon = ["dep:rayon"]
 asm = ["ark-ff/asm"]
 tracing = ["dep:tracing"]
-# Do not permute evaluation pointsin RS
-# This flag is to be removed after whir_zk supports it.
-rs_in_order = []
 
 [[bench]]
 name = "expand_from_coeff"
@@ -88,16 +85,6 @@ harness = false
 [[bench]]
 name = "sumcheck"
 harness = false
-
-# Enable to bench zook std + ZK vs Base WHIR performance
-# [[bench]]
-# name = "zook_vs_whir"
-# harness = false
-
-# Disable untill fixed.
-# [[bench]]
-# name = "zk_whir"
-# harness = false
 
 [profile.dev]
 debug = 1

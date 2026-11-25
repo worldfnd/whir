@@ -21,21 +21,12 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    algebra::{
-        dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
-        ntt,
-    },
+    algebra::{dot, embedding::Embedding, fields::FieldWithSize, lift, ntt},
     buffer::{Buffer, BufferMath, BufferOps},
     engines::EngineId,
     hash::Hash,
-    protocols::{
-        challenge_indices::challenge_indices,
-        matrix_commit,
-        params::{
-            security::{decoding, decoding_distance, ood_per_sample_log2},
-            DecodingRegime,
-        },
-    },
+    protocols::{challenge_indices::challenge_indices, matrix_commit},
+    soundness::{decoding, decoding_distance, DecodingRegime},
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
         VerifierMessage, VerifierState,
@@ -271,10 +262,6 @@ impl<M: Embedding> Config<M> {
         self.interleaving_depth
     }
 
-    pub const fn matrix_commit(&self) -> &matrix_commit::Config<M::Source> {
-        &self.matrix_commit
-    }
-
     pub const fn regime(&self) -> DecodingRegime {
         self.regime
     }
@@ -337,10 +324,6 @@ impl<M: Embedding> Config<M> {
 
     pub fn rate(&self) -> f64 {
         self.masked_message_length() as f64 / self.codeword_length as f64
-    }
-
-    pub const fn unique_decoding(&self) -> bool {
-        matches!(self.regime, DecodingRegime::Unique)
     }
 
     fn decoding(&self) -> [f64; 3] {
@@ -433,71 +416,6 @@ impl<M: Embedding> Config<M> {
     {
         let matrix_commitment = self.matrix_commit.receive_commitment(verifier_state)?;
         Ok(Commitment { matrix_commitment })
-    }
-
-    /// Commit to vectors and run the legacy WHIR OOD step in one call.
-    ///
-    /// Layered helper bundling `commit` + the OOD message exchange (sample
-    /// `out_domain_samples` random points, send each vector's evaluation at
-    /// each point). Used by the legacy WHIR protocol while the OOD step
-    /// is still part of the per-commit protocol shape; the new construction
-    /// (Construction 9.7) handles OOD at the code-switch level instead.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
-    pub fn commit_with_ood<H, R>(
-        &self,
-        prover_state: &mut ProverState<H, R>,
-        vectors: &[&Buffer<M::Source>],
-        out_domain_samples: usize,
-    ) -> (Witness<M::Source>, Evaluations<M::Target>)
-    where
-        Standard: Distribution<M::Source>,
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
-    {
-        let witness = self.commit(prover_state, vectors);
-        let points: Vec<M::Target> = prover_state.verifier_message_vec(out_domain_samples);
-        let mut matrix = Vec::with_capacity(out_domain_samples * vectors.len());
-        for &point in &points {
-            for &vector in vectors {
-                let value = vector.mixed_univariate_evaluate(&*self.embedding, point);
-                prover_state.prover_message(&value);
-                matrix.push(value);
-            }
-        }
-        (
-            witness,
-            Evaluations {
-                points,
-                matrix: Buffer::from(matrix.as_slice()),
-            },
-        )
-    }
-
-    /// Receive a commitment and the legacy WHIR OOD evaluations in one call.
-    /// Verifier mirror of `commit_with_ood`.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
-    pub fn receive_commitment_with_ood<H>(
-        &self,
-        verifier_state: &mut VerifierState<H>,
-        out_domain_samples: usize,
-    ) -> VerificationResult<(Commitment, Evaluations<M::Target>)>
-    where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
-        M::Target: Codec<[H::U]>,
-    {
-        let commitment = self.receive_commitment(verifier_state)?;
-        let points: Vec<M::Target> = verifier_state.verifier_message_vec(out_domain_samples);
-        let matrix = verifier_state.prover_messages_vec(out_domain_samples * self.num_vectors)?;
-        Ok((
-            commitment,
-            Evaluations {
-                points,
-                matrix: Buffer::from(matrix.as_slice()),
-            },
-        ))
     }
 
     /// Opens the commitment and returns the evaluations of the vectors.
@@ -645,12 +563,6 @@ impl<F: Field> Evaluations<F> {
         }
     }
 
-    pub fn evaluators(&self, size: usize) -> impl '_ + Iterator<Item = UnivariateEvaluation<F>> {
-        self.points
-            .iter()
-            .map(move |&point| UnivariateEvaluation::new(point, size))
-    }
-
     /// Reduce each row against host `weights`, yielding one value per point.
     /// Host-side; used by the verifiers.
     pub fn values<'a>(&'a self, weights: &'a [F]) -> impl 'a + Iterator<Item = F> {
@@ -700,36 +612,10 @@ impl<M: Embedding> fmt::Display for Config<M> {
     }
 }
 
-/// Return the number of OOD samples needed.
-///
-/// Solves `(L choose 2) · ((degree - 1) / |F|)^s ≤ 2^{-security_target}`
-/// where `L` is the list size and `degree` is the polynomial degree bound.
-/// See STIR, Lemma 4.5.
-#[allow(clippy::cast_sign_loss)]
-pub fn num_ood_samples(
-    decoding_regime: DecodingRegime,
-    security_target: f64,
-    field_size_bits: f64,
-    list_size: f64,
-    degree: usize,
-) -> usize {
-    if matches!(decoding_regime, DecodingRegime::Unique) {
-        return 0;
-    }
-    let log_per_sample = -ood_per_sample_log2(degree, field_size_bits);
-    assert!(log_per_sample > 0.);
-    let l_choose_2 = list_size * (list_size - 1.) / 2.;
-    ((security_target + l_choose_2.log2()) / log_per_sample)
-        .ceil()
-        .max(1.) as usize
-}
-
 /// Return the number of in-domain queries.
 ///
 /// Always ≥ 1 — the type carries that invariant so callers don't need to
 /// re-prove it locally.
-///
-/// This is used by [`whir_zk`].
 // TODO: A method with cleaner abstraction.
 #[allow(clippy::cast_sign_loss)]
 pub(crate) fn num_in_domain_queries(

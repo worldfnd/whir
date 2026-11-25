@@ -299,12 +299,6 @@ pub fn interleaved_rs_encode<F: 'static>(
         .interleaved_encode(polynomials, codeword_length)
 }
 
-pub fn generator<F: 'static>(codeword_length: usize) -> F {
-    NTT.get::<F>()
-        .expect("Unsupported NTT field.")
-        .generator(codeword_length)
-}
-
 #[cfg(test)]
 mod tests {
     use std::iter;

@@ -4,10 +4,8 @@ use serde::Serialize;
 
 use crate::{
     algebra::embedding::Embedding,
-    protocols::{
-        irs_commit::Config,
-        params::{DeriveError, Params, ProtocolConfig},
-    },
+    protocols::irs_commit::Config,
+    whir::params::{DeriveError, Params, ProtocolConfig},
 };
 
 /// Parameters for two equally sized witnesses committed separately and opened together.

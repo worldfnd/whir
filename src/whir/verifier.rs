@@ -1,4 +1,4 @@
-//! Zook verifier: replay joint-mask rounds, then check the final opening.
+//! WHIR verifier: replay joint-mask rounds, then check the final opening.
 
 use ark_ff::{Field, Zero};
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
@@ -17,12 +17,6 @@ use crate::{
     protocols::{
         basecase::Opening,
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
-        params::ProtocolConfig,
-        zook::{
-            commit::Commitment,
-            round::{reduce_verifier, VerifierRoundState},
-            FinalClaim,
-        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, VerificationResult,
@@ -30,11 +24,17 @@ use crate::{
     },
     utils::zip_strict,
     verify,
+    whir::{
+        commit::Commitment,
+        params::ProtocolConfig,
+        round::{reduce_verifier, VerifierRoundState},
+        FinalClaim,
+    },
 };
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Verify the supplied linear evaluations against the received commitment.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify"))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "whir::verify"))]
     pub fn verify<H>(
         &self,
         vs: &mut VerifierState<H>,
@@ -190,11 +190,12 @@ mod tests {
             random_vector,
         },
         buffer::{Buffer, BufferMath, BufferOps},
-        protocols::{
-            params::{DecodingRegime, Mode, Params, RateSchedule},
-            zook::commit::CommittedWitness,
-        },
+        soundness::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState},
+        whir::{
+            commit::CommittedWitness,
+            params::{Mode, Params, RateSchedule},
+        },
     };
 
     #[test]

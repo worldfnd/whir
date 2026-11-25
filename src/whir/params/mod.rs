@@ -1,4 +1,4 @@
-//! Parameter selection for WHIR and Zook.
+//! Parameter selection for WHIR in standard and zero-knowledge modes.
 //!
 //! Requests contain user choices. Construction owns each commitment once and checks its bounds.
 //! Borrowed execution views use that canonical sequence; deserialization repeats construction.
@@ -6,17 +6,17 @@
 //!
 //! [ProveKit whitepaper]: https://github.com/worldfnd/provekit/tree/6605cf5242567e17899a26c27db829c7ce9eb478/whitepaper
 
-use std::{
-    fmt::{self, Display, Formatter},
-    str::FromStr,
-};
+use std::fmt::{self, Display, Formatter};
 
 use ark_ff::Field;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    algebra::embedding::{Embedding, Identity},
+    algebra::{
+        embedding::{Embedding, Identity},
+        fields::FieldWithSize,
+    },
     engines::EngineId,
     protocols::{
         basecase::{BasecaseMode, Config as BasecaseConfig},
@@ -25,6 +25,7 @@ use crate::{
         proof_of_work::Config as PowConfig,
         sumcheck::Config as SumcheckConfig,
     },
+    soundness::DecodingRegime,
     type_info::Typed,
 };
 
@@ -32,7 +33,7 @@ mod derive;
 mod joint;
 mod masks;
 mod search;
-pub(crate) mod security;
+mod security;
 #[cfg(test)]
 mod tests;
 
@@ -41,7 +42,7 @@ pub use joint::JointOpeningConfig;
 type Result<T> = std::result::Result<T, DeriveError>;
 pub use masks::{JointMaskConfig, WitnessMaskConfig};
 
-/// Select standard WHIR or Zook with overlaid masks.
+/// Select standard WHIR or zero-knowledge WHIR with overlaid masks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
     Standard,
@@ -60,7 +61,7 @@ pub struct Params {
     pub regime: DecodingRegime,
     /// Required security bits for each checked protocol step.
     pub bits: u32,
-    /// Maximum grinding bits per step; Zook receives no grinding credit.
+    /// Maximum grinding bits per step; zero-knowledge mode receives no grinding credit.
     pub pow: u32,
     pub hash: EngineId,
     pub size: usize,
@@ -102,29 +103,6 @@ struct RoundContext {
     size: usize,
     rate: u32,
     folds: u32,
-}
-/// Unique, Johnson, and conjectured capacity decoding bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DecodingRegime {
-    Unique,
-    Johnson,
-    Capacity,
-}
-impl Display for DecodingRegime {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl FromStr for DecodingRegime {
-    type Err = DeriveError;
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "Unique" => Ok(Self::Unique),
-            "Johnson" => Ok(Self::Johnson),
-            "Capacity" => Ok(Self::Capacity),
-            _ => Err(DeriveError("invalid decoding regime")),
-        }
-    }
 }
 
 /// The serialized request is the only external configuration input.
@@ -171,12 +149,12 @@ impl<M: Embedding> ProtocolConfig<M> {
             |code| code.vector_size(),
         )
     }
-    pub fn first_round(&self) -> Option<RoundConfig<'_, M>> {
+    pub(crate) fn first_round(&self) -> Option<RoundConfig<'_, M>> {
         self.first
             .as_ref()
             .map(|source| derive::round(self.params(), source, &self.targets[0], 0).unwrap())
     }
-    pub fn tail_rounds(
+    pub(crate) fn tail_rounds(
         &self,
     ) -> impl ExactSizeIterator<Item = RoundConfig<'_, Identity<M::Target>>> {
         self.targets
@@ -193,7 +171,7 @@ impl<M: Embedding> ProtocolConfig<M> {
     pub fn final_commit(&self) -> &IrsConfig<Identity<M::Target>> {
         self.targets.last().expect("final commitment")
     }
-    /// Standard terminal primitive; Zook uses only its sumcheck after blinding the final claim.
+    /// Standard terminal primitive; zero-knowledge mode uses only its sumcheck after blinding the final claim.
     pub(crate) fn basecase(&self) -> BasecaseConfig<'_, M::Target> {
         BasecaseConfig::new(
             self.final_commit(),
@@ -207,11 +185,11 @@ impl<M: Embedding> ProtocolConfig<M> {
             PowConfig::none(),
         )
     }
-    pub const fn joint_masks(&self) -> Option<&JointMaskConfig<M::Target>> {
+    pub(crate) const fn joint_masks(&self) -> Option<&JointMaskConfig<M::Target>> {
         self.joint_masks.as_ref()
     }
     /// Mask dimensions come from the commitment that owns the corresponding witness.
-    pub fn witness_mask(&self, index: usize) -> Option<WitnessMaskConfig> {
+    pub(crate) fn witness_mask(&self, index: usize) -> Option<WitnessMaskConfig> {
         assert!(index <= self.num_rounds());
         if !self.params().mode.is_zk() {
             return None;
@@ -224,6 +202,47 @@ impl<M: Embedding> ProtocolConfig<M> {
         };
         Some(mask.expect("construction checked witness mask dimensions"))
     }
+}
+
+impl<M: Embedding> Display for ProtocolConfig<M> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let params = self.params();
+        writeln!(
+            f,
+            "{:?} mode, {} decoding, {} bits, {:.0}-bit target field",
+            params.mode,
+            params.regime,
+            params.bits,
+            M::Target::field_size_bits()
+        )?;
+        if let Some(round) = self.first_round() {
+            write_round(f, &round)?;
+        }
+        for round in self.tail_rounds() {
+            write_round(f, &round)?;
+        }
+        let basecase = self.basecase();
+        writeln!(f, "Final:")?;
+        writeln!(f, "  commit   {}", self.final_commit())?;
+        writeln!(f, "  sumcheck {}", basecase.sumcheck())?;
+        if let Some(masks) = self.joint_masks() {
+            writeln!(f, "Masks:")?;
+            writeln!(f, "  commit   {}", masks.commit)?;
+        }
+        Ok(())
+    }
+}
+
+fn write_round<M: Embedding>(f: &mut Formatter<'_>, round: &RoundConfig<'_, M>) -> fmt::Result {
+    writeln!(f, "Round {}:", round.index)?;
+    writeln!(f, "  commit   {}", round.code_switch.source())?;
+    writeln!(f, "  sumcheck {}", round.sumcheck)?;
+    writeln!(
+        f,
+        "  switch   ood {} pow {:.2}",
+        round.code_switch.out_domain_samples(),
+        round.code_switch.pow().difficulty()
+    )
 }
 
 /// A temporary execution view; each borrowed IRS has one owner in ProtocolConfig.

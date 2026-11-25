@@ -1,4 +1,4 @@
-//! Joint-mask claim reduction through Zook folding rounds.
+//! Joint-mask claim reduction through WHIR folding rounds.
 
 use std::any::Any;
 
@@ -19,20 +19,19 @@ use crate::{
         basecase::Opening,
         code_switch::{Claim, CovectorUpdateParams},
         irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
-        params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
         sumcheck::SumcheckOpening,
-        zook::{
-            binding::MaskBinding,
-            claims::{sumcheck_blinding, MaskClaims},
-            commit::{
-                overlay_mask, Commitment, CommittedState, CommittedWitness, JointMaskWitness,
-            },
-            evaluate_padded, FinalClaim,
-        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
         VerificationResult, VerifierMessage, VerifierState,
+    },
+    whir::{
+        binding::MaskBinding,
+        claims::{sumcheck_blinding, MaskClaims},
+        commit::{overlay_mask, Commitment, CommittedState, CommittedWitness, JointMaskWitness},
+        evaluate_padded,
+        params::{JointMaskConfig, ProtocolConfig, RoundConfig, WitnessMaskConfig},
+        FinalClaim,
     },
 };
 
@@ -307,7 +306,7 @@ where
         evaluations.len(),
         "linear_forms.len() != evaluations.len()"
     );
-    assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
+    assert!(!forms.is_empty(), "whir requires ≥ 1 linear form");
     let claim_weights = geometric_sequence(M::Target::ONE, ps.verifier_message(), forms.len());
     let mut covector = vec![M::Target::ZERO; config.padded_vector_size()];
     for (form, &weight) in forms.iter().zip(&claim_weights) {
@@ -420,7 +419,7 @@ where
         evaluations.len(),
         "linear_forms.len() != evaluations.len()"
     );
-    assert!(!forms.is_empty(), "zook requires ≥ 1 linear form");
+    assert!(!forms.is_empty(), "whir requires ≥ 1 linear form");
     assert!(forms.iter().all(|form| form.size() <= config.params().size));
     let claim_weights = geometric_sequence(M::Target::ONE, vs.verifier_message(), forms.len());
     let sum = evaluations
@@ -666,8 +665,9 @@ mod tests {
             linear_form::{Covector, Evaluate},
             random_vector, univariate_evaluate,
         },
-        protocols::params::{DecodingRegime, Mode, Params, RateSchedule},
+        soundness::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator},
+        whir::params::{Mode, Params, RateSchedule},
     };
 
     #[test]

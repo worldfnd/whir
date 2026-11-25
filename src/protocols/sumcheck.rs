@@ -117,11 +117,6 @@ impl<F: Field> Config<F> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) const fn override_round_pow_for_test(&mut self, round_pow: proof_of_work::Config) {
-        self.round_pow = round_pow;
-    }
-
     pub fn final_size(&self) -> usize {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds

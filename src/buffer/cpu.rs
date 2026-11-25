@@ -1,16 +1,11 @@
 //! In-memory CPU backend for the buffer abstraction.
 
-use std::{any::Any, mem};
-
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
 use zeroize::Zeroize;
 
 use crate::{
-    algebra::{
-        embedding::Embedding,
-        linear_form::{Covector, LinearForm},
-    },
+    algebra::embedding::Embedding,
     buffer::{BufferMath, BufferOps},
     engines::EngineId,
     hash::{self, Hash},
@@ -155,27 +150,6 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         crate::algebra::dot(&self.data, &other.data)
     }
 
-    fn bilinear_form(&self, rows: &Self, cols: &Self) -> F {
-        let expected = rows
-            .data
-            .len()
-            .checked_mul(cols.data.len())
-            .expect("matrix dimensions overflow");
-        assert_eq!(self.data.len(), expected, "matrix dimensions mismatch");
-        if cols.data.is_empty() {
-            return F::ZERO;
-        }
-        crate::utils::zip_strict(&rows.data, self.data.chunks_exact(cols.len()))
-            .map(|(r, row)| *r * crate::algebra::dot(&cols.data, row))
-            .sum()
-    }
-
-    fn tensor_product(&self, other: &Self) -> Self {
-        Self {
-            data: crate::algebra::tensor_product(&self.data, &other.data),
-        }
-    }
-
     fn eq_weights(point: &[F]) -> Self {
         Self {
             data: crate::algebra::eq_weights(point),
@@ -294,48 +268,6 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         CpuBuffer {
             data: crate::algebra::geometric_sequence(current, base, length),
         }
-    }
-
-    fn linear_forms_rlc(
-        size: usize,
-        linear_forms: &mut [Box<dyn LinearForm<F>>],
-        rlc_coeffs: &Self,
-    ) -> Self {
-        assert_eq!(linear_forms.len(), rlc_coeffs.len());
-        let rlc_coeffs = rlc_coeffs.to_slice();
-        let mut covector = vec![F::ZERO; size];
-        if let Some((first, linear_forms)) = linear_forms.split_first_mut() {
-            debug_assert_eq!(rlc_coeffs[0], F::ONE);
-            if let Some(covector_form) =
-                (first.as_mut() as &mut dyn Any).downcast_mut::<Covector<F>>()
-            {
-                mem::swap(&mut covector, &mut covector_form.vector);
-            } else {
-                first.accumulate(&mut covector, F::ONE);
-            }
-            for (rlc_coeff, linear_form) in rlc_coeffs[1..].iter().zip(linear_forms) {
-                linear_form.accumulate(&mut covector, *rlc_coeff);
-            }
-        }
-        Self { data: covector }
-    }
-
-    fn mixed_linear_combination<M: Embedding<Source = F>>(
-        embedding: &M,
-        vectors: &[&Self],
-        coeffs: &Self::TargetBuffer<M::Target>,
-    ) -> CpuBuffer<M::Target> {
-        let coeffs = coeffs.to_slice();
-        assert_eq!(vectors.len(), coeffs.len());
-        let Some((first, vectors)) = vectors.split_first() else {
-            return CpuBuffer { data: Vec::new() };
-        };
-        debug_assert_eq!(coeffs[0], M::Target::ONE);
-        let mut accumulator = crate::algebra::lift(embedding, &first.data);
-        for (coeff, vector) in coeffs[1..].iter().zip(vectors) {
-            crate::algebra::mixed_scalar_mul_add(embedding, &mut accumulator, *coeff, &vector.data);
-        }
-        CpuBuffer { data: accumulator }
     }
 }
 

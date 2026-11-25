@@ -12,13 +12,13 @@ use crate::{
     algebra::{embedding::Embedding, random_vector},
     buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
-    protocols::{
-        irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
-        params::{JointMaskConfig, ProtocolConfig, WitnessMaskConfig},
-        zook::binding::{prove_binding, receive_binding, MaskBinding},
-    },
+    protocols::irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
     transcript::{
         Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,
+    },
+    whir::{
+        binding::{prove_binding, receive_binding, MaskBinding},
+        params::{JointMaskConfig, ProtocolConfig, WitnessMaskConfig},
     },
 };
 
@@ -33,7 +33,7 @@ pub struct CommittedWitness<M: Embedding> {
 
 /// Joint masks and their final-opening blinder, committed as two columns in one tree.
 #[derive(Clone, Debug)]
-pub(crate) struct JointMaskWitness<F: Field> {
+pub struct JointMaskWitness<F: Field> {
     pub(crate) coefficients: Buffer<F>,
     pub(crate) opening_blinder: Buffer<F>,
     pub(crate) irs_witness: IrsWitness<F>,
@@ -50,7 +50,7 @@ impl<F: Field> Drop for JointMaskWitness<F> {
 
 /// Internal: the two branches differ in their IRS witness field type.
 #[derive(Clone, Debug)]
-pub(crate) enum CommittedState<M: Embedding> {
+pub enum CommittedState<M: Embedding> {
     /// Plan has ≥ 1 round; committed through `rounds[0].code_switch.source`.
     /// The message stays in `M::Source`: the first round's sumcheck lifts it
     /// into `M::Target` at its first fold.
@@ -75,12 +75,12 @@ pub struct Commitment<F: Field> {
 }
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    /// Commit all Zook masks, then the padded witness with overlaid prefixes.
+    /// Commit all masks, then the padded witness with overlaid prefixes.
     ///
     /// Section 5.3, “Overlaid masks instead of zk-encoding”: each source polynomial
     /// is committed as `p + mask` with unchanged degree. Section 5.4, “ZO0K”,
     /// “The required masks”: every mask is sampled before folding starts.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::commit", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "whir::commit", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
     pub fn commit<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
@@ -93,7 +93,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        assert_eq!(witness.len(), self.params().size, "zook witness length",);
+        assert_eq!(witness.len(), self.params().size, "whir witness length");
 
         witness.resize_zeroed(self.padded_vector_size());
         let mut initial_mask = Zeroizing::new(Vec::new());
@@ -159,7 +159,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     }
 
     /// Verifier mirror of [`Self::commit`].
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::receive_commitment", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "whir::receive_commitment", fields(vector_size = self.params().size, num_rounds = self.num_rounds())))]
     pub fn receive_commitment<H>(
         &self,
         vs: &mut VerifierState<H>,
@@ -288,11 +288,9 @@ mod tests {
             fields::{Field64, Field64_2},
             univariate_evaluate,
         },
-        protocols::{
-            irs_commit::Evaluations,
-            params::{Mode, Params, RateSchedule},
-        },
+        protocols::irs_commit::Evaluations,
         transcript::{codecs::Empty, DomainSeparator, VerifierMessage},
+        whir::params::{Mode, Params, RateSchedule},
     };
 
     type M = Basefield<Field64_2>;
@@ -301,7 +299,7 @@ mod tests {
         ProtocolConfig::derive(Params {
             bits: 80,
             mode,
-            regime: crate::protocols::params::DecodingRegime::Johnson,
+            regime: crate::soundness::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
             size: vector_size,
@@ -318,7 +316,7 @@ mod tests {
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
         let witness = Buffer::<M::Source>::ones(config.params().size);
-        let ds = DomainSeparator::protocol(&"zook-commit-test")
+        let ds = DomainSeparator::protocol(&"whir-commit-test")
             .session(&"joint mask and witness commitment")
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);
@@ -578,10 +576,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "zook witness length")]
+    #[should_panic(expected = "whir witness length")]
     fn commit_rejects_wrong_witness_size() {
         let config = config::<M>(Mode::ZeroKnowledge, 4096);
-        let ds = DomainSeparator::protocol(&"zook-commit-test")
+        let ds = DomainSeparator::protocol(&"whir-commit-test")
             .session(&"wrong witness size")
             .instance(&Empty);
         let mut ps = ProverState::new_std(&ds);

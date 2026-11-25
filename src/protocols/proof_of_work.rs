@@ -62,16 +62,6 @@ impl Config {
         }
     }
 
-    /// Creates a new configuration from a difficulty.
-    ///
-    /// Defaults to Blake3 as the hash function.
-    pub fn from_difficulty(difficulty: Bits) -> Self {
-        Self {
-            hash_id: BLAKE3,
-            threshold: threshold(difficulty),
-        }
-    }
-
     pub fn difficulty(&self) -> Bits {
         difficulty(self.threshold)
     }
