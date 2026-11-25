@@ -47,7 +47,7 @@ struct Args {
     folding_factor: usize,
 
     /// Reed–Solomon decoding regime: Unique, Johnson, or Capacity.
-    #[arg(long = "decoding-regime", default_value = "Johnson")]
+    #[arg(long = "decoding-regime", default_value = "Johnson", value_parser = parse_regime)]
     decoding_regime: DecodingRegime,
 
     #[arg(short = 'f', long = "field", default_value = "Goldilocks3")]
@@ -63,6 +63,17 @@ struct Args {
     /// Run in zero-knowledge mode. Requires Johnson decoding.
     #[arg(long = "zk")]
     zk: bool,
+}
+
+fn parse_regime(s: &str) -> Result<DecodingRegime, String> {
+    match s {
+        "Unique" => Ok(DecodingRegime::Unique),
+        "Johnson" => Ok(DecodingRegime::Johnson),
+        "Capacity" => Ok(DecodingRegime::Capacity),
+        _ => Err(format!(
+            "invalid decoding regime: {s}, options are: Unique, Johnson, Capacity"
+        )),
+    }
 }
 
 fn parse_schedule(s: &str) -> Result<RateSchedule, String> {

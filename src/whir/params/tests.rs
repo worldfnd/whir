@@ -87,10 +87,6 @@ fn independent_decoding_and_probability_anchors() {
         assert_close(actual[0], list);
         assert_close(actual[1], f64::log2(distance));
         assert_close(actual[2], mca);
-        assert_eq!(
-            policy.to_string().parse::<DecodingRegime>().unwrap(),
-            policy
-        );
     }
     for (a, b, sum) in [
         (f64::NEG_INFINITY, -80.0, -80.0),

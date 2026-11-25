@@ -6,8 +6,6 @@
 //!
 //! [ProveKit whitepaper]: https://github.com/worldfnd/provekit/tree/6605cf5242567e17899a26c27db829c7ce9eb478/whitepaper
 
-use std::str::FromStr;
-
 use ark_ff::Field;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -100,17 +98,6 @@ struct RoundContext {
     size: usize,
     rate: u32,
     folds: u32,
-}
-impl FromStr for DecodingRegime {
-    type Err = DeriveError;
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "Unique" => Ok(Self::Unique),
-            "Johnson" => Ok(Self::Johnson),
-            "Capacity" => Ok(Self::Capacity),
-            _ => Err(DeriveError("invalid decoding regime")),
-        }
-    }
 }
 
 /// The serialized request is the only external configuration input.
