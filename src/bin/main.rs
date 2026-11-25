@@ -222,8 +222,9 @@ where
         .map(M::Source::from)
         .collect::<Vec<_>>();
 
+    let vector_buffer = Buffer::from(vector.as_slice());
     let whir_commit_time = Instant::now();
-    let committed = params.commit(&mut prover_state, Buffer::from(vector.as_slice()));
+    let committed = params.commit(&mut prover_state, vector_buffer);
     let whir_commit_time = whir_commit_time.elapsed();
 
     // Allocate constraints
