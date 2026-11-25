@@ -30,7 +30,7 @@ mod derive;
 mod joint;
 mod masks;
 mod search;
-pub(crate) mod security;
+mod security;
 #[cfg(test)]
 mod tests;
 

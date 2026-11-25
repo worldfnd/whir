@@ -11,12 +11,13 @@ pub mod transcript;
 pub mod type_info;
 pub mod type_map;
 pub mod utils; // Utils in general
-pub mod whir;
+mod whir;
 
 pub use soundness::DecodingRegime;
 pub use whir::{
     params::{
-        DeriveError, JointOpeningConfig, KneeWeight, Mode, Params, ProtocolConfig, RateSchedule,
+        DeriveError, JointOpeningConfig, KneeWeight, Mode, Params, ProtocolConfig, ProtocolSpec,
+        RateSchedule,
     },
     Commitment, CommittedWitness, FinalClaim, FirstCommitment, FirstWitness, JointCommitment,
     JointWitness, ProverClaim,
