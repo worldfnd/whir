@@ -60,13 +60,11 @@ Minimum supported Rust version: 1.87.
 Commit to a vector over Goldilocks, prove one multilinear evaluation over its cubic extension, and verify it:
 
 ```rust
-use ark_std::rand::{rngs::StdRng, SeedableRng};
 use whir::{
     algebra::{
         embedding::Basefield,
         fields::{Field64, Field64_3},
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
-        random_vector,
     },
     buffer::Buffer,
     hash,
@@ -90,10 +88,9 @@ let config = ProtocolConfig::<M>::derive(Params {
 })
 .expect("valid parameters");
 
-let mut rng = StdRng::seed_from_u64(0);
-let witness: Vec<Field64> = random_vector(&mut rng, 1 << 16);
+let witness: Vec<Field64> = (0..1u64 << 16).map(Field64::from).collect();
 let form = MultilinearExtension::<Field64_3> {
-    point: random_vector(&mut rng, 16),
+    point: vec![Field64_3::from(7u64); 16],
 };
 let value = form.evaluate(&M::default(), &witness);
 let forms: [&dyn LinearForm<Field64_3>; 1] = [&form];
