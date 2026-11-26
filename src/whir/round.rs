@@ -16,8 +16,8 @@ use crate::{
         irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
     },
     transcript::{
-        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
-        VerifierState,
+        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     whir::{
         commit::{Commitment, CommittedState, CommittedWitness},
@@ -55,6 +55,7 @@ pub(super) fn reduce_prover<M, H, R>(
     second: Option<(&Config<M>, IrsWitness<M::Source>)>,
 ) -> ProverRoundState<Identity<M::Target>>
 where
+    M::Source: ProverMessage,
     M: Embedding + Default,
     M::Target: Codec,
     Standard: Distribution<M::Target>,
@@ -167,6 +168,7 @@ pub(super) fn reduce_verifier<'a, M, H>(
 where
     M: Embedding + Default,
     M::Target: Codec,
+    M::Source: ProverMessage,
     Standard: Distribution<M::Target>,
     H: DuplexSpongeInterface<U = u8>,
 {
@@ -250,6 +252,7 @@ fn prove_round<M, H, R>(
     ps: &mut ProverState<H, R>,
 ) -> ProverRoundState<Identity<M::Target>>
 where
+    M::Source: ProverMessage,
     M: Embedding,
     M::Target: Codec,
     Standard: Distribution<M::Target>,
@@ -348,6 +351,7 @@ fn verify_round<M, H>(
     vs: &mut VerifierState<H>,
 ) -> VerificationResult<()>
 where
+    M::Source: ProverMessage,
     M: Embedding,
     M::Target: Codec,
     Standard: Distribution<M::Target>,
@@ -417,6 +421,7 @@ mod tests {
         univariate_size: usize,
     ) where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
+        M::Source: ProverMessage,
     {
         let config = ProtocolConfig::<M>::derive(Params {
             bits: 80,

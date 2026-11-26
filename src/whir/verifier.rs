@@ -18,7 +18,8 @@ use crate::{
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
     },
     transcript::{
-        Codec, DuplexSpongeInterface, VerificationResult, VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInterface, ProverMessage, VerificationResult, VerifierMessage,
+        VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -91,6 +92,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     ) -> VerificationResult<FinalClaim<M::Target>>
     where
         M::Target: Codec,
+        M::Source: ProverMessage,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
     {

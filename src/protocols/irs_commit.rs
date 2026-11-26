@@ -27,8 +27,8 @@ use crate::{
     engines::EngineId,
     protocols::{challenge_indices::challenge_indices, matrix_commit},
     transcript::{
-        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
-        VerifierState,
+        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     type_info::Typed,
     utils::zip_strict,
@@ -431,6 +431,7 @@ impl<M: Embedding> Config<M> {
     where
         H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
+        M::Source: ProverMessage,
     {
         for witness in witnesses {
             assert_eq!(witness.matrix.len(), self.size());
@@ -453,7 +454,7 @@ impl<M: Embedding> Config<M> {
                         .copy_from_slice(row);
                 }
             }
-            prover_state.prover_hint_ark(&submatrix);
+            prover_state.prover_hints(&submatrix);
             self.matrix_commit
                 .open(prover_state, &witness.matrix_witness, &indices);
             matrix_col_offset += self.num_cols();
@@ -476,6 +477,7 @@ impl<M: Embedding> Config<M> {
     ) -> VerificationResult<Evaluations<M::Source>>
     where
         H: DuplexSpongeInterface<U = u8>,
+        M::Source: ProverMessage,
     {
         // Get in-domain openings
         let (indices, points) = self.in_domain_challenges(verifier_state);
@@ -486,7 +488,8 @@ impl<M: Embedding> Config<M> {
         let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
         let mut matrix_col_offset = 0;
         for commitment in commitments {
-            let submatrix: Vec<M::Source> = verifier_state.prover_hint_ark()?;
+            let submatrix: Vec<M::Source> =
+                verifier_state.prover_hints_vec(indices.len() * self.num_cols())?;
             self.matrix_commit.verify(
                 verifier_state,
                 &commitment.matrix_commitment,
@@ -648,7 +651,7 @@ pub(crate) mod tests {
             ntt::NTT,
             random_vector, univariate_evaluate,
         },
-        transcript::{codecs::U64, DomainSeparator, ProverMessage},
+        transcript::{codecs::U64, DomainSeparator},
     };
 
     #[test]

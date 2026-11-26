@@ -16,7 +16,7 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::irs_commit::{Commitment as IrsCommitment, Witness},
     transcript::{
-        codecs::U64, Codec, DuplexSpongeInterface, ProverState, VerificationError,
+        codecs::U64, Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationError,
         VerificationResult, VerifierState,
     },
 };
@@ -202,6 +202,7 @@ impl<'a, M: Embedding + Default> FirstWitness<'a, M> {
         witness: Buffer<M::Source>,
     ) -> JointWitness<'a, M>
     where
+        M::Source: ProverMessage,
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
@@ -271,6 +272,7 @@ impl<M: Embedding + Default> JointWitness<'_, M> {
     ) -> ProverClaim<M::Target>
     where
         M::Target: Codec,
+        M::Source: ProverMessage,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
@@ -303,6 +305,7 @@ impl<M: Embedding + Default> JointCommitment<'_, M> {
     ) -> VerificationResult<FinalClaim<M::Target>>
     where
         M::Target: Codec,
+        M::Source: ProverMessage,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
     {

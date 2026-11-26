@@ -10,7 +10,6 @@ mod mock_sponge;
 use std::any::type_name;
 use std::fmt::Debug;
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::{rngs::StdRng, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256, Sha3_512};
@@ -218,15 +217,13 @@ where
     }
 
     #[cfg_attr(test, track_caller)]
-    pub fn prover_hint_ark<T>(&mut self, value: &T)
+    pub fn prover_hints<T>(&mut self, hints: &[T])
     where
-        T: CanonicalSerialize + ?Sized,
+        T: NargSerialize,
     {
-        #[cfg(debug_assertions)]
-        self.push(Interaction::Hint(type_name::<T>().to_owned()));
-        value
-            .serialize_compressed(&mut self.hints)
-            .expect("Failed to serialize hint");
+        for hint in hints {
+            self.prover_hint(hint);
+        }
     }
 
     pub fn proof(self) -> Proof {
@@ -322,13 +319,11 @@ where
     }
 
     #[cfg_attr(test, track_caller)]
-    pub fn prover_hint_ark<T>(&mut self) -> VerificationResult<T>
+    pub fn prover_hints_vec<T>(&mut self, len: usize) -> VerificationResult<Vec<T>>
     where
-        T: CanonicalDeserialize,
+        T: NargDeserialize,
     {
-        #[cfg(debug_assertions)]
-        self.pop_pattern(&Interaction::Hint(type_name::<T>().to_owned()));
-        T::deserialize_compressed(&mut self.hints).map_err(|_| VerificationError)
+        (0..len).map(|_| self.prover_hint()).collect()
     }
 
     #[cfg(debug_assertions)]

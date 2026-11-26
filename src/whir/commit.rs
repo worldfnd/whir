@@ -188,7 +188,7 @@ mod tests {
             univariate_evaluate,
         },
         protocols::irs_commit::Evaluations,
-        transcript::{codecs::Empty, DomainSeparator, VerifierMessage},
+        transcript::{codecs::Empty, DomainSeparator, ProverMessage, VerifierMessage},
         whir::params::{Mode, Params, RateSchedule},
     };
 
@@ -212,6 +212,7 @@ mod tests {
     fn roundtrip<M: Embedding + Default>(config: &ProtocolConfig<M>) -> CommittedWitness<M>
     where
         M::Target: Codec<[u8]>,
+        M::Source: ProverMessage,
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
         let witness = Buffer::<M::Source>::ones(config.params().size);

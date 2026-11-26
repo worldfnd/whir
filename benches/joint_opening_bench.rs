@@ -13,7 +13,9 @@ use whir::{
         random_vector,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
+    transcript::{
+        codecs::Empty, Codec, DomainSeparator, ProverMessage, ProverState, VerifierState,
+    },
     JointOpeningConfig, Mode, Params, ProtocolConfig, RateSchedule,
 };
 
@@ -21,6 +23,7 @@ fn measure<M>(name: &str, log_size: u32, runs: usize)
 where
     M: Embedding + Default,
     M::Target: Codec + Default,
+    M::Source: ProverMessage,
     Standard: Distribution<M::Source> + Distribution<M::Target>,
 {
     let size = 1 << log_size;

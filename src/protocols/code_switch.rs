@@ -24,8 +24,8 @@ use crate::{
         proof_of_work,
     },
     transcript::{
-        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
-        VerifierState,
+        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     verify,
 };
@@ -273,6 +273,7 @@ impl<'a, M: Embedding> Config<'a, M> {
         R: RngCore + CryptoRng,
         Standard: Distribution<M::Target>,
         M::Target: Codec,
+        M::Source: ProverMessage,
     {
         self.debug_assert_source_parameters(committed_source);
         let Claim { covector, sum } = claim;
@@ -462,6 +463,7 @@ impl<'a, M: Embedding> Config<'a, M> {
         H: DuplexSpongeInterface<U = u8>,
         Standard: Distribution<M::Target>,
         M::Target: Codec,
+        M::Source: ProverMessage,
     {
         self.debug_assert_source_parameters(committed_source);
         verify!(
@@ -530,6 +532,7 @@ impl<'a, M: Embedding> Config<'a, M> {
         H: DuplexSpongeInterface<U = u8>,
         Standard: Distribution<M::Target>,
         M::Target: Codec,
+        M::Source: ProverMessage,
     {
         assert_eq!(covector.len(), self.covector_length());
 

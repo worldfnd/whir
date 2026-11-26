@@ -13,7 +13,7 @@ use crate::{
         linear_form::LinearForm,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    transcript::{Codec, DuplexSpongeInterface, ProverState, VerifierMessage},
+    transcript::{Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage},
     whir::{
         commit::CommittedWitness,
         params::ProtocolConfig,
@@ -42,6 +42,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     ) -> ProverClaim<M::Target>
     where
         M::Target: Codec,
+        M::Source: ProverMessage,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
