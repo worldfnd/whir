@@ -18,15 +18,14 @@ use crate::{
         eq_weights, lift, mixed_dot, univariate_evaluate,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    hash::Hash,
     protocols::{
         geometric_challenge::{geometric_challenge, geometric_challenge_groups_with_offset},
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
         proof_of_work,
     },
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
-        VerificationResult, VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
+        VerifierState,
     },
     verify,
 };
@@ -270,14 +269,10 @@ impl<'a, M: Embedding> Config<'a, M> {
         mask: &[M::Target],
     ) -> Witness<M::Target>
     where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
         Standard: Distribution<M::Target>,
-        M::Target: Codec<[H::U]>,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
     {
         self.debug_assert_source_parameters(committed_source);
         let Claim { covector, sum } = claim;
@@ -374,9 +369,9 @@ impl<'a, M: Embedding> Config<'a, M> {
         ood_points: &[M::Target],
     ) -> Vec<M::Target>
     where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        M::Target: Codec<[H::U]>,
+        M::Target: Codec,
     {
         let msg_len = message.len();
         let mut answers = Vec::with_capacity(ood_points.len());
@@ -464,13 +459,9 @@ impl<'a, M: Embedding> Config<'a, M> {
         commitments: &[&IrsCommitment],
     ) -> VerificationResult<(Commitment, CovectorUpdateParams<M::Target>)>
     where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         Standard: Distribution<M::Target>,
-        M::Target: Codec<[H::U]>,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
     {
         self.debug_assert_source_parameters(committed_source);
         verify!(
@@ -536,13 +527,9 @@ impl<'a, M: Embedding> Config<'a, M> {
         commitment: &IrsCommitment,
     ) -> VerificationResult<Commitment>
     where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         Standard: Distribution<M::Target>,
-        M::Target: Codec<[H::U]>,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
     {
         assert_eq!(covector.len(), self.covector_length());
 
@@ -758,7 +745,6 @@ mod tests {
     fn test_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
-        Hash: ProverMessage<[u8]>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
         // Commit the full pre-fold vector of length source.vector_size
@@ -825,7 +811,6 @@ mod tests {
     fn test_ior_identity_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
-        Hash: ProverMessage<[u8]>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
         let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size());
@@ -903,7 +888,6 @@ mod tests {
     fn test_tampered_ood_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
-        Hash: ProverMessage<[u8]>,
     {
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -974,7 +958,6 @@ mod tests {
     fn test<F: Field + Codec<[u8]> + 'static>()
     where
         Standard: Distribution<F>,
-        Hash: ProverMessage<[u8]>,
     {
         crate::test_utils::init();
         let configs = TestConfig::arbitrary(Identity::<F>::new());

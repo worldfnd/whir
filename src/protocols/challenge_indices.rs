@@ -1,6 +1,6 @@
 //! Produce challenge indices from a transcript.
 
-use crate::transcript::{Decoding, VerifierMessage};
+use crate::transcript::VerifierMessage;
 
 /// Generate a set of indices for challenges.
 pub fn challenge_indices<T>(
@@ -11,7 +11,6 @@ pub fn challenge_indices<T>(
 ) -> Vec<usize>
 where
     T: VerifierMessage,
-    u8: Decoding<[T::U]>,
 {
     if count == 0 {
         return Vec::new();
@@ -69,7 +68,6 @@ impl IndexDomain {
     fn sample<T>(&self, transcript: &mut T) -> usize
     where
         T: VerifierMessage,
-        u8: Decoding<[T::U]>,
     {
         loop {
             let candidate = self.draw_candidate(transcript);
@@ -82,7 +80,6 @@ impl IndexDomain {
     fn draw_candidate<T>(&self, transcript: &mut T) -> u128
     where
         T: VerifierMessage,
-        u8: Decoding<[T::U]>,
     {
         let mut candidate = 0u128;
         for _ in 0..self.size_bytes {

@@ -16,8 +16,7 @@ use crate::{
     engines::EngineId,
     hash::{self, Hash, HashEngine, ENGINES},
     transcript::{
-        DuplexSpongeInterface, ProverMessage, ProverState, VerificationError, VerificationResult,
-        VerifierState,
+        DuplexSpongeInterface, ProverState, VerificationError, VerificationResult, VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -135,8 +134,7 @@ impl Config {
         verifier_state: &mut VerifierState<H>,
     ) -> VerificationResult<Commitment>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         let hash = verifier_state.prover_message()?;
         Ok(Commitment { hash })
@@ -152,9 +150,8 @@ impl Config {
         witness: &Witness,
         indices: &[usize],
     ) where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(witness.nodes.len(), self.num_nodes());
         assert!(indices.iter().all(|&i| i < self.num_leaves));
@@ -173,8 +170,7 @@ impl Config {
         leaf_hashes: &[Hash],
     ) -> VerificationResult<()>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         // Validate indices.
         verify!(indices.len() == leaf_hashes.len());

@@ -9,11 +9,8 @@ use zeroize::Zeroizing;
 use crate::{
     algebra::embedding::Embedding,
     buffer::{Buffer, BufferMath, BufferOps},
-    hash::Hash,
     protocols::irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
-    transcript::{
-        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,
-    },
+    transcript::{Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierState},
     whir::{
         params::ProtocolConfig,
         zk::{
@@ -72,10 +69,9 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     ) -> CommittedWitness<M>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
     {
         assert_eq!(witness.len(), self.params().size, "whir witness length");
 
@@ -149,9 +145,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         vs: &mut VerifierState<H>,
     ) -> VerificationResult<Commitment<M::Target>>
     where
-        H: DuplexSpongeInterface,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        M::Target: Codec,
     {
         let joint_masks = self
             .joint_masks()

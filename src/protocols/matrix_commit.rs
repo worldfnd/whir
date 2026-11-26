@@ -17,8 +17,7 @@ use crate::{
     hash::{self, Hash},
     protocols::merkle_tree,
     transcript::{
-        DuplexSpongeInterface, ProverMessage, ProverState, VerificationError, VerificationResult,
-        VerifierState,
+        DuplexSpongeInterface, ProverState, VerificationError, VerificationResult, VerifierState,
     },
     type_info::{Type, TypeInfo},
     utils::{workload_size, zip_strict},
@@ -225,9 +224,8 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self, size = matrix.len(), engine)))]
     pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, matrix: &Buffer<T>) -> Witness
     where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(matrix.len(), self.num_rows() * self.num_cols);
 
@@ -242,8 +240,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         verifier_state: &mut VerifierState<H>,
     ) -> VerificationResult<Commitment>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         self.merkle_tree.receive_commitment(verifier_state)
     }
@@ -259,9 +256,8 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         witness: &Witness,
         indices: &[usize],
     ) where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        Hash: ProverMessage<[H::U]>,
     {
         self.merkle_tree.open(prover_state, witness, indices);
     }
@@ -279,8 +275,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         matrix: &[T],
     ) -> VerificationResult<()>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         verify!(matrix.len() == self.num_cols * indices.len());
 

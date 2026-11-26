@@ -13,8 +13,8 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::proof_of_work,
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
+        VerifierState,
     },
     type_info::Type,
     utils::chunks_exact_or_empty,
@@ -158,11 +158,9 @@ impl<F: Field> Config<F> {
     ) -> (Buffer<F>, SumcheckOpening<F>)
     where
         M: Embedding<Target = F>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: CryptoRng + RngCore,
-        F: Codec<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
+        F: Codec,
     {
         self.prove_with_carried_sum(prover_state, embedding, a, b, sum, masks, F::ZERO)
     }
@@ -191,11 +189,9 @@ impl<F: Field> Config<F> {
     ) -> (Buffer<F>, SumcheckOpening<F>)
     where
         M: Embedding<Target = F>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: CryptoRng + RngCore,
-        F: Codec<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
+        F: Codec,
     {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
@@ -317,9 +313,9 @@ impl<F: Field> Config<F> {
         masks: &[F],
     ) -> (F, F)
     where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: CryptoRng + RngCore,
-        F: Codec<[H::U]>,
+        F: Codec,
     {
         match &self.mode {
             SumcheckMode::Standard => (F::ZERO, F::ONE),
@@ -347,10 +343,8 @@ impl<F: Field> Config<F> {
         sum: &mut F,
     ) -> VerificationResult<SumcheckOpening<F>>
     where
-        H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        F: Codec,
     {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
@@ -392,8 +386,8 @@ impl<F: Field> Config<F> {
         sum: &mut F,
     ) -> VerificationResult<F>
     where
-        H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        F: Codec,
     {
         match &self.mode {
             SumcheckMode::Standard => Ok(F::ONE),
@@ -470,7 +464,7 @@ mod tests {
             multilinear_extend, random_vector,
         },
         buffer::Buffer,
-        transcript::DomainSeparator,
+        transcript::{codecs::U64, DomainSeparator},
     };
 
     impl<F: Field + 'static> Config<F>

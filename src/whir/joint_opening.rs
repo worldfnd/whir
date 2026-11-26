@@ -14,11 +14,10 @@ use super::{
 use crate::{
     algebra::{embedding::Embedding, linear_form::LinearForm},
     buffer::{Buffer, BufferMath, BufferOps},
-    hash::Hash,
     protocols::irs_commit::{Commitment as IrsCommitment, Witness},
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
-        VerificationError, VerificationResult, VerifierState,
+        codecs::U64, Codec, DuplexSpongeInterface, ProverState, VerificationError,
+        VerificationResult, VerifierState,
     },
 };
 
@@ -64,10 +63,9 @@ fn commit_masks<M, H, R>(
 where
     M: Embedding + Default,
     Standard: Distribution<M::Source> + Distribution<M::Target>,
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
-    M::Target: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    M::Target: Codec,
 {
     config.combined().joint_masks().map(|layout| {
         let (coefficients, initial) = sample_masks::<M, _>(layout, true, ps.rng());
@@ -89,9 +87,8 @@ fn receive_masks<M, H>(
 ) -> VerificationResult<Option<IrsCommitment>>
 where
     M: Embedding + Default,
-    H: DuplexSpongeInterface,
-    M::Target: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    H: DuplexSpongeInterface<U = u8>,
+    M::Target: Codec,
 {
     config
         .combined()
@@ -109,10 +106,9 @@ fn commit_witness<M, H, R>(
 where
     M: Embedding + Default,
     Standard: Distribution<M::Source>,
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
-    M::Target: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    M::Target: Codec,
 {
     assert_eq!(
         message.len(),
@@ -140,10 +136,9 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
     ) -> FirstWitness<'_, M>
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
     {
         let (masks, initial) = commit_masks(self, ps).unzip();
         let initial = initial.unwrap_or_default();
@@ -178,9 +173,8 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
         vs: &mut VerifierState<H>,
     ) -> VerificationResult<FirstCommitment<'_, M>>
     where
-        H: DuplexSpongeInterface,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        M::Target: Codec,
     {
         let masks = receive_masks(self, vs)?;
         let mask_binding = self
@@ -209,10 +203,9 @@ impl<'a, M: Embedding + Default> FirstWitness<'a, M> {
     ) -> JointWitness<'a, M>
     where
         Standard: Distribution<M::Source>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
     {
         let CommittedState::Round {
             message: right_message,
@@ -240,9 +233,8 @@ impl<'a, M: Embedding + Default> FirstCommitment<'a, M> {
         vs: &mut VerifierState<H>,
     ) -> VerificationResult<JointCommitment<'a, M>>
     where
-        H: DuplexSpongeInterface,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        M::Target: Codec,
     {
         let right = self.config.witness_commitment().receive_commitment(vs)?;
         Ok(JointCommitment {
@@ -278,14 +270,10 @@ impl<M: Embedding + Default> JointWitness<'_, M> {
         values: &[M::Target],
     ) -> ProverClaim<M::Target>
     where
-        M::Target: Codec<[H::U]>,
+        M::Target: Codec,
         Standard: Distribution<M::Target>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
     {
         assert!(
             check_claims(self.config, forms, values).is_ok(),
@@ -314,13 +302,9 @@ impl<M: Embedding + Default> JointCommitment<'_, M> {
         values: &[M::Target],
     ) -> VerificationResult<FinalClaim<M::Target>>
     where
-        M::Target: Codec<[H::U]>,
+        M::Target: Codec,
         Standard: Distribution<M::Target>,
-        H: DuplexSpongeInterface,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         check_claims(self.config, forms, values)?;
         if vs.prover_message::<U64>()?.0 != values.len() as u64 {

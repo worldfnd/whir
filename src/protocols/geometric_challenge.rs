@@ -14,7 +14,7 @@ use crate::{
 pub fn geometric_challenge<T, F>(transcript: &mut T, count: usize) -> Vec<F>
 where
     T: VerifierMessage,
-    F: Field + Decoding<[T::U]>,
+    F: Field + Decoding,
 {
     let base = geometric_challenge_base(transcript, count);
     geometric_sequence(F::ONE, base, count)
@@ -27,7 +27,7 @@ where
 pub fn geometric_challenge_base<T, F>(transcript: &mut T, count: usize) -> F
 where
     T: VerifierMessage,
-    F: Field + Decoding<[T::U]>,
+    F: Field + Decoding,
 {
     if count > 1 {
         transcript.verifier_message()
@@ -50,7 +50,7 @@ pub fn geometric_challenge_groups_with_offset<T, F>(
 ) -> (F, Vec<Buffer<F>>)
 where
     T: VerifierMessage,
-    F: Field + Decoding<[T::U]>,
+    F: Field + Decoding,
 {
     let total = offset + lengths.iter().sum::<usize>();
     let base: F = geometric_challenge_base(transcript, total);

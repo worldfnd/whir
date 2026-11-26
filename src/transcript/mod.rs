@@ -71,7 +71,7 @@ pub struct Proof {
 
 pub struct ProverState<H = StdHash, R = StdRng>
 where
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
 {
     inner: spongefish::ProverState<H, R>,
@@ -83,7 +83,7 @@ where
 
 pub struct VerifierState<'a, H = StdHash>
 where
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
 {
     inner: spongefish::VerifierState<'a, H>,
     hints: &'a [u8],
@@ -93,15 +93,13 @@ where
 }
 
 pub trait VerifierMessage {
-    type U;
-
     fn verifier_message<T>(&mut self) -> T
     where
-        T: Decoding<[Self::U]>;
+        T: Decoding;
 
     fn verifier_message_vec<T>(&mut self, count: usize) -> Vec<T>
     where
-        T: Decoding<[Self::U]>,
+        T: Decoding,
     {
         (0..count).map(|_| self.verifier_message()).collect()
     }
@@ -146,7 +144,7 @@ where
 
 impl<H> ProverState<H, StdRng>
 where
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
 {
     /// Construct a new prover state with a custom duplex hash function.
     ///
@@ -154,8 +152,7 @@ where
     /// instance with a non-standard random number generator.
     pub fn new<I>(ds: &DomainSeparator<'_, I>, duplex: H) -> Self
     where
-        u8: Encoding<[H::U]>,
-        I: Encoding<[H::U]>,
+        I: Encoding,
     {
         Self {
             inner: spongefish::DomainSeparator::new(ds.protocol_id)
@@ -182,7 +179,7 @@ impl ProverState<StdHash, StdRng> {
 
 impl<H, R> ProverState<H, R>
 where
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
 {
     /// Access the prover's private transcript-bound RNG.
@@ -193,7 +190,7 @@ where
     #[cfg_attr(test, track_caller)]
     pub fn prover_message<T>(&mut self, message: &T)
     where
-        T: Encoding<[H::U]> + NargSerialize + ?Sized,
+        T: Encoding + NargSerialize + ?Sized,
     {
         #[cfg(debug_assertions)]
         self.push(Interaction::ProverMessage(type_name::<T>().to_owned()));
@@ -203,7 +200,7 @@ where
     #[cfg_attr(test, track_caller)]
     pub fn prover_messages<T>(&mut self, messages: &[T])
     where
-        T: Encoding<[H::U]> + NargSerialize,
+        T: Encoding + NargSerialize,
     {
         for message in messages {
             self.prover_message(message);
@@ -250,15 +247,13 @@ where
 
 impl<H, R> VerifierMessage for ProverState<H, R>
 where
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
 {
-    type U = H::U;
-
     #[cfg_attr(test, track_caller)]
     fn verifier_message<T>(&mut self) -> T
     where
-        T: Decoding<[H::U]>,
+        T: Decoding,
     {
         #[cfg(debug_assertions)]
         self.push(Interaction::VerifierMessage(type_name::<T>().to_owned()));
@@ -268,12 +263,11 @@ where
 
 impl<'a, H> VerifierState<'a, H>
 where
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
 {
     pub fn new<'b, I>(ds: &DomainSeparator<'b, I>, proof: &'a Proof, duplex: H) -> Self
     where
-        u8: Encoding<[H::U]>,
-        I: Encoding<[H::U]>,
+        I: Encoding,
     {
         Self {
             inner: spongefish::DomainSeparator::new(ds.protocol_id)
@@ -302,7 +296,7 @@ where
     #[cfg_attr(test, track_caller)]
     pub fn prover_message<T>(&mut self) -> VerificationResult<T>
     where
-        T: Encoding<[H::U]> + NargDeserialize,
+        T: Encoding + NargDeserialize,
     {
         #[cfg(debug_assertions)]
         self.pop_pattern(&Interaction::ProverMessage(type_name::<T>().to_owned()));
@@ -312,7 +306,7 @@ where
     #[cfg_attr(test, track_caller)]
     pub fn prover_messages_vec<T>(&mut self, len: usize) -> VerificationResult<Vec<T>>
     where
-        T: Encoding<[H::U]> + NargDeserialize,
+        T: Encoding + NargDeserialize,
     {
         (0..len).map(|_| self.prover_message()).collect()
     }
@@ -362,14 +356,12 @@ impl<'a> VerifierState<'a, StdHash> {
 
 impl<H> VerifierMessage for VerifierState<'_, H>
 where
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
 {
-    type U = H::U;
-
     #[cfg_attr(test, track_caller)]
     fn verifier_message<T>(&mut self) -> T
     where
-        T: Decoding<[H::U]>,
+        T: Decoding,
     {
         #[cfg(debug_assertions)]
         self.pop_pattern(&Interaction::VerifierMessage(type_name::<T>().to_owned()));

@@ -50,8 +50,8 @@ pub(in crate::whir) fn prove_binding<F, H, R>(
     ps: &mut ProverState<H, R>,
 ) -> MaskBinding<F>
 where
-    F: Field + Codec<[H::U]>,
-    H: DuplexSpongeInterface,
+    F: Field + Codec,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
 {
     let point = binding_challenge(ps);
@@ -76,8 +76,8 @@ pub(in crate::whir) fn receive_binding<F, H>(
     vs: &mut VerifierState<H>,
 ) -> VerificationResult<MaskBinding<F>>
 where
-    F: Field + Codec<[H::U]>,
-    H: DuplexSpongeInterface,
+    F: Field + Codec,
+    H: DuplexSpongeInterface<U = u8>,
 {
     let point = binding_challenge(vs);
     let evaluation = vs.prover_message()?;
@@ -95,7 +95,7 @@ where
 /// Exclude zero: the shifted membership blinder vanishes there, exposing a mask coefficient.
 fn binding_challenge<F, T>(transcript: &mut T) -> F
 where
-    F: Field + Decoding<[T::U]>,
+    F: Field + Decoding,
     T: VerifierMessage,
 {
     loop {

@@ -11,14 +11,13 @@ use crate::{
         linear_form::LinearForm,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    hash::Hash,
     protocols::{
         code_switch::Claim,
         irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
     },
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
-        VerificationResult, VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
+        VerifierState,
     },
     whir::{
         commit::{Commitment, CommittedState, CommittedWitness},
@@ -57,14 +56,10 @@ pub(super) fn reduce_prover<M, H, R>(
 ) -> ProverRoundState<Identity<M::Target>>
 where
     M: Embedding + Default,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
 {
     assert_eq!(
         forms.len(),
@@ -171,13 +166,9 @@ pub(super) fn reduce_verifier<'a, M, H>(
 ) -> VerificationResult<VerifierRoundState<'a, M::Target>>
 where
     M: Embedding + Default,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    H: DuplexSpongeInterface<U = u8>,
 {
     assert_eq!(
         forms.len(),
@@ -260,14 +251,10 @@ fn prove_round<M, H, R>(
 ) -> ProverRoundState<Identity<M::Target>>
 where
     M: Embedding,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
+    H: DuplexSpongeInterface<U = u8>,
     R: RngCore + CryptoRng,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
 {
     assert_eq!(state.masks.is_some(), mask_plan.is_some());
     let index = round.index;
@@ -362,13 +349,9 @@ fn verify_round<M, H>(
 ) -> VerificationResult<()>
 where
     M: Embedding,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    H: DuplexSpongeInterface<U = u8>,
 {
     assert_eq!(state.masks.is_some(), mask_plan.is_some());
     let index = round.index;

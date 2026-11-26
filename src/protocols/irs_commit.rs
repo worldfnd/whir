@@ -25,11 +25,10 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     decoding::{decoding_bounds, decoding_distance, DecodingRegime},
     engines::EngineId,
-    hash::Hash,
     protocols::{challenge_indices::challenge_indices, matrix_commit},
     transcript::{
-        Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
+        VerifierState,
     },
     type_info::Typed,
     utils::zip_strict,
@@ -361,10 +360,9 @@ impl<M: Embedding> Config<M> {
     ) -> Witness<M::Source>
     where
         Standard: Distribution<M::Source>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
     {
         // Validate config
         assert!((self.vector_size).is_multiple_of(self.interleaving_depth));
@@ -410,9 +408,8 @@ impl<M: Embedding> Config<M> {
         verifier_state: &mut VerifierState<H>,
     ) -> VerificationResult<Commitment>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
-        M::Target: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        M::Target: Codec,
     {
         let matrix_commitment = self.matrix_commit.receive_commitment(verifier_state)?;
         Ok(Commitment { matrix_commitment })
@@ -432,10 +429,8 @@ impl<M: Embedding> Config<M> {
         witnesses: &[&Witness<M::Source>],
     ) -> Evaluations<M::Source>
     where
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        u8: Decoding<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
     {
         for witness in witnesses {
             assert_eq!(witness.matrix.len(), self.size());
@@ -480,9 +475,7 @@ impl<M: Embedding> Config<M> {
         commitments: &[&Commitment],
     ) -> VerificationResult<Evaluations<M::Source>>
     where
-        H: DuplexSpongeInterface,
-        u8: Decoding<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         // Get in-domain openings
         let (indices, points) = self.in_domain_challenges(verifier_state);
@@ -521,7 +514,6 @@ impl<M: Embedding> Config<M> {
     fn in_domain_challenges<T>(&self, transcript: &mut T) -> (Vec<usize>, Vec<M::Source>)
     where
         T: VerifierMessage,
-        u8: Decoding<[T::U]>,
     {
         // Get in-domain openings
         let indices = challenge_indices(
@@ -656,7 +648,7 @@ pub(crate) mod tests {
             ntt::NTT,
             random_vector, univariate_evaluate,
         },
-        transcript::{codecs::U64, DomainSeparator},
+        transcript::{codecs::U64, DomainSeparator, ProverMessage},
     };
 
     #[test]

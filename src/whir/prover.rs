@@ -13,11 +13,7 @@ use crate::{
         linear_form::LinearForm,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    hash::Hash,
-    transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
-        VerifierMessage,
-    },
+    transcript::{Codec, DuplexSpongeInterface, ProverState, VerifierMessage},
     whir::{
         commit::CommittedWitness,
         params::ProtocolConfig,
@@ -45,14 +41,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         evaluations: &[M::Target],
     ) -> ProverClaim<M::Target>
     where
-        M::Target: Codec<[H::U]>,
+        M::Target: Codec,
         Standard: Distribution<M::Target>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
     {
         let reduced = reduce_prover(self, ps, committed, linear_forms, evaluations, None);
         self.prove_final_opening(ps, reduced)
@@ -64,14 +56,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         mut state: ProverRoundState<Identity<M::Target>>,
     ) -> ProverClaim<M::Target>
     where
-        M::Target: Codec<[H::U]>,
+        M::Target: Codec,
         Standard: Distribution<M::Target>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
     {
         let basecase = self.basecase();
         let suffix = if self.params().mode.is_zk() {
@@ -121,12 +109,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         ps: &mut ProverState<H, R>,
         state: &mut ProverRoundState<Identity<M::Target>>,
     ) where
-        M::Target: Codec<[H::U]>,
+        M::Target: Codec,
         Standard: Distribution<M::Target>,
-        H: DuplexSpongeInterface,
+        H: DuplexSpongeInterface<U = u8>,
         R: RngCore + CryptoRng,
-        u8: Decoding<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
     {
         let (Some(layout), Some(masks)) = (self.joint_masks(), state.masks.as_mut()) else {
             panic!("final opening requires the joint mask commitment");
