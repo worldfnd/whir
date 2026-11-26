@@ -1,3 +1,5 @@
+//! SHA2, SHA3, and Keccak hash engines built from any Rust-Crypto `Digest` with 32-byte output.
+
 use std::{borrow::Cow, marker::PhantomData};
 
 use const_oid::ObjectIdentifier;

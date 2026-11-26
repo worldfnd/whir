@@ -157,15 +157,15 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
     }
 
     fn sumcheck_polynomial(&self, other: &Self) -> (F, F) {
-        crate::algebra::sumcheck::compute_sumcheck_polynomial(&self.data, &other.data)
+        crate::algebra::sumcheck_kernels::compute_sumcheck_polynomial(&self.data, &other.data)
     }
 
     fn fold(&mut self, weight: F) {
-        crate::algebra::sumcheck::fold(&mut self.data, weight);
+        crate::algebra::sumcheck_kernels::fold(&mut self.data, weight);
     }
 
     fn fold_pair_sumcheck_polynomial(&mut self, other: &mut Self, weight: F) -> (F, F) {
-        crate::algebra::sumcheck::fold_and_compute_polynomial(
+        crate::algebra::sumcheck_kernels::fold_and_compute_polynomial(
             &mut self.data,
             &mut other.data,
             weight,
@@ -238,7 +238,7 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         embedding: &M,
         other: &CpuBuffer<M::Target>,
     ) -> (M::Target, M::Target) {
-        crate::algebra::sumcheck::mixed_compute_sumcheck_polynomial(
+        crate::algebra::sumcheck_kernels::mixed_compute_sumcheck_polynomial(
             embedding,
             &self.data,
             &other.data,
@@ -251,7 +251,7 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         weight: M::Target,
     ) -> CpuBuffer<M::Target> {
         CpuBuffer {
-            data: crate::algebra::sumcheck::mixed_fold(embedding, &self.data, weight),
+            data: crate::algebra::sumcheck_kernels::mixed_fold(embedding, &self.data, weight),
         }
     }
 

@@ -21,19 +21,19 @@ use crate::{
 /// masked witness, `K` its current kernel, and `m` the joint mask vector.
 /// Mask terms remain in this claim until the final opening.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct MaskClaims<F: Field> {
-    pub(super) covector: Covector<F>,
+pub(in crate::whir) struct MaskClaims<F: Field> {
+    pub(in crate::whir) covector: Covector<F>,
 }
 
 impl<F: Field> MaskClaims<F> {
-    pub(super) fn new(joint_size: usize) -> Self {
+    pub(in crate::whir) fn new(joint_size: usize) -> Self {
         Self {
             covector: Covector::new(vec![F::ZERO; joint_size]),
         }
     }
 
     /// Evaluate the carried term locally; this value is not a transcript message.
-    pub(super) fn evaluate(&self, coefficients: &[F]) -> F {
+    pub(in crate::whir) fn evaluate(&self, coefficients: &[F]) -> F {
         self.covector.evaluate(&Identity::new(), coefficients)
     }
 
@@ -42,7 +42,7 @@ impl<F: Field> MaskClaims<F> {
     /// `kernel_at` returns a witness-kernel coefficient at its flattened index.
     /// It lets the prover read its dense kernel and the verifier evaluate only
     /// these coefficients without materializing the full witness kernel.
-    pub(super) fn subtract_witness_mask(
+    pub(in crate::whir) fn subtract_witness_mask(
         &mut self,
         range: Range<usize>,
         mask: WitnessMaskConfig,
@@ -71,7 +71,7 @@ impl<F: Field> MaskClaims<F> {
     /// witness size, `beta` the fold challenges, and
     /// `h(beta) = h_0 + sum_j (a_j * beta_j + b_j * beta_j^2)`.
     /// The witness kernel must also be multiplied by `lambda`.
-    pub(super) fn fold_sumcheck(
+    pub(in crate::whir) fn fold_sumcheck(
         &mut self,
         range: Range<usize>,
         remaining_size: usize,
@@ -105,7 +105,7 @@ impl<F: Field> MaskClaims<F> {
     /// constrain `p_hat_next - mask_next`, while DEEP queries constrain
     /// `p_hat_next`. Thus the new term is `-<mask_next, K_next - K_DEEP>`.
     /// `kernel_at` supplies coefficients of the updated kernel `K_next`.
-    pub(super) fn subtract_target_mask(
+    pub(in crate::whir) fn subtract_target_mask(
         &mut self,
         range: Range<usize>,
         mask: WitnessMaskConfig,
@@ -137,7 +137,7 @@ impl<F: Field> MaskClaims<F> {
 /// For `n` remaining witness entries, sumcheck receives `[n*h_0, n*a_0,
 /// n*b_0], [0, n*a_1, n*b_1], ...`. Its existing Boolean-sum recurrence then
 /// contributes `n * h(beta)` without revealing a separate mask evaluation.
-pub(super) fn sumcheck_blinding<F: Field>(
+pub(in crate::whir) fn sumcheck_blinding<F: Field>(
     coefficients: &[F],
     remaining_size: usize,
 ) -> Zeroizing<Vec<F>> {
@@ -178,7 +178,7 @@ mod tests {
         transcript::{
             codecs::Empty, Codec, DomainSeparator, ProverState, VerifierMessage, VerifierState,
         },
-        whir::commit::overlay_mask,
+        whir::zk::overlay_mask,
     };
 
     fn sumcheck_roundtrip<M: Embedding<Target = Field64_2> + Default>()

@@ -1,3 +1,5 @@
+//! A map from field types to type-erased engine objects; backs the per-field `NTT` registry.
+
 use std::{
     any::{Any, TypeId},
     collections::HashMap,

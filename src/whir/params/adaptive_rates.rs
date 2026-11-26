@@ -59,6 +59,7 @@ struct Planner<'a> {
     path: Vec<u32>,
     frontier: Vec<(Vec<u32>, Cost)>,
 }
+
 impl Planner<'_> {
     fn visit<M: Embedding + Default>(&mut self, rate: u32, cost: Cost, masks: usize) {
         let add = |a: Cost, b: Cost| [a[0] + b[0], a[1] + b[1]];
@@ -183,7 +184,8 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{embedding::Identity, fields::Field64_2},
-        whir::params::tests::{assert_close, code},
+        test_utils::assert_close,
+        whir::params::tests::code,
     };
 
     #[test]

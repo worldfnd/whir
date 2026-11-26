@@ -72,7 +72,7 @@ impl Config {
     /// Used by parameter solvers: each PoW slot independently lifts its own
     /// soundness up to `target`. The caller is responsible for ensuring
     /// `analytic_error` is computed from the local protocol step (see e.g.
-    /// `params::security`).
+    /// `whir/params/security.rs`).
     ///
     /// Returns [`PowError::GapExceedsGrindCap`] if the required difficulty
     /// exceeds [`MAX_DIFFICULTY`] — the spec is too tight for any single slot.
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_pow() {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(config in Config::arbitrary())| {
             test_config(&config);
         });

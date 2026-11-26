@@ -1,3 +1,5 @@
+//! `Bits`: a security level or error probability in bits, with arithmetic for bound bookkeeping.
+
 use std::{
     cmp::Ordering,
     fmt::{self, Display},
@@ -28,12 +30,6 @@ impl Bits {
 
     pub fn is_zero(&self) -> bool {
         self.0 == 0.0
-    }
-
-    /// Absolute difference, e.g. for tolerance comparisons.
-    #[must_use]
-    pub fn abs_diff(self, other: Self) -> Self {
-        Self::new((self.0 - other.0).abs())
     }
 }
 

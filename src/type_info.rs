@@ -138,7 +138,7 @@ mod tests {
     use super::*;
     use crate::{
         algebra::fields::{Field128, Field256, Field64_2, Field64_3},
-        utils::test_serde,
+        test_utils::test_serde,
     };
 
     const_assert_eq!(size_of::<Type<Field256>>(), 0);

@@ -1,3 +1,5 @@
+//! `UnivariateEvaluation`: the linear form that evaluates a coefficient vector as a univariate polynomial at a point.
+
 use ark_ff::Field;
 
 use super::LinearForm;

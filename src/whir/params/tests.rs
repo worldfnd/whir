@@ -8,17 +8,12 @@ use crate::{
         fields::{Field64, Field64_2},
     },
     bits::Bits,
+    decoding::decoding_bounds,
     hash::BLAKE3,
     protocols::irs_commit::{Config as IrsConfig, IrsMode, IrsParams},
-    soundness::decoding,
+    test_utils::assert_close,
 };
 
-pub(super) fn assert_close(actual: f64, expected: f64) {
-    assert!(
-        (actual - expected).abs() < 1e-9,
-        "actual {actual}, expected {expected}"
-    );
-}
 #[test]
 fn adaptive_weight_preserves_normalization() {
     for (input, expected) in [
@@ -58,6 +53,7 @@ fn unsupported_zk_regime_fails_before_ntt_lookup() {
         );
     }
 }
+
 pub(super) fn code<M: Embedding + Default>(
     size: usize,
     depth: usize,
@@ -75,6 +71,7 @@ pub(super) fn code<M: Embedding + Default>(
         mode: IrsMode::Standard,
     })
 }
+
 #[test]
 fn independent_decoding_and_probability_anchors() {
     // Unique, BCSS25 Theorem 1.5, and STIR Conjecture 5.6 at k=16, rho=1/4, |F|=2^64.
@@ -83,7 +80,7 @@ fn independent_decoding_and_probability_anchors() {
         (Johnson, 40.0, 0.525, -38.623_375_386_827_36),
         (Capacity, 5120.0, 0.2625, -49.678_071_905_112_64),
     ] {
-        let actual = decoding(policy, 0.25, 16, 64.0);
+        let actual = decoding_bounds(policy, 0.25, 16, 64.0);
         assert_close(actual[0], list);
         assert_close(actual[1], f64::log2(distance));
         assert_close(actual[2], mca);

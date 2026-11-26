@@ -22,9 +22,17 @@ use crate::{
         commit::CommittedWitness,
         params::ProtocolConfig,
         round::{reduce_prover, ProverRoundState},
-        ProverClaim,
     },
 };
+
+/// Values derived by [`ProtocolConfig::prove`] from the prover transcript.
+#[derive(Clone, Debug)]
+pub struct ProverClaim<F: ark_ff::Field> {
+    /// Sumcheck challenges for the original witness dimensions, excluding padding.
+    pub evaluation_point: Vec<F>,
+    /// Fiat-Shamir RLC coefficients for the input forms.
+    pub rlc_coefficients: Vec<F>,
+}
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Prove the supplied linear evaluations against the committed witness.

@@ -1,7 +1,9 @@
+//! `Covector`: a linear form given explicitly by its coefficient vector.
+
 use ark_ff::Field;
 
 use super::{Evaluate, LinearForm};
-use crate::algebra::{mixed_dot, multilinear_extend, scalar_mul_add, Embedding};
+use crate::algebra::{embedding::Embedding, mixed_dot, multilinear_extend, scalar_mul_add};
 
 /// Linear form as an explicit covector over the field.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

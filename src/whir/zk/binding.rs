@@ -22,13 +22,17 @@ use crate::{
 /// initial witness mask and its membership-check blinder, and `phi` fixes the
 /// initial witness commitment's field. The final opening checks all three.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct MaskBinding<F: Field> {
+pub(in crate::whir) struct MaskBinding<F: Field> {
     points: [F; 2],
-    pub(super) values: [F; 3],
+    pub(in crate::whir) values: [F; 3],
 }
 
 impl<F: Field> MaskBinding<F> {
-    pub(super) fn evaluate(&self, config: &JointMaskConfig<F>, coefficients: &[F]) -> [F; 3] {
+    pub(in crate::whir) fn evaluate(
+        &self,
+        config: &JointMaskConfig<F>,
+        coefficients: &[F],
+    ) -> [F; 3] {
         assert_eq!(coefficients.len(), config.commit.vector_size());
         [
             univariate_evaluate(coefficients, self.points[0]),
@@ -39,7 +43,7 @@ impl<F: Field> MaskBinding<F> {
 }
 
 /// Publish the two Phase 0 evaluations after the shared-mask root, before any witness root.
-pub(super) fn prove_binding<F, H, R>(
+pub(in crate::whir) fn prove_binding<F, H, R>(
     config: &JointMaskConfig<F>,
     coefficients: &[F],
     source_degree: u64,
@@ -67,7 +71,7 @@ where
 }
 
 /// Receive claimed evaluations; their equations remain deferred to final opening.
-pub(super) fn receive_binding<F, H>(
+pub(in crate::whir) fn receive_binding<F, H>(
     source_degree: u64,
     vs: &mut VerifierState<H>,
 ) -> VerificationResult<MaskBinding<F>>
@@ -161,7 +165,7 @@ mod tests {
         ProtocolConfig::derive(Params {
             bits: 80,
             mode: Mode::ZeroKnowledge,
-            regime: crate::soundness::DecodingRegime::Johnson,
+            regime: crate::decoding::DecodingRegime::Johnson,
             pow: 0,
             hash: crate::hash::BLAKE3,
             size: 4096,

@@ -8,14 +8,11 @@ use whir::{
         embedding::{Basefield, Embedding},
         eq_weights,
         fields::{Field64, Field64_3},
-        univariate_evaluate,
+        mixed_fold_chunks, univariate_evaluate,
     },
     buffer::{Buffer, BufferOps},
     hash,
-    protocols::{
-        code_switch::mixed_fold_chunks,
-        irs_commit::{Config, IrsMode, IrsParams},
-    },
+    protocols::irs_commit::{Config, IrsMode, IrsParams},
     transcript::{codecs::Empty, DomainSeparator, ProverState},
     DecodingRegime,
 };

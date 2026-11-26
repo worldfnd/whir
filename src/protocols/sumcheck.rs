@@ -620,7 +620,7 @@ mod tests {
     where
         Standard: Distribution<F>,
     {
-        crate::tests::init();
+        crate::test_utils::init();
         proptest!(|(seed: u64, config in Config::arbitrary())| {
             test_config(seed, &config);
         });
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn mixed_prove_matches_lifted_transcript() {
         use crate::algebra::{embedding::Basefield, fields::Field64_3, lift};
-        crate::tests::init();
+        crate::test_utils::init();
         let embedding = Basefield::<Field64_3>::new();
         proptest!(|(seed: u64, config in Config::<Field64_3>::arbitrary())| {
             let instance = U64(seed);

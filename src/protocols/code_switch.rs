@@ -582,46 +582,6 @@ impl<M: Embedding> fmt::Display for Config<'_, M> {
     }
 }
 
-/// Fold ι parallel chunks of length `chunk_len` into a single chunk.
-///
-/// Uses `eq_weights(γ)` over the layout
-/// `values = [chunk_0; chunk_1; ...; chunk_{ι−1}]` (each chunk of length
-/// `chunk_len`) and returns `Σ_l eq_weights(γ)[l] · chunk_l`.
-pub fn fold_chunks<F: Field>(values: &[F], chunk_len: usize, folding_randomness: &[F]) -> Vec<F> {
-    // The identity case of `mixed_fold_chunks`: for `Identity<F>`, `map` is a
-    // no-op, so this monomorphizes to a plain multiply-and-sum with no overhead.
-    mixed_fold_chunks(&Identity::<F>::new(), values, chunk_len, folding_randomness)
-}
-
-/// Embedding-aware [`fold_chunks`].
-///
-/// The values live in the source field `M::Source` while the folding randomness
-/// lives in the target field `M::Target`, so each output chunk is
-/// `Σ_l eq_weights(γ)[l] · φ(chunk_l)` with `φ = embedding.map`. Used to fold a
-/// round's base-field IRS masks by the ext-field sumcheck challenges
-/// (Construction 9.7 `(r ‖ s)`).
-pub fn mixed_fold_chunks<M: Embedding>(
-    embedding: &M,
-    values: &[M::Source],
-    chunk_len: usize,
-    folding_randomness: &[M::Target],
-) -> Vec<M::Target> {
-    let iota = 1 << folding_randomness.len();
-    assert_eq!(values.len(), chunk_len * iota);
-    if iota == 1 {
-        // No folding: each chunk is a single value, lifted into `M::Target`.
-        return values.iter().map(|&v| embedding.map(v)).collect();
-    }
-    let weights = eq_weights(folding_randomness);
-    (0..chunk_len)
-        .map(|j| {
-            (0..iota)
-                .map(|l| embedding.mixed_mul(weights[l], values[l * chunk_len + j]))
-                .sum()
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(debug_assertions)]
@@ -636,16 +596,16 @@ mod tests {
     #[cfg(debug_assertions)]
     use crate::{
         algebra::fields::Field64,
+        decoding::DecodingRegime,
         hash::BLAKE3,
         protocols::{
             irs_commit::{IrsMode, IrsParams},
             proof_of_work::Config as PowConfig,
         },
-        soundness::DecodingRegime,
         transcript::codecs::Empty,
     };
     use crate::{
-        algebra::{embedding::Identity, fields, ntt, random_vector},
+        algebra::{embedding::Identity, fields, fold_chunks, ntt, random_vector},
         transcript::{codecs::U64, DomainSeparator},
     };
 
@@ -1016,7 +976,7 @@ mod tests {
         Standard: Distribution<F>,
         Hash: ProverMessage<[u8]>,
     {
-        crate::tests::init();
+        crate::test_utils::init();
         let configs = TestConfig::arbitrary(Identity::<F>::new());
         proptest!(|(seed: u64, config in configs)| {
             test_config(seed, &config.view());
@@ -1114,7 +1074,7 @@ mod tests {
 
     #[test]
     fn test_ior_identity() {
-        crate::tests::init();
+        crate::test_utils::init();
         let configs = TestConfig::arbitrary(Identity::<fields::Field64>::new());
         proptest!(|(seed: u64, config in configs)| {
             prop_assume!(config.source.in_domain_samples() > 0);
@@ -1124,7 +1084,7 @@ mod tests {
 
     #[test]
     fn test_tampered_ood() {
-        crate::tests::init();
+        crate::test_utils::init();
         let configs = TestConfig::arbitrary(Identity::<fields::Field64>::new()).prop_filter(
             "non-ZK",
             |config| {

@@ -343,7 +343,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_merkle_tree() {
-        crate::tests::init();
+        crate::test_utils::init();
         let config = Config {
             num_leaves: 256,
             layers: vec![LayerConfig { hash_id: BLAKE3 }; 8],

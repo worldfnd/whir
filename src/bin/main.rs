@@ -1,3 +1,5 @@
+//! Command-line demo: commit, prove, and verify one WHIR opening and print timings.
+
 use std::{str::FromStr, time::Instant};
 
 use ark_std::rand::distributions::{Distribution, Standard};

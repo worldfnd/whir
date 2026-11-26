@@ -10,7 +10,7 @@ use tracing::instrument;
 use crate::{
     algebra::{
         embedding::{Embedding, Identity},
-        linear_form::LinearForm,
+        linear_form::{evaluate_padded, LinearForm},
         multilinear_extend, univariate_evaluate,
     },
     hash::Hash,
@@ -28,9 +28,58 @@ use crate::{
         commit::Commitment,
         params::ProtocolConfig,
         round::{reduce_verifier, VerifierRoundState},
-        FinalClaim,
     },
 };
+
+/// Output of [`ProtocolConfig::verify`].
+///
+/// The verifier has completed all round checks. The caller must finish
+/// verification by checking that the input forms evaluate to the claimed value:
+///
+/// ```text
+/// initial_claim_scale × Σ_j rlc_coefficients[j] × form_j.mle_evaluate(evaluation_point) == linear_forms_contribution
+/// ```
+#[must_use]
+#[derive(Clone, Debug)]
+pub struct FinalClaim<F: ark_ff::Field> {
+    /// Sumcheck challenges for the original witness dimensions, excluding leading
+    /// padding coordinates. Length = log2(vector_size).
+    pub evaluation_point: Vec<F>,
+    /// Product of round combination factors and leading zero-padding weights.
+    pub initial_claim_scale: F,
+    /// `opening.linear_form_evaluation − Σ_c constraint_contributions`.
+    /// The portion of the protocol sum attributable to the input linear forms.
+    pub linear_forms_contribution: F,
+    /// Fiat-Shamir RLC coefficients for each input form.
+    /// `rlc_coefficients[0] == F::ONE` always.
+    pub rlc_coefficients: Vec<F>,
+}
+
+impl<F: ark_ff::Field> FinalClaim<F> {
+    /// Complete the verification started by [`ProtocolConfig::verify`].
+    ///
+    /// Checks `initial_claim_scale × Σ_j rlc_coefficients[j] × form_j.mle_evaluate(evaluation_point) == linear_forms_contribution`.
+    ///
+    /// For `MultilinearExtension` forms this runs in O(num_forms × log N).
+    /// For `Covector` forms the default `mle_evaluate` is O(N).
+    pub fn verify(&self, linear_forms: &[&dyn LinearForm<F>]) -> VerificationResult<()>
+    where
+        F: Default,
+    {
+        assert_eq!(
+            linear_forms.len(),
+            self.rlc_coefficients.len(),
+            "linear_forms.len() must match rlc_coefficients.len()"
+        );
+        let form_mle_sum: F = linear_forms
+            .iter()
+            .zip(&self.rlc_coefficients)
+            .map(|(form, &g)| g * evaluate_padded(*form, &self.evaluation_point))
+            .sum();
+        verify!(self.initial_claim_scale * form_mle_sum == self.linear_forms_contribution);
+        Ok(())
+    }
+}
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Verify the supplied linear evaluations against the received commitment.
@@ -190,7 +239,7 @@ mod tests {
             random_vector,
         },
         buffer::{Buffer, BufferMath, BufferOps},
-        soundness::DecodingRegime,
+        decoding::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState},
         whir::{
             commit::CommittedWitness,

@@ -1,3 +1,5 @@
+//! Small transcript codecs missing from spongefish: `Empty` and `U64`.
+
 use static_assertions::assert_impl_all;
 use zerocopy::{FromBytes, IntoBytes, KnownLayout};
 

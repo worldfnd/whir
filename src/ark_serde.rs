@@ -190,7 +190,7 @@ mod tests {
 
     use crate::{
         algebra::fields::{Field256, Field64, Field64_3},
-        utils::test_serde,
+        test_utils::test_serde,
     };
 
     #[test]
