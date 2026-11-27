@@ -1,6 +1,9 @@
 //! Codecs for arkworks fields.
 
-use ark_ff::{BigInteger, Field, Fp, Fp2, Fp2Config, Fp3, Fp3Config, FpConfig, PrimeField};
+use ark_ff::{
+    AdditiveGroup, BigInteger, Field, Fp, Fp2, Fp2Config, Fp3, Fp3Config, FpConfig, PrimeField,
+};
+use ark_serialize::CanonicalDeserialize;
 use spongefish::NargReader;
 
 use super::{Encoding, FromNarg, FromUniform};
@@ -29,13 +32,23 @@ fn encode_field<F: Field>(value: &F) -> Vec<u8> {
     bytes
 }
 
+/// Inverse of [`encode_field`]. Rejects any limb `>= p`, so each element has
+/// exactly one encoding.
 fn field_from_narg<F: Field>(reader: &NargReader<'_>) -> VerificationResult<F> {
     let limb = limb_len(F::BasePrimeField::MODULUS_BIT_SIZE);
     let bytes = reader.take(limb * F::extension_degree() as usize)?;
-    let limbs = bytes
-        .chunks_exact(limb)
-        .map(F::BasePrimeField::from_le_bytes_mod_order);
-    F::from_base_prime_field_elems(limbs).ok_or(VerificationError)
+    let mut canonical = true;
+    let limbs = bytes.chunks_exact(limb).map(|chunk| {
+        F::BasePrimeField::deserialize_compressed(chunk).unwrap_or_else(|_| {
+            canonical = false;
+            F::BasePrimeField::ZERO
+        })
+    });
+    let value = F::from_base_prime_field_elems(limbs);
+    if !canonical {
+        return Err(VerificationError);
+    }
+    value.ok_or(VerificationError)
 }
 
 fn field_from_uniform<F: Field>(uniform: &[u8]) -> F {
@@ -121,5 +134,31 @@ mod tests {
         field_codecs::<Field256>();
         field_codecs::<Field64_2>();
         field_codecs::<Field64_3>();
+    }
+
+    /// Every limb position rejects `p` and the all-ones limb, both `>= p`.
+    fn rejects_non_canonical<F: Field + Codec>() {
+        let limb = limb_len(F::BasePrimeField::MODULUS_BIT_SIZE);
+        let degree = F::extension_degree() as usize;
+        let modulus = F::BasePrimeField::MODULUS.to_bytes_le();
+        assert!(modulus[limb..].iter().all(|&byte| byte == 0));
+        for bad in [&modulus[..limb], &vec![0xff; limb]] {
+            for position in 0..degree {
+                let mut bytes = vec![0; degree * limb];
+                bytes[position * limb..(position + 1) * limb].copy_from_slice(bad);
+                let reader = NargReader::new(&bytes);
+                assert!(reader.read_with(F::from_narg).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn field_from_narg_rejects_non_canonical_limbs() {
+        rejects_non_canonical::<Field64>();
+        rejects_non_canonical::<Field128>();
+        rejects_non_canonical::<Field192>();
+        rejects_non_canonical::<Field256>();
+        rejects_non_canonical::<Field64_2>();
+        rejects_non_canonical::<Field64_3>();
     }
 }
