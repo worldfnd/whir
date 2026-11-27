@@ -6,7 +6,7 @@
 use std::{fmt, num::NonZeroUsize};
 
 use ark_ff::{AdditiveGroup, Field};
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -24,8 +24,8 @@ use crate::{
         proof_of_work,
     },
     transcript::{
-        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     verify,
 };
@@ -270,7 +270,7 @@ impl<'a, M: Embedding> Config<'a, M> {
     ) -> Witness<M::Target>
     where
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         Standard: Distribution<M::Target>,
         M::Target: Codec,
         M::Source: ProverMessage,
@@ -371,7 +371,7 @@ impl<'a, M: Embedding> Config<'a, M> {
     ) -> Vec<M::Target>
     where
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         M::Target: Codec,
     {
         let msg_len = message.len();
@@ -578,7 +578,7 @@ mod tests {
     use std::panic::catch_unwind;
 
     use ark_std::rand::{
-        distributions::Standard, prelude::Distribution, rngs::StdRng, Rng, SeedableRng,
+        distributions::Standard, prelude::Distribution, rngs::StdRng, Rng, RngCore, SeedableRng,
     };
     use proptest::{bool, prelude::Strategy, prop_assume, proptest, sample::select};
 
@@ -745,7 +745,7 @@ mod tests {
         mask
     }
 
-    fn test_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
+    fn test_config<F: Field + Codec>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
     {
@@ -811,7 +811,7 @@ mod tests {
         assert_eq!(covector, verifier_covector);
     }
 
-    fn test_ior_identity_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
+    fn test_ior_identity_config<F: Field + Codec>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
     {
@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(dot(&h, verifier_covector.to_slice()), verifier_sum);
     }
 
-    fn test_tampered_ood_config<F: Field + Codec<[u8]>>(seed: u64, config: &Config<'_, Identity<F>>)
+    fn test_tampered_ood_config<F: Field + Codec>(seed: u64, config: &Config<'_, Identity<F>>)
     where
         Standard: Distribution<F>,
     {
@@ -958,7 +958,7 @@ mod tests {
         );
     }
 
-    fn test<F: Field + Codec<[u8]> + 'static>()
+    fn test<F: Field + Codec + 'static>()
     where
         Standard: Distribution<F>,
     {

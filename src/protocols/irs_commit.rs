@@ -14,7 +14,7 @@
 use std::{fmt, num::NonZeroUsize};
 
 use ark_ff::{AdditiveGroup, Field};
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 #[cfg(feature = "tracing")]
@@ -27,8 +27,8 @@ use crate::{
     engines::EngineId,
     protocols::{challenge_indices::challenge_indices, matrix_commit},
     transcript::{
-        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     type_info::Typed,
     utils::zip_strict,
@@ -361,7 +361,7 @@ impl<M: Embedding> Config<M> {
     where
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         M::Target: Codec,
     {
         // Validate config
@@ -379,7 +379,7 @@ impl<M: Embedding> Config<M> {
         // fold) read masks back via this layout.
         let mask_length = self.mask_length();
         let num_polys = self.num_messages();
-        let masks = Buffer::<M::Source>::random(prover_state.rng(), mask_length * num_polys);
+        let masks = Buffer::<M::Source>::random(&mut prover_state.rng(), mask_length * num_polys);
 
         let matrix = {
             let mask_buffers = [&masks];
@@ -430,7 +430,7 @@ impl<M: Embedding> Config<M> {
     ) -> Evaluations<M::Source>
     where
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         M::Source: ProverMessage,
     {
         for witness in witnesses {

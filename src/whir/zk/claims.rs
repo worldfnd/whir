@@ -188,7 +188,7 @@ mod tests {
     fn sumcheck_roundtrip<M: Embedding<Target = Field64_2> + Default>()
     where
         Standard: Distribution<M::Source>,
-        M::Target: Codec<[u8]>,
+        M::Target: Codec,
     {
         let embedding = M::default();
         let mut rng = StdRng::seed_from_u64(31);

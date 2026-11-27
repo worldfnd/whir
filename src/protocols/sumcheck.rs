@@ -3,7 +3,6 @@
 use std::{any::Any, fmt};
 
 use ark_ff::Field;
-use ark_std::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -13,8 +12,8 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::proof_of_work,
     transcript::{
-        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
-        VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     type_info::Type,
     utils::chunks_exact_or_empty,
@@ -159,7 +158,7 @@ impl<F: Field> Config<F> {
     where
         M: Embedding<Target = F>,
         H: DuplexSpongeInterface<U = u8>,
-        R: CryptoRng + RngCore,
+        R: DuplexSpongeInit<U = u8>,
         F: Codec,
     {
         self.prove_with_carried_sum(prover_state, embedding, a, b, sum, masks, F::ZERO)
@@ -190,7 +189,7 @@ impl<F: Field> Config<F> {
     where
         M: Embedding<Target = F>,
         H: DuplexSpongeInterface<U = u8>,
-        R: CryptoRng + RngCore,
+        R: DuplexSpongeInit<U = u8>,
         F: Codec,
     {
         assert!(
@@ -314,7 +313,7 @@ impl<F: Field> Config<F> {
     ) -> (F, F)
     where
         H: DuplexSpongeInterface<U = u8>,
-        R: CryptoRng + RngCore,
+        R: DuplexSpongeInit<U = u8>,
         F: Codec,
     {
         match &self.mode {
@@ -496,7 +495,7 @@ mod tests {
     #[cfg_attr(feature = "tracing", instrument)]
     fn test_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -508,7 +507,7 @@ mod tests {
 
     fn test_config_with_carried_sum<F>(seed: u64, config: &Config<F>, carried_sum: F)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         // Pseudo-random Instance
@@ -610,7 +609,7 @@ mod tests {
         }
     }
 
-    fn test<F: Field + Codec<[u8]> + 'static>()
+    fn test<F: Field + Codec + 'static>()
     where
         Standard: Distribution<F>,
     {

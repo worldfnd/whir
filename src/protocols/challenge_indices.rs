@@ -97,16 +97,13 @@ fn ceil_log2(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::{codecs::Empty, DomainSeparator, MockSponge, ProverState};
+    use crate::transcript::{MockSponge, ProverState};
 
     #[test]
     fn test_challenge_stir_queries_single_byte_indices() {
         let num_leaves = 1 << 7;
         let num_queries = 5;
 
-        let ds = DomainSeparator::protocol(&module_path!())
-            .session(&format!("Test at {}:{}", file!(), line!()))
-            .instance(&Empty);
         // Mock transcript with fixed bytes (ensuring reproducibility)
         let sponge = MockSponge {
             absorb: None, // Anything is fine
@@ -118,7 +115,7 @@ mod tests {
                 0x55, 0x66, 0x77, 0x88, 0x99, // Query 5
             ],
         };
-        let mut prover_state = ProverState::new(&ds, sponge);
+        let mut prover_state = ProverState::from_sponge(sponge);
 
         let result = challenge_indices(&mut prover_state, num_leaves, num_queries, true);
 
@@ -144,9 +141,6 @@ mod tests {
         let num_leaves = 1 << 13;
         let num_queries = 5;
 
-        let ds = DomainSeparator::protocol(&module_path!())
-            .session(&format!("Test at {}:{}", file!(), line!()))
-            .instance(&Empty);
         // Expected `folded_domain_size = 65536 / 8 = 8192`
         let sponge = MockSponge {
             absorb: None,
@@ -158,7 +152,7 @@ mod tests {
                 0x55, 0x66, 0x77, 0x88, 0x99, // Query 5
             ],
         };
-        let mut prover_state = ProverState::new(&ds, sponge);
+        let mut prover_state = ProverState::from_sponge(sponge);
 
         let result = challenge_indices(&mut prover_state, num_leaves, num_queries, true);
 
@@ -184,9 +178,6 @@ mod tests {
         let num_queries = 4;
 
         // Expected `folded_domain_size = 2^24 / 16 = 2^20 = 1,048,576`
-        let ds = DomainSeparator::protocol(&module_path!())
-            .session(&format!("Test at {}:{}", file!(), line!()))
-            .instance(&Empty);
         let sponge = MockSponge {
             absorb: None,
             squeeze: &[
@@ -196,7 +187,7 @@ mod tests {
                 0x22, 0x33, 0x44, // Query 4
             ],
         };
-        let mut prover_state = ProverState::new(&ds, sponge);
+        let mut prover_state = ProverState::from_sponge(sponge);
 
         let result = challenge_indices(&mut prover_state, num_leaves, num_queries, true);
 
@@ -222,18 +213,12 @@ mod tests {
         let num_queries = 5;
 
         // Mock narg_string where some indices will collide
-        let ds = DomainSeparator::protocol(&module_path!())
-            .session(&format!("Test at {}:{}", file!(), line!()))
-            .instance(&Empty);
-        let mut prover_state = ProverState::new(
-            &ds,
-            MockSponge {
-                absorb: None,
-                squeeze: &[
-                    0x20, 0x40, 0x20, 0x60, 0x40, // Duplicate indices 0x20 and 0x40
-                ],
-            },
-        );
+        let mut prover_state = ProverState::from_sponge(MockSponge {
+            absorb: None,
+            squeeze: &[
+                0x20, 0x40, 0x20, 0x60, 0x40, // Duplicate indices 0x20 and 0x40
+            ],
+        });
 
         let result = challenge_indices(&mut prover_state, num_leaves, num_queries, true);
 
@@ -257,9 +242,6 @@ mod tests {
     #[test]
     fn test_challenge_indices_non_pow2_rejection_retry() {
         let num_leaves: usize = 589_824;
-        let ds = DomainSeparator::protocol(&module_path!())
-            .session(&format!("Test at {}:{}", file!(), line!()))
-            .instance(&Empty);
         let sponge = MockSponge {
             absorb: None,
             squeeze: &[
@@ -267,7 +249,7 @@ mod tests {
                 0x00, 0x00, 0x05, // candidate = 5 < threshold → accept
             ],
         };
-        let mut prover_state = ProverState::new(&ds, sponge);
+        let mut prover_state = ProverState::from_sponge(sponge);
 
         let result = challenge_indices(&mut prover_state, num_leaves, 1, false);
         assert_eq!(result, vec![5]);
@@ -287,16 +269,10 @@ mod tests {
             0x55, 0x66, 0x77, // candidate 5_596_791 < threshold
         ];
         let make_state = || {
-            let ds = DomainSeparator::protocol(&module_path!())
-                .session(&format!("Test at {}:{}", file!(), line!()))
-                .instance(&Empty);
-            ProverState::new(
-                &ds,
-                MockSponge {
-                    absorb: None,
-                    squeeze: bytes,
-                },
-            )
+            ProverState::from_sponge(MockSponge {
+                absorb: None,
+                squeeze: bytes,
+            })
         };
 
         let mut first = make_state();

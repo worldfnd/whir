@@ -1,15 +1,17 @@
 //! Non-succinct linear opening (Construction 7.2, p.43). HVZK in ZK mode.
 
 use ark_ff::Field;
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use serde::{Deserialize, Serialize};
-use spongefish::VerificationResult;
 
 use crate::{
     algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::{irs_commit, proof_of_work, sumcheck},
-    transcript::{Codec, DuplexSpongeInterface, ProverState, VerifierMessage, VerifierState},
+    transcript::{
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
+    },
     utils::zip_strict,
     verify,
 };
@@ -95,7 +97,7 @@ impl<'a, F: Field> Config<'a, F> {
     ) -> Opening<F>
     where
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         F: Codec,
         Standard: Distribution<F>,
     {
@@ -155,7 +157,7 @@ impl<'a, F: Field> Config<'a, F> {
     ) -> Option<irs_commit::Witness<F>>
     where
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         F: Codec,
         Standard: Distribution<F>,
     {
@@ -166,7 +168,7 @@ impl<'a, F: Field> Config<'a, F> {
                 None
             }
             BasecaseMode::ZeroKnowledge => {
-                let mut blinding_vector = Buffer::random(prover_state.rng(), vector.len());
+                let mut blinding_vector = Buffer::random(&mut prover_state.rng(), vector.len());
                 let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
                 let blinding_inner_product = blinding_vector.dot(covector);
                 prover_state.prover_message(&blinding_inner_product);

@@ -1,7 +1,7 @@
 //! Round loop: prover and verifier reduce linear-form claims through WHIR folding rounds, carrying ZK masks when enabled.
 
 use ark_ff::{AdditiveGroup, Field};
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -16,8 +16,8 @@ use crate::{
         irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
     },
     transcript::{
-        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     whir::{
         commit::{Commitment, CommittedState, CommittedWitness},
@@ -60,7 +60,7 @@ where
     M::Target: Codec,
     Standard: Distribution<M::Target>,
     H: DuplexSpongeInterface<U = u8>,
-    R: RngCore + CryptoRng,
+    R: DuplexSpongeInit<U = u8>,
 {
     assert_eq!(
         forms.len(),
@@ -257,7 +257,7 @@ where
     M::Target: Codec,
     Standard: Distribution<M::Target>,
     H: DuplexSpongeInterface<U = u8>,
-    R: RngCore + CryptoRng,
+    R: DuplexSpongeInit<U = u8>,
 {
     assert_eq!(state.masks.is_some(), mask_plan.is_some());
     let index = round.index;

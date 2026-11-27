@@ -1,7 +1,7 @@
 //! Witness commitment: `ProtocolConfig::commit` and `receive_commitment`, with ZK masks overlaid from `zk`.
 
 use ark_ff::Field;
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 use zeroize::Zeroizing;
@@ -10,7 +10,10 @@ use crate::{
     algebra::embedding::Embedding,
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
-    transcript::{Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierState},
+    transcript::{
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
+        VerifierState,
+    },
     whir::{
         params::ProtocolConfig,
         zk::{
@@ -70,7 +73,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         M::Target: Codec,
     {
         assert_eq!(witness.len(), self.params().size, "whir witness length");
@@ -79,9 +82,9 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let mut initial_mask = Zeroizing::new(Vec::new());
         let joint_masks = self.joint_masks().map(|config| {
             let (coefficients, source_mask) =
-                sample_masks::<M, _>(config, self.has_rounds(), ps.rng());
+                sample_masks::<M, _>(config, self.has_rounds(), &mut ps.rng());
             initial_mask = source_mask;
-            let opening_blinder = Buffer::random(ps.rng(), config.commit.vector_size());
+            let opening_blinder = Buffer::random(&mut ps.rng(), config.commit.vector_size());
             let irs_witness = config.commit.commit(ps, &[&coefficients, &opening_blinder]);
             JointMaskWitness {
                 coefficients,
@@ -211,7 +214,7 @@ mod tests {
 
     fn roundtrip<M: Embedding + Default>(config: &ProtocolConfig<M>) -> CommittedWitness<M>
     where
-        M::Target: Codec<[u8]>,
+        M::Target: Codec,
         M::Source: ProverMessage,
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {

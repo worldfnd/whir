@@ -2,7 +2,6 @@
 
 use core::slice;
 
-use ark_std::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -13,8 +12,8 @@ use crate::{
     engines::EngineId,
     hash::{Hash, BLAKE3, ENGINES},
     transcript::{
-        codecs::U64, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
-        VerifierState,
+        codecs::U64, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -98,7 +97,7 @@ impl Config {
     pub fn prove<H, R>(&self, prover_state: &mut ProverState<H, R>)
     where
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
     {
         if self.threshold == u64::MAX {
             // If the difficulty is zero, do nothing (also produce no transcript)

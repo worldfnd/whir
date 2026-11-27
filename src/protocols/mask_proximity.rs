@@ -54,7 +54,7 @@
 use std::fmt;
 
 use ark_ff::Field;
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -67,8 +67,8 @@ use crate::{
         proof_of_work,
     },
     transcript::{
-        Codec, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
-        VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -150,7 +150,7 @@ impl<F: Field> Config<F> {
     where
         F: Codec,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         Standard: Distribution<F>,
     {
         assert_eq!(original_msgs.len(), self.num_masks);
@@ -210,7 +210,7 @@ impl<F: Field> Config<F> {
     ) where
         F: Codec,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         Standard: Distribution<F>,
     {
         assert_eq!(original_msgs.len(), self.num_masks);
@@ -437,7 +437,7 @@ mod tests {
 
     fn test_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         let instance = U64(seed);
@@ -464,7 +464,7 @@ mod tests {
         verifier_state.check_eof().unwrap();
     }
 
-    fn test<F: Field + Codec<[u8]> + 'static>()
+    fn test<F: Field + Codec + 'static>()
     where
         Standard: Distribution<F>,
     {
@@ -512,7 +512,7 @@ mod tests {
     /// Pre-γ tamper: commit honestly, then prove with different original masks.
     fn test_tampered_mask_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         let instance = U64(seed);
@@ -544,7 +544,7 @@ mod tests {
     /// exercise the verifier's spot-check (step 4).
     fn test_tampered_combined_msg_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         let instance = U64(seed);
@@ -634,7 +634,7 @@ mod tests {
     /// Construction 7.2 target check: per-mask discharge round-trip.
     fn test_discharge_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         let instance = U64(seed);
@@ -680,7 +680,7 @@ mod tests {
     /// Discharge with the wrong `claimed_value` — target check must reject.
     fn test_discharge_wrong_claim_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         let instance = U64(seed);

@@ -1,7 +1,7 @@
 //! Staged witness commitments and one opening of their concatenation.
 
 use ark_ff::Field;
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use zeroize::Zeroizing;
 
 use super::{
@@ -16,8 +16,8 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::irs_commit::{Commitment as IrsCommitment, Witness},
     transcript::{
-        codecs::U64, Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationError,
-        VerificationResult, VerifierState,
+        codecs::U64, Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationError, VerificationResult, VerifierState,
     },
 };
 
@@ -64,12 +64,12 @@ where
     M: Embedding + Default,
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     H: DuplexSpongeInterface<U = u8>,
-    R: RngCore + CryptoRng,
+    R: DuplexSpongeInit<U = u8>,
     M::Target: Codec,
 {
     config.combined().joint_masks().map(|layout| {
-        let (coefficients, initial) = sample_masks::<M, _>(layout, true, ps.rng());
-        let opening_blinder = Buffer::random(ps.rng(), layout.commit.vector_size());
+        let (coefficients, initial) = sample_masks::<M, _>(layout, true, &mut ps.rng());
+        let opening_blinder = Buffer::random(&mut ps.rng(), layout.commit.vector_size());
         let irs_witness = layout.commit.commit(ps, &[&coefficients, &opening_blinder]);
         let masks = JointMaskWitness {
             coefficients,
@@ -107,7 +107,7 @@ where
     M: Embedding + Default,
     Standard: Distribution<M::Source>,
     H: DuplexSpongeInterface<U = u8>,
-    R: RngCore + CryptoRng,
+    R: DuplexSpongeInit<U = u8>,
     M::Target: Codec,
 {
     assert_eq!(
@@ -137,7 +137,7 @@ impl<M: Embedding + Default> JointOpeningConfig<M> {
     where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         M::Target: Codec,
     {
         let (masks, initial) = commit_masks(self, ps).unzip();
@@ -205,7 +205,7 @@ impl<'a, M: Embedding + Default> FirstWitness<'a, M> {
         M::Source: ProverMessage,
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
         M::Target: Codec,
     {
         let CommittedState::Round {
@@ -275,7 +275,7 @@ impl<M: Embedding + Default> JointWitness<'_, M> {
         M::Source: ProverMessage,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
     {
         assert!(
             check_claims(self.config, forms, values).is_ok(),

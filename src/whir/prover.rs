@@ -3,7 +3,7 @@
 use std::mem::take;
 
 use ark_ff::Zero;
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -13,7 +13,9 @@ use crate::{
         linear_form::LinearForm,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    transcript::{Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage},
+    transcript::{
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage,
+    },
     whir::{
         commit::CommittedWitness,
         params::ProtocolConfig,
@@ -45,7 +47,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Source: ProverMessage,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
     {
         let reduced = reduce_prover(self, ps, committed, linear_forms, evaluations, None);
         self.prove_final_opening(ps, reduced)
@@ -60,7 +62,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
     {
         let basecase = self.basecase();
         let suffix = if self.params().mode.is_zk() {
@@ -113,14 +115,14 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         M::Target: Codec,
         Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface<U = u8>,
-        R: RngCore + CryptoRng,
+        R: DuplexSpongeInit<U = u8>,
     {
         let (Some(layout), Some(masks)) = (self.joint_masks(), state.masks.as_mut()) else {
             panic!("final opening requires the joint mask commitment");
         };
         let commit = self.final_commit();
         let mask_commit = &layout.commit;
-        let mut witness_blinder = Buffer::random(ps.rng(), commit.vector_size());
+        let mut witness_blinder = Buffer::random(&mut ps.rng(), commit.vector_size());
         let mut mask_blinder = take(&mut masks.joint.opening_blinder);
         let mut witness_blind_commit = commit.commit(ps, &[&witness_blinder]);
         let blind_sum =
