@@ -745,7 +745,9 @@ mod tests {
             vector = folded;
             covector.scalar_mul(opening.mask_rlc);
             let new_masks: Field64 = masks
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .zip(&opening.round_challenges)
                 .map(|(mask, &challenge)| univariate_evaluate(mask, challenge))
                 .sum();

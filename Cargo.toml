@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 default-run = "main"
-rust-version = "1.87.0"
+rust-version = "1.88"
 
 [lints.clippy]
 # all lints that are on by default (correctness, suspicious, style, complexity, perf)

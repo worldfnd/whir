@@ -302,12 +302,12 @@ impl<F: Field> NttEngine<F> {
         match size {
             0 | 1 => {}
             2 => {
-                for v in values.chunks_exact_mut(2) {
+                for v in values.as_chunks_mut::<2>().0 {
                     (v[0], v[1]) = (v[0] + v[1], v[0] - v[1]);
                 }
             }
             3 => {
-                for v in values.chunks_exact_mut(3) {
+                for v in values.as_chunks_mut::<3>().0 {
                     // Rader NTT to reduce 3 to 2.
                     let v0 = v[0];
                     (v[1], v[2]) = (v[1] + v[2], v[1] - v[2]);
@@ -319,7 +319,7 @@ impl<F: Field> NttEngine<F> {
                 }
             }
             4 => {
-                for v in values.chunks_exact_mut(4) {
+                for v in values.as_chunks_mut::<4>().0 {
                     (v[0], v[2]) = (v[0] + v[2], v[0] - v[2]);
                     (v[1], v[3]) = (v[1] + v[3], v[1] - v[3]);
                     v[3] *= self.omega_4_1;
@@ -329,7 +329,7 @@ impl<F: Field> NttEngine<F> {
                 }
             }
             8 => {
-                for v in values.chunks_exact_mut(8) {
+                for v in values.as_chunks_mut::<8>().0 {
                     // Cooley-Tukey with v as 2x4 matrix.
                     (v[0], v[4]) = (v[0] + v[4], v[0] - v[4]);
                     (v[1], v[5]) = (v[1] + v[5], v[1] - v[5]);
@@ -353,7 +353,7 @@ impl<F: Field> NttEngine<F> {
                 }
             }
             16 => {
-                for v in values.chunks_exact_mut(16) {
+                for v in values.as_chunks_mut::<16>().0 {
                     // Cooley-Tukey with v as 4x4 matrix.
                     for i in 0..4 {
                         let v = &mut v[i..];

@@ -552,7 +552,7 @@ mod tests {
                 for (&point, row) in evaluations
                     .points
                     .iter()
-                    .zip(evaluations.matrix.to_slice().chunks_exact(2))
+                    .zip(evaluations.matrix.to_slice().as_chunks::<2>().0)
                 {
                     assert_eq!(row[0], univariate_evaluate(coefficients, point));
                     assert_eq!(

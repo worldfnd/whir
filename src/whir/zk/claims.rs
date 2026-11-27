@@ -91,7 +91,9 @@ impl<F: Field> MaskClaims<F> {
         let weights = &mut self.covector.vector[range];
         weights[0] += F::from_base_prime_field(scale);
         for (pair, &challenge) in weights[1..]
-            .chunks_exact_mut(2)
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
             .zip(&opening.round_challenges)
         {
             pair[0] += challenge.mul_by_base_prime_field(&scale);
@@ -146,8 +148,10 @@ pub(in crate::whir) fn sumcheck_blinding<F: Field>(
     let mut expanded = Zeroizing::new(vec![F::ZERO; 3 * (coefficients.len() / 2)]);
     expanded[0] = coefficients[0].mul_by_base_prime_field(&scale);
     for (mask, pair) in expanded
-        .chunks_exact_mut(3)
-        .zip(coefficients[1..].chunks_exact(2))
+        .as_chunks_mut::<3>()
+        .0
+        .iter_mut()
+        .zip(coefficients[1..].as_chunks::<2>().0)
     {
         mask[1] = pair[0].mul_by_base_prime_field(&scale);
         mask[2] = pair[1].mul_by_base_prime_field(&scale);
@@ -241,7 +245,9 @@ mod tests {
                 );
                 let sparse_evaluation = coefficients[sparse.start]
                     + coefficients[sparse.start + 1..sparse.end]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .zip(&opening.round_challenges)
                         .map(|(pair, &challenge)| {
                             pair[0] * challenge + pair[1] * challenge.square()

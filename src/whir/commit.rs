@@ -272,7 +272,7 @@ mod tests {
             for (&point, row) in values
                 .points
                 .iter()
-                .zip(values.matrix.to_slice().chunks_exact(2))
+                .zip(values.matrix.to_slice().as_chunks::<2>().0)
             {
                 assert_eq!(
                     row[0],

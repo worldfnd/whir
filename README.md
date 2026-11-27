@@ -51,7 +51,7 @@ Cargo features:
 - `tracing`: tracing spans for commit, prove, and verify.
 - `verifier_panics`: the verifier panics instead of returning an error. For debugging.
 
-Minimum supported Rust version: 1.87.
+Minimum supported Rust version: 1.88.
 
 ## Usage
 
