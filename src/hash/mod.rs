@@ -13,6 +13,7 @@ use std::{
 
 use const_oid::ObjectIdentifier;
 use serde::{Deserialize, Serialize};
+use spongefish::NargReader;
 use static_assertions::{assert_impl_all, assert_obj_safe};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -24,7 +25,7 @@ pub use self::{
 };
 use crate::{
     engines::{self, EngineId, Engines},
-    transcript::{Encoding, NargDeserialize, ProverMessage, VerificationError, VerificationResult},
+    transcript::{Encoding, FromNarg, ProverMessage, VerificationResult},
 };
 
 pub static ENGINES: LazyLock<Engines<dyn HashEngine>> = LazyLock::new(|| {
@@ -115,17 +116,17 @@ impl fmt::Debug for Hash {
     }
 }
 
-impl Encoding<[u8]> for Hash {
-    fn encode(&self) -> impl AsRef<[u8]> {
-        self.as_bytes()
+impl Encoding for Hash {
+    type Encoded = [u8; 32];
+
+    fn encode(&self) -> Self::Encoded {
+        self.0
     }
 }
 
-impl NargDeserialize for Hash {
-    fn deserialize_from_narg(buf: &mut &[u8]) -> VerificationResult<Self> {
-        let (hash, tail) = Self::read_from_prefix(buf).map_err(|_| VerificationError)?;
-        *buf = tail;
-        Ok(hash)
+impl FromNarg for Hash {
+    fn from_narg(reader: &NargReader<'_>) -> VerificationResult<Self> {
+        reader.take_array().map(Self)
     }
 }
 

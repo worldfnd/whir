@@ -25,14 +25,4 @@ impl DuplexSpongeInterface for MockSponge<'_> {
         self.squeeze = &self.squeeze[output.len()..];
         self
     }
-
-    fn ratchet(&mut self) -> &mut Self {
-        if let Some(absorb) = self.absorb.as_mut() {
-            assert_eq!(&absorb[..7], b"RATCHET");
-            *absorb = &absorb[7..];
-        }
-        assert_eq!(&self.squeeze[..7], b"RATCHET");
-        self.squeeze = &self.squeeze[7..];
-        self
-    }
 }

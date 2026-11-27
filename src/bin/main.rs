@@ -13,7 +13,9 @@ use whir::{
     buffer::Buffer,
     engines::EngineId,
     hash::{self, HASH_COUNTER},
-    transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
+    transcript::{
+        codecs::Empty, Codec, DomainSeparator, ProverMessage, ProverState, VerifierState,
+    },
     DecodingRegime, KneeWeight, Mode, Params, ProtocolConfig, RateSchedule,
 };
 
@@ -178,6 +180,7 @@ where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     M: Embedding + Default,
     M::Target: Codec,
+    M::Source: ProverMessage,
 {
     let num_variables = args.num_variables;
     let reps = args.verifier_repetitions;

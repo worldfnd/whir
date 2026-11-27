@@ -14,7 +14,7 @@
 use std::{fmt, num::NonZeroUsize};
 
 use ark_ff::{AdditiveGroup, Field};
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 #[cfg(feature = "tracing")]
@@ -25,11 +25,10 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     decoding::{decoding_bounds, decoding_distance, DecodingRegime},
     engines::EngineId,
-    hash::Hash,
     protocols::{challenge_indices::challenge_indices, matrix_commit},
     transcript::{
-        Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     type_info::Typed,
     utils::zip_strict,
@@ -361,10 +360,9 @@ impl<M: Embedding> Config<M> {
     ) -> Witness<M::Source>
     where
         Standard: Distribution<M::Source>,
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        M::Target: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
+        M::Target: Codec,
     {
         // Validate config
         assert!((self.vector_size).is_multiple_of(self.interleaving_depth));
@@ -381,7 +379,7 @@ impl<M: Embedding> Config<M> {
         // fold) read masks back via this layout.
         let mask_length = self.mask_length();
         let num_polys = self.num_messages();
-        let masks = Buffer::<M::Source>::random(prover_state.rng(), mask_length * num_polys);
+        let masks = Buffer::<M::Source>::random(&mut prover_state.rng(), mask_length * num_polys);
 
         let matrix = {
             let mask_buffers = [&masks];
@@ -410,9 +408,8 @@ impl<M: Embedding> Config<M> {
         verifier_state: &mut VerifierState<H>,
     ) -> VerificationResult<Commitment>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
-        M::Target: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        M::Target: Codec,
     {
         let matrix_commitment = self.matrix_commit.receive_commitment(verifier_state)?;
         Ok(Commitment { matrix_commitment })
@@ -432,10 +429,9 @@ impl<M: Embedding> Config<M> {
         witnesses: &[&Witness<M::Source>],
     ) -> Evaluations<M::Source>
     where
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        u8: Decoding<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
+        M::Source: ProverMessage,
     {
         for witness in witnesses {
             assert_eq!(witness.matrix.len(), self.size());
@@ -458,7 +454,7 @@ impl<M: Embedding> Config<M> {
                         .copy_from_slice(row);
                 }
             }
-            prover_state.prover_hint_ark(&submatrix);
+            prover_state.prover_hints(&submatrix);
             self.matrix_commit
                 .open(prover_state, &witness.matrix_witness, &indices);
             matrix_col_offset += self.num_cols();
@@ -480,9 +476,8 @@ impl<M: Embedding> Config<M> {
         commitments: &[&Commitment],
     ) -> VerificationResult<Evaluations<M::Source>>
     where
-        H: DuplexSpongeInterface,
-        u8: Decoding<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        M::Source: ProverMessage,
     {
         // Get in-domain openings
         let (indices, points) = self.in_domain_challenges(verifier_state);
@@ -493,7 +488,8 @@ impl<M: Embedding> Config<M> {
         let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
         let mut matrix_col_offset = 0;
         for commitment in commitments {
-            let submatrix: Vec<M::Source> = verifier_state.prover_hint_ark()?;
+            let submatrix: Vec<M::Source> =
+                verifier_state.prover_hints_vec(indices.len() * self.num_cols())?;
             self.matrix_commit.verify(
                 verifier_state,
                 &commitment.matrix_commitment,
@@ -521,7 +517,6 @@ impl<M: Embedding> Config<M> {
     fn in_domain_challenges<T>(&self, transcript: &mut T) -> (Vec<usize>, Vec<M::Source>)
     where
         T: VerifierMessage,
-        u8: Decoding<[T::U]>,
     {
         // Get in-domain openings
         let indices = challenge_indices(

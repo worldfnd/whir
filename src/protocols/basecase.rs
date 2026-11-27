@@ -1,18 +1,16 @@
 //! Non-succinct linear opening (Construction 7.2, p.43). HVZK in ZK mode.
 
 use ark_ff::Field;
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use serde::{Deserialize, Serialize};
-use spongefish::{Decoding, VerificationResult};
 
 use crate::{
     algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
     buffer::{Buffer, BufferMath, BufferOps},
-    hash::Hash,
     protocols::{irs_commit, proof_of_work, sumcheck},
     transcript::{
-        codecs::U64, Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage,
-        VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -98,13 +96,9 @@ impl<'a, F: Field> Config<'a, F> {
         mut sum: F,
     ) -> Opening<F>
     where
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        F: Codec<[H::U]>,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
+        F: Codec,
         Standard: Distribution<F>,
     {
         assert_eq!(self.commit.interleaving_depth(), 1);
@@ -162,12 +156,9 @@ impl<'a, F: Field> Config<'a, F> {
         sum: &mut F,
     ) -> Option<irs_commit::Witness<F>>
     where
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        F: Codec<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
+        F: Codec,
         Standard: Distribution<F>,
     {
         match self.mode {
@@ -177,7 +168,7 @@ impl<'a, F: Field> Config<'a, F> {
                 None
             }
             BasecaseMode::ZeroKnowledge => {
-                let mut blinding_vector = Buffer::random(prover_state.rng(), vector.len());
+                let mut blinding_vector = Buffer::random(&mut prover_state.rng(), vector.len());
                 let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
                 let blinding_inner_product = blinding_vector.dot(covector);
                 prover_state.prover_message(&blinding_inner_product);
@@ -217,12 +208,8 @@ impl<'a, F: Field> Config<'a, F> {
         mut sum: F,
     ) -> VerificationResult<Opening<F>>
     where
-        H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        F: Codec,
     {
         assert_eq!(self.commit.interleaving_depth(), 1);
         assert_eq!(self.commit.num_vectors(), 1);
@@ -279,12 +266,8 @@ impl<'a, F: Field> Config<'a, F> {
         sum: &mut F,
     ) -> VerificationResult<Option<(irs_commit::Commitment, F)>>
     where
-        H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        F: Codec,
     {
         match self.mode {
             BasecaseMode::Standard => Ok(None),
@@ -310,7 +293,11 @@ mod tests {
     use tracing::instrument;
 
     use super::*;
-    use crate::{algebra::fields, protocols::proof_of_work, transcript::DomainSeparator};
+    use crate::{
+        algebra::fields,
+        protocols::proof_of_work,
+        transcript::{codecs::U64, DomainSeparator},
+    };
 
     #[cfg_attr(feature = "tracing", instrument)]
     fn test_config<F>(seed: u64, config: &Config<'_, F>)

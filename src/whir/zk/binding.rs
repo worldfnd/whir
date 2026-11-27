@@ -1,7 +1,6 @@
 //! Initial joint-mask evaluations retained as constraints for the final opening.
 
 use ark_ff::Field;
-use ark_std::rand::{CryptoRng, RngCore};
 
 use crate::{
     algebra::{
@@ -9,8 +8,8 @@ use crate::{
         univariate_evaluate,
     },
     transcript::{
-        Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult, VerifierMessage,
-        VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, FromUniform, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     whir::params::JointMaskConfig,
 };
@@ -50,9 +49,9 @@ pub(in crate::whir) fn prove_binding<F, H, R>(
     ps: &mut ProverState<H, R>,
 ) -> MaskBinding<F>
 where
-    F: Field + Codec<[H::U]>,
-    H: DuplexSpongeInterface,
-    R: RngCore + CryptoRng,
+    F: Field + Codec,
+    H: DuplexSpongeInterface<U = u8>,
+    R: DuplexSpongeInit<U = u8>,
 {
     let point = binding_challenge(ps);
     assert_eq!(coefficients.len(), config.commit.vector_size());
@@ -76,8 +75,8 @@ pub(in crate::whir) fn receive_binding<F, H>(
     vs: &mut VerifierState<H>,
 ) -> VerificationResult<MaskBinding<F>>
 where
-    F: Field + Codec<[H::U]>,
-    H: DuplexSpongeInterface,
+    F: Field + Codec,
+    H: DuplexSpongeInterface<U = u8>,
 {
     let point = binding_challenge(vs);
     let evaluation = vs.prover_message()?;
@@ -95,7 +94,7 @@ where
 /// Exclude zero: the shifted membership blinder vanishes there, exposing a mask coefficient.
 fn binding_challenge<F, T>(transcript: &mut T) -> F
 where
-    F: Field + Decoding<[T::U]>,
+    F: Field + FromUniform,
     T: VerifierMessage,
 {
     loop {
@@ -182,11 +181,7 @@ mod tests {
         let layout = config.joint_masks().unwrap();
         let mut coefficients = vec![Field64_2::ZERO; layout.commit.vector_size()];
         coefficients[layout.basefield_blinder.start] = Field64_2::ONE;
-        let ds = DomainSeparator::protocol(&"whir-binding-test")
-            .session(&"zero challenges")
-            .instance(&Empty);
-        let mut repr = <Field64_2 as Decoding<[u8]>>::Repr::default();
-        let challenge_bytes = repr.as_mut().len();
+        let challenge_bytes = <Field64_2 as FromUniform>::UNIFORM_LEN;
         for zeros in [0, 1, 3] {
             // Decode little-endian 7 after the rejected zero field elements.
             let mut squeeze = vec![0; (zeros + 1) * challenge_bytes];
@@ -196,13 +191,13 @@ mod tests {
                 absorb: None,
                 squeeze: &squeeze,
             };
-            let mut ps = ProverState::new(&ds, sponge.clone());
+            let mut ps = ProverState::from_sponge(sponge.clone());
             let binding = prove_binding(layout, &coefficients, 1, &mut ps);
             assert_eq!(binding.points, [Field64_2::from(7); 2]);
             assert_ne!(binding.values[1], Field64_2::ZERO);
             assert_eq!(ps.verifier_message::<u8>(), 42);
             let proof = ps.proof();
-            let mut vs = VerifierState::new(&ds, &proof, sponge);
+            let mut vs = VerifierState::from_sponge(&proof, sponge);
             assert_eq!(receive_binding(1, &mut vs).unwrap(), binding);
             assert_eq!(vs.verifier_message::<u8>(), 42);
             vs.check_eof().unwrap();

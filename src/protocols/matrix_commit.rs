@@ -3,7 +3,6 @@
 use std::fmt;
 
 use ark_ff::{Field, PrimeField};
-use ark_std::rand::{CryptoRng, RngCore};
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 use static_assertions::assert_obj_safe;
@@ -17,8 +16,8 @@ use crate::{
     hash::{self, Hash},
     protocols::merkle_tree,
     transcript::{
-        DuplexSpongeInterface, ProverMessage, ProverState, VerificationError, VerificationResult,
-        VerifierState,
+        DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationError,
+        VerificationResult, VerifierState,
     },
     type_info::{Type, TypeInfo},
     utils::{workload_size, zip_strict},
@@ -225,9 +224,8 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self, size = matrix.len(), engine)))]
     pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, matrix: &Buffer<T>) -> Witness
     where
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
     {
         assert_eq!(matrix.len(), self.num_rows() * self.num_cols);
 
@@ -242,8 +240,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         verifier_state: &mut VerifierState<H>,
     ) -> VerificationResult<Commitment>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         self.merkle_tree.receive_commitment(verifier_state)
     }
@@ -259,9 +256,8 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         witness: &Witness,
         indices: &[usize],
     ) where
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
     {
         self.merkle_tree.open(prover_state, witness, indices);
     }
@@ -279,8 +275,7 @@ impl<T: TypeInfo + Encodable + Send + Sync + Copy> Config<T> {
         matrix: &[T],
     ) -> VerificationResult<()>
     where
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         verify!(matrix.len() == self.num_cols * indices.len());
 
@@ -377,7 +372,7 @@ pub(crate) mod tests {
     use ark_std::rand::{
         distributions::{Distribution, Standard},
         rngs::StdRng,
-        Rng, SeedableRng,
+        Rng, RngCore, SeedableRng,
     };
     use proptest::{prop_assume, proptest, strategy::Strategy};
 

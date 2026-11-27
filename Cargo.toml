@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 default-run = "main"
-rust-version = "1.87.0"
+rust-version = "1.88"
 
 [lints.clippy]
 # all lints that are on by default (correctness, suspicious, style, complexity, perf)
@@ -43,7 +43,7 @@ sha3 = { version = "0.10.7", features = ["asm", "oid"] }
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
-spongefish = { package = "provekit-spongefish", version = "0.2.0", features = ["ark-ff"] }
+spongefish = "0.9.0"
 rayon = { version = "1.10", optional = true }
 tracing = { version = "0.1", features = ["attributes"], optional = true }
 hex = "0.4"
@@ -61,6 +61,8 @@ thiserror = "2.0"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [dev-dependencies]
+rand = { version = "0.8", features = ["std"] }
+spongefish = { version = "0.9.0", features = ["yolocrypto"] }
 proptest = "1.0"
 divan = { version = "4.2", package = "codspeed-divan-compat" }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

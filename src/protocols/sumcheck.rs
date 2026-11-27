@@ -3,7 +3,6 @@
 use std::{any::Any, fmt};
 
 use ark_ff::Field;
-use ark_std::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -13,7 +12,7 @@ use crate::{
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::proof_of_work,
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
         VerifierMessage, VerifierState,
     },
     type_info::Type,
@@ -158,11 +157,9 @@ impl<F: Field> Config<F> {
     ) -> (Buffer<F>, SumcheckOpening<F>)
     where
         M: Embedding<Target = F>,
-        H: DuplexSpongeInterface,
-        R: CryptoRng + RngCore,
-        F: Codec<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
+        F: Codec,
     {
         self.prove_with_carried_sum(prover_state, embedding, a, b, sum, masks, F::ZERO)
     }
@@ -191,11 +188,9 @@ impl<F: Field> Config<F> {
     ) -> (Buffer<F>, SumcheckOpening<F>)
     where
         M: Embedding<Target = F>,
-        H: DuplexSpongeInterface,
-        R: CryptoRng + RngCore,
-        F: Codec<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
+        F: Codec,
     {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
@@ -317,9 +312,9 @@ impl<F: Field> Config<F> {
         masks: &[F],
     ) -> (F, F)
     where
-        H: DuplexSpongeInterface,
-        R: CryptoRng + RngCore,
-        F: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
+        F: Codec,
     {
         match &self.mode {
             SumcheckMode::Standard => (F::ZERO, F::ONE),
@@ -347,10 +342,8 @@ impl<F: Field> Config<F> {
         sum: &mut F,
     ) -> VerificationResult<SumcheckOpening<F>>
     where
-        H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        F: Codec,
     {
         assert!(
             self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
@@ -392,8 +385,8 @@ impl<F: Field> Config<F> {
         sum: &mut F,
     ) -> VerificationResult<F>
     where
-        H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
+        F: Codec,
     {
         match &self.mode {
             SumcheckMode::Standard => Ok(F::ONE),
@@ -470,7 +463,7 @@ mod tests {
             multilinear_extend, random_vector,
         },
         buffer::Buffer,
-        transcript::DomainSeparator,
+        transcript::{codecs::U64, DomainSeparator},
     };
 
     impl<F: Field + 'static> Config<F>
@@ -502,7 +495,7 @@ mod tests {
     #[cfg_attr(feature = "tracing", instrument)]
     fn test_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -514,7 +507,7 @@ mod tests {
 
     fn test_config_with_carried_sum<F>(seed: u64, config: &Config<F>, carried_sum: F)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
     {
         // Pseudo-random Instance
@@ -616,7 +609,7 @@ mod tests {
         }
     }
 
-    fn test<F: Field + Codec<[u8]> + 'static>()
+    fn test<F: Field + Codec + 'static>()
     where
         Standard: Distribution<F>,
     {
@@ -751,7 +744,9 @@ mod tests {
             vector = folded;
             covector.scalar_mul(opening.mask_rlc);
             let new_masks: Field64 = masks
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .zip(&opening.round_challenges)
                 .map(|(mask, &challenge)| univariate_evaluate(mask, challenge))
                 .sum();

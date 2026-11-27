@@ -54,7 +54,7 @@
 use std::fmt;
 
 use ark_ff::Field;
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -62,14 +62,13 @@ use tracing::instrument;
 use crate::{
     algebra::{dot, embedding::Identity, random_vector, scalar_mul_add_new, univariate_evaluate},
     buffer::{Buffer, BufferOps},
-    hash::Hash,
     protocols::{
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
         proof_of_work,
     },
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
-        VerificationResult, VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverState, VerificationResult,
+        VerifierMessage, VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -149,11 +148,10 @@ impl<F: Field> Config<F> {
         original_msgs: &[&[F]],
     ) -> Witness<F>
     where
-        F: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
+        F: Codec,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
         Standard: Distribution<F>,
-        Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(original_msgs.len(), self.num_masks);
         for msg in original_msgs {
@@ -190,9 +188,8 @@ impl<F: Field> Config<F> {
         verifier_state: &mut VerifierState<H>,
     ) -> VerificationResult<Commitment>
     where
-        F: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        Hash: ProverMessage<[H::U]>,
+        F: Codec,
+        H: DuplexSpongeInterface<U = u8>,
     {
         self.c_zk_commit.receive_commitment(verifier_state)
     }
@@ -211,14 +208,10 @@ impl<F: Field> Config<F> {
         original_msgs: &[&[F]],
         mask_contribution_covectors: Option<&[&[F]]>,
     ) where
-        F: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        R: RngCore + CryptoRng,
+        F: Codec,
+        H: DuplexSpongeInterface<U = u8>,
+        R: DuplexSpongeInit<U = u8>,
         Standard: Distribution<F>,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(original_msgs.len(), self.num_masks);
         assert_eq!(witness.fresh_msgs.len(), self.num_masks);
@@ -304,12 +297,8 @@ impl<F: Field> Config<F> {
         mask_contribution_covectors: Option<&[&[F]]>,
     ) -> VerificationResult<Option<Vec<F>>>
     where
-        F: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        F: Codec,
+        H: DuplexSpongeInterface<U = u8>,
     {
         // Construction 7.2 step 1: read X_i and X'_i for each mask before γ
         // so γ binds them.
@@ -448,9 +437,8 @@ mod tests {
 
     fn test_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
-        Hash: crate::transcript::ProverMessage<[u8]>,
     {
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -476,10 +464,9 @@ mod tests {
         verifier_state.check_eof().unwrap();
     }
 
-    fn test<F: Field + Codec<[u8]> + 'static>()
+    fn test<F: Field + Codec + 'static>()
     where
         Standard: Distribution<F>,
-        Hash: crate::transcript::ProverMessage<[u8]>,
     {
         crate::test_utils::init();
         proptest!(|(seed: u64, config in Config::arbitrary())| {
@@ -525,9 +512,8 @@ mod tests {
     /// Pre-γ tamper: commit honestly, then prove with different original masks.
     fn test_tampered_mask_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
-        Hash: crate::transcript::ProverMessage<[u8]>,
     {
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -558,9 +544,8 @@ mod tests {
     /// exercise the verifier's spot-check (step 4).
     fn test_tampered_combined_msg_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
-        Hash: crate::transcript::ProverMessage<[u8]>,
     {
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -649,9 +634,8 @@ mod tests {
     /// Construction 7.2 target check: per-mask discharge round-trip.
     fn test_discharge_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
-        Hash: crate::transcript::ProverMessage<[u8]>,
     {
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
@@ -696,9 +680,8 @@ mod tests {
     /// Discharge with the wrong `claimed_value` — target check must reject.
     fn test_discharge_wrong_claim_config<F>(seed: u64, config: &Config<F>)
     where
-        F: Field + Codec<[u8]> + 'static,
+        F: Field + Codec + 'static,
         Standard: Distribution<F>,
-        Hash: crate::transcript::ProverMessage<[u8]>,
     {
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)

@@ -1,7 +1,7 @@
 //! Round loop: prover and verifier reduce linear-form claims through WHIR folding rounds, carrying ZK masks when enabled.
 
 use ark_ff::{AdditiveGroup, Field};
-use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -11,13 +11,12 @@ use crate::{
         linear_form::LinearForm,
     },
     buffer::{Buffer, BufferMath, BufferOps},
-    hash::Hash,
     protocols::{
         code_switch::Claim,
         irs_commit::{Commitment as IrsCommitment, Config, Witness as IrsWitness},
     },
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
+        Codec, DuplexSpongeInit, DuplexSpongeInterface, ProverMessage, ProverState,
         VerificationResult, VerifierMessage, VerifierState,
     },
     whir::{
@@ -56,15 +55,12 @@ pub(super) fn reduce_prover<M, H, R>(
     second: Option<(&Config<M>, IrsWitness<M::Source>)>,
 ) -> ProverRoundState<Identity<M::Target>>
 where
+    M::Source: ProverMessage,
     M: Embedding + Default,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
-    R: RngCore + CryptoRng,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    H: DuplexSpongeInterface<U = u8>,
+    R: DuplexSpongeInit<U = u8>,
 {
     assert_eq!(
         forms.len(),
@@ -171,13 +167,10 @@ pub(super) fn reduce_verifier<'a, M, H>(
 ) -> VerificationResult<VerifierRoundState<'a, M::Target>>
 where
     M: Embedding + Default,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
+    M::Source: ProverMessage,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    H: DuplexSpongeInterface<U = u8>,
 {
     assert_eq!(
         forms.len(),
@@ -259,15 +252,12 @@ fn prove_round<M, H, R>(
     ps: &mut ProverState<H, R>,
 ) -> ProverRoundState<Identity<M::Target>>
 where
+    M::Source: ProverMessage,
     M: Embedding,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
-    R: RngCore + CryptoRng,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    H: DuplexSpongeInterface<U = u8>,
+    R: DuplexSpongeInit<U = u8>,
 {
     assert_eq!(state.masks.is_some(), mask_plan.is_some());
     let index = round.index;
@@ -361,14 +351,11 @@ fn verify_round<M, H>(
     vs: &mut VerifierState<H>,
 ) -> VerificationResult<()>
 where
+    M::Source: ProverMessage,
     M: Embedding,
-    M::Target: Codec<[H::U]>,
+    M::Target: Codec,
     Standard: Distribution<M::Target>,
-    H: DuplexSpongeInterface,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    H: DuplexSpongeInterface<U = u8>,
 {
     assert_eq!(state.masks.is_some(), mask_plan.is_some());
     let index = round.index;
@@ -434,6 +421,7 @@ mod tests {
         univariate_size: usize,
     ) where
         Standard: Distribution<M::Source> + Distribution<M::Target>,
+        M::Source: ProverMessage,
     {
         let config = ProtocolConfig::<M>::derive(Params {
             bits: 80,
@@ -564,7 +552,7 @@ mod tests {
                 for (&point, row) in evaluations
                     .points
                     .iter()
-                    .zip(evaluations.matrix.to_slice().chunks_exact(2))
+                    .zip(evaluations.matrix.to_slice().as_chunks::<2>().0)
                 {
                     assert_eq!(row[0], univariate_evaluate(coefficients, point));
                     assert_eq!(

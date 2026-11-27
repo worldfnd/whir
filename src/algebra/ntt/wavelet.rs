@@ -35,12 +35,12 @@ pub fn inverse_wavelet_transform_batch<F: Field>(values: &mut [F], size: usize) 
     match size {
         0 | 1 => {}
         2 => {
-            for v in values.chunks_exact_mut(2) {
+            for v in values.as_chunks_mut::<2>().0 {
                 v[1] -= v[0];
             }
         }
         4 => {
-            for v in values.chunks_exact_mut(4) {
+            for v in values.as_chunks_mut::<4>().0 {
                 v[3] -= v[1];
                 v[2] -= v[0];
                 v[3] -= v[2];
@@ -71,12 +71,12 @@ pub fn wavelet_transform_batch<F: Field>(values: &mut [F], size: usize) {
     match size {
         0 | 1 => {}
         2 => {
-            for v in values.chunks_exact_mut(2) {
+            for v in values.as_chunks_mut::<2>().0 {
                 v[1] += v[0];
             }
         }
         4 => {
-            for v in values.chunks_exact_mut(4) {
+            for v in values.as_chunks_mut::<4>().0 {
                 v[1] += v[0];
                 v[3] += v[2];
                 v[2] += v[0];
@@ -84,7 +84,7 @@ pub fn wavelet_transform_batch<F: Field>(values: &mut [F], size: usize) {
             }
         }
         8 => {
-            for v in values.chunks_exact_mut(8) {
+            for v in values.as_chunks_mut::<8>().0 {
                 v[1] += v[0];
                 v[3] += v[2];
                 v[2] += v[0];
@@ -100,8 +100,8 @@ pub fn wavelet_transform_batch<F: Field>(values: &mut [F], size: usize) {
             }
         }
         16 => {
-            for v in values.chunks_exact_mut(16) {
-                for v in v.chunks_exact_mut(4) {
+            for v in values.as_chunks_mut::<16>().0 {
+                for v in v.as_chunks_mut::<4>().0 {
                     v[1] += v[0];
                     v[3] += v[2];
                     v[2] += v[0];

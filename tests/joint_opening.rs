@@ -13,7 +13,8 @@ use whir::{
     buffer::Buffer,
     hash::Hash,
     transcript::{
-        codecs::U64, Codec, DomainSeparator, Proof, ProverState, VerifierMessage, VerifierState,
+        codecs::U64, Codec, DomainSeparator, Proof, ProverMessage, ProverState, VerifierMessage,
+        VerifierState,
     },
     DecodingRegime, JointOpeningConfig, Mode, Params, ProverClaim, RateSchedule,
 };
@@ -45,6 +46,7 @@ fn example<M>(config: JointOpeningConfig<M>) -> Example<M>
 where
     M: Embedding + Default,
     M::Target: Codec,
+    M::Source: ProverMessage,
     Standard: Distribution<M::Source> + Distribution<M::Target>,
 {
     let n = config.witness_commitment().vector_size();
@@ -86,6 +88,7 @@ fn verify<M>(example: &Example<M>, observe_header: bool) -> Result<(), ()>
 where
     M: Embedding + Default,
     M::Target: Codec,
+    M::Source: ProverMessage,
     Standard: Distribution<M::Target>,
 {
     let ds = DomainSeparator::protocol(&example.config).instance(b"joint-two-sparse-forms");

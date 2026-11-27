@@ -13,14 +13,13 @@ use crate::{
         linear_form::{evaluate_padded, LinearForm},
         multilinear_extend, univariate_evaluate,
     },
-    hash::Hash,
     protocols::{
         basecase::Opening,
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig},
     },
     transcript::{
-        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, VerificationResult,
-        VerifierMessage, VerifierState,
+        Codec, DuplexSpongeInterface, ProverMessage, VerificationResult, VerifierMessage,
+        VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -92,13 +91,10 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         evaluations: &[M::Target],
     ) -> VerificationResult<FinalClaim<M::Target>>
     where
-        M::Target: Codec<[H::U]>,
+        M::Target: Codec,
+        M::Source: ProverMessage,
         Standard: Distribution<M::Target>,
-        H: DuplexSpongeInterface,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        H: DuplexSpongeInterface<U = u8>,
     {
         let reduced = reduce_verifier(self, vs, commitment, linear_forms, evaluations, None)?;
         self.verify_final_opening(vs, reduced)
@@ -110,12 +106,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         state: VerifierRoundState<'_, M::Target>,
     ) -> VerificationResult<FinalClaim<M::Target>>
     where
-        M::Target: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        u8: Decoding<[H::U]>,
-        [u8; 32]: Decoding<[H::U]>,
-        U64: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
+        H: DuplexSpongeInterface<U = u8>,
     {
         let basecase = self.basecase();
         let opening = if self.params().mode.is_zk() {
@@ -144,10 +136,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         state: &VerifierRoundState<'_, M::Target>,
     ) -> VerificationResult<(Vec<M::Target>, M::Target)>
     where
-        M::Target: Codec<[H::U]>,
-        H: DuplexSpongeInterface,
-        u8: Decoding<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec,
+        H: DuplexSpongeInterface<U = u8>,
     {
         let (Some(layout), Some(masks)) = (self.joint_masks(), state.masks.as_ref()) else {
             panic!("final opening requires the joint mask commitment");
@@ -196,10 +186,8 @@ fn verify_combination<F, H>(
     weights: &[F],
 ) -> VerificationResult<()>
 where
-    F: Field + Codec<[H::U]>,
-    H: DuplexSpongeInterface,
-    u8: Decoding<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
+    F: Field + Codec,
+    H: DuplexSpongeInterface<U = u8>,
 {
     assert_eq!(config.interleaving_depth(), 1);
     assert_eq!(config.num_messages() * commitments.len(), weights.len());
